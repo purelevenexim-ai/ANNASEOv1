@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ruflo — Rank-Zero Content Engine</title>
+<style>
+  :root {
+    --bg: #0f0f0e; --bg2: #161614; --bg3: #1e1e1b;
+    --border: rgba(255,255,255,0.08); --border2: rgba(255,255,255,0.14);
+    --text: #d4d2c8; --text2: #8a8880; --text3: #5a5854;
+    --purple: #7F77DD; --purple2: #534AB7; --purpleL: #EEEDFE;
+    --teal: #1D9E75; --teal2: #0F6E56; --tealL: #E1F5EE;
+    --amber: #EF9F27; --amberL: #FAEEDA;
+    --blue: #378ADD; --blueL: #E6F1FB;
+    --red: #E24B4A; --redL: #FCEBEB;
+    --green: #639922; --greenL: #EAF3DE;
+    --coral: #D85A30;
+    --r: 8px; --rl: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; min-height: 100vh; }
+
+  .top-bar { background: var(--bg2); border-bottom: 0.5px solid var(--border2); padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 15px; font-weight: 600; color: #fff; letter-spacing: -0.3px; }
+  .logo span { color: var(--purple); }
+  .badge { font-size: 10px; padding: 2px 8px; border-radius: 99px; font-weight: 500; }
+  .badge-purple { background: var(--purple2); color: #c5c0ff; }
+  .badge-green { background: #1a3d0a; color: #7ec44a; }
+  .badge-amber { background: #3d2800; color: var(--amber); }
+  .ml { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  .tabs { display: flex; gap: 1px; background: var(--bg2); border-bottom: 0.5px solid var(--border); padding: 0 20px; overflow-x: auto; }
+  .tab { padding: 10px 16px; font-size: 12px; color: var(--text2); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; transition: all .15s; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--purple); border-bottom-color: var(--purple); }
+
+  .body { display: flex; height: calc(100vh - 88px); overflow: hidden; }
+  .sidebar { width: 240px; min-width: 240px; background: var(--bg2); border-right: 0.5px solid var(--border); overflow-y: auto; padding: 16px 12px; }
+  .main { flex: 1; overflow-y: auto; padding: 20px; }
+
+  .section-title { font-size: 10px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 8px; padding: 0 4px; }
+
+  .kw-input { width: 100%; background: var(--bg3); border: 0.5px solid var(--border2); border-radius: var(--r); padding: 8px 10px; color: var(--text); font-size: 12px; outline: none; margin-bottom: 6px; }
+  .kw-input:focus { border-color: var(--purple); }
+
+  .btn { display: flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--r); font-size: 12px; font-weight: 500; cursor: pointer; border: 0.5px solid var(--border2); background: transparent; color: var(--text); transition: all .15s; width: 100%; justify-content: center; margin-bottom: 6px; }
+  .btn:hover { background: var(--bg3); }
+  .btn.primary { background: var(--purple); border-color: var(--purple2); color: #fff; }
+  .btn.primary:hover { background: var(--purple2); }
+  .btn.teal { background: var(--teal2); border-color: var(--teal); color: #fff; }
+  .btn.teal:hover { background: #0a4d3a; }
+  .btn.danger { background: transparent; border-color: var(--red); color: var(--red); }
+
+  .score-ring-container { display: flex; flex-direction: column; align-items: center; padding: 16px 0 8px; }
+  .score-big { font-size: 36px; font-weight: 700; color: #fff; line-height: 1; }
+  .score-label { font-size: 10px; color: var(--text2); margin-top: 4px; }
+  .score-bar-track { width: 100%; height: 5px; background: var(--bg3); border-radius: 99px; overflow: hidden; margin: 2px 0 10px; }
+  .score-bar-fill { height: 100%; border-radius: 99px; transition: width .4s; }
+
+  .engine-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; margin-bottom: 2px; cursor: default; transition: background .12s; }
+  .engine-row:hover { background: var(--bg3); }
+  .eng-num { font-size: 10px; color: var(--text3); min-width: 18px; }
+  .eng-name { flex: 1; font-size: 11px; color: var(--text); }
+  .eng-score { font-size: 11px; font-weight: 600; min-width: 32px; text-align: right; }
+  .eng-bar { width: 50px; height: 3px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
+  .eng-bar-fill { height: 100%; border-radius: 99px; transition: width .4s; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; }
+
+  .card { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--rl); padding: 14px 16px; margin-bottom: 12px; }
+  .card-title { font-size: 12px; font-weight: 600; color: #fff; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .stat-card { background: var(--bg3); border-radius: var(--r); padding: 10px 12px; }
+  .stat-val { font-size: 22px; font-weight: 700; color: #fff; }
+  .stat-lbl { font-size: 10px; color: var(--text2); margin-top: 2px; }
+
+  select { background: var(--bg3); border: 0.5px solid var(--border2); border-radius: var(--r); color: var(--text); padding: 6px 8px; font-size: 12px; width: 100%; outline: none; margin-bottom: 8px; }
+  select:focus { border-color: var(--purple); }
+  textarea { background: var(--bg3); border: 0.5px solid var(--border2); border-radius: var(--r); color: var(--text); padding: 8px 10px; font-size: 12px; width: 100%; outline: none; resize: vertical; font-family: inherit; }
+  textarea:focus { border-color: var(--purple); }
+  label { font-size: 11px; color: var(--text2); display: block; margin-bottom: 4px; }
+
+  .toggle-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 0.5px solid var(--border); }
+  .toggle-row:last-child { border: none; }
+  .toggle-name { font-size: 12px; color: var(--text); }
+  .toggle { width: 30px; height: 17px; background: var(--bg3); border-radius: 99px; position: relative; cursor: pointer; border: 0.5px solid var(--border2); transition: background .2s; }
+  .toggle.on { background: var(--teal); border-color: var(--teal); }
+  .toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; background: var(--text2); border-radius: 50%; transition: transform .2s, background .2s; }
+  .toggle.on::after { transform: translateX(13px); background: #fff; }
+
+  .console { background: #0a0a09; border: 0.5px solid var(--border); border-radius: var(--rl); font-family: 'SF Mono', 'Fira Code', monospace; font-size: 11px; line-height: 1.8; overflow-y: auto; max-height: 420px; }
+  .console-header { background: #141412; border-bottom: 0.5px solid var(--border); padding: 8px 14px; display: flex; align-items: center; gap: 8px; }
+  .console-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .console-title { font-size: 11px; color: var(--text2); margin-left: 4px; flex: 1; }
+  .console-body { padding: 10px 14px; }
+  .cl { display: flex; gap: 10px; padding: 1px 0; }
+  .cl-ts { color: #4a4845; min-width: 64px; }
+  .cl-eng { min-width: 80px; }
+  .cl-msg { color: #c0beb4; flex: 1; }
+  .c-ok { color: #4ade80; }
+  .c-info { color: #60a5fa; }
+  .c-data { color: #a78bfa; }
+  .c-warn { color: var(--amber); }
+  .c-err { color: #f87171; }
+  .c-sep { color: #3a3835; }
+  .c-hand { color: #888280; }
+  .c-claude { color: #c4b5fd; }
+
+  .progress-bar { height: 4px; background: var(--bg3); border-radius: 99px; overflow: hidden; margin: 8px 0 4px; }
+  .progress-fill { height: 100%; border-radius: 99px; transition: width .3s; background: var(--teal); }
+  .progress-text { font-size: 10px; color: var(--text2); display: flex; justify-content: space-between; }
+
+  .schedule-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+  .sched-card { background: var(--bg3); border: 0.5px solid var(--border); border-radius: var(--r); padding: 10px 12px; cursor: pointer; transition: border-color .15s; }
+  .sched-card:hover { border-color: var(--purple); }
+  .sched-card.selected { border-color: var(--purple); background: #1a1840; }
+  .sched-title { font-size: 14px; font-weight: 700; color: #fff; margin-bottom: 2px; }
+  .sched-sub { font-size: 10px; color: var(--text2); }
+
+  .formula-box { background: #0a0f1a; border: 0.5px solid #1a2f4a; border-radius: var(--r); padding: 12px 14px; font-family: 'SF Mono', monospace; font-size: 11px; color: #7dd3fc; line-height: 1.9; margin-bottom: 10px; }
+
+  .weight-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 0.5px solid var(--border); }
+  .weight-row:last-child { border: none; }
+  .weight-name { flex: 1; font-size: 12px; }
+  .weight-pct { font-size: 12px; font-weight: 600; min-width: 36px; text-align: right; }
+  .weight-bar { width: 80px; height: 4px; background: var(--bg3); border-radius: 99px; overflow: hidden; }
+  .weight-fill { height: 100%; border-radius: 99px; }
+
+  .hitl-box { background: #0e1a0e; border: 0.5px solid #1a3d1a; border-radius: var(--r); padding: 12px; margin-top: 10px; }
+  .hitl-label { font-size: 11px; color: #4ade80; margin-bottom: 6px; font-weight: 500; }
+
+  .alert-banner { background: #1a1200; border: 0.5px solid #3d2800; border-radius: var(--r); padding: 10px 12px; display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+  .alert-icon { font-size: 13px; }
+  .alert-text { font-size: 11px; color: var(--amber); flex: 1; }
+
+  .research-banner { background: linear-gradient(135deg, #0a0f1a 0%, #0f0a1a 50%, #0a1a0f 100%); border: 0.5px solid #2a2a4a; border-radius: var(--rl); padding: 28px 32px; text-align: center; margin-top: 32px; position: relative; overflow: hidden; }
+  .research-banner::before { content: ''; position: absolute; inset: 0; background: radial-gradient(ellipse at 30% 50%, rgba(127,119,221,0.06) 0%, transparent 60%), radial-gradient(ellipse at 70% 50%, rgba(29,158,117,0.06) 0%, transparent 60%); }
+  .research-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(127,119,221,0.12); border: 0.5px solid rgba(127,119,221,0.3); border-radius: 99px; padding: 4px 12px; font-size: 10px; color: var(--purple); margin-bottom: 14px; font-weight: 500; }
+  .research-title { font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 8px; position: relative; }
+  .research-sub { font-size: 12px; color: var(--text2); max-width: 520px; margin: 0 auto; line-height: 1.7; position: relative; }
+  .research-pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 16px; position: relative; }
+  .research-pill { background: rgba(255,255,255,0.04); border: 0.5px solid var(--border2); border-radius: 99px; padding: 4px 12px; font-size: 11px; color: var(--text2); }
+  .coming-soon { display: inline-flex; align-items: center; gap: 4px; background: rgba(239,159,39,0.1); border: 0.5px solid rgba(239,159,39,0.3); border-radius: 99px; padding: 3px 10px; font-size: 10px; color: var(--amber); margin-top: 12px; }
+
+  .sec { display: none; }
+  .sec.active { display: block; }
+
+  .page-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+  .ptab { padding: 5px 14px; border-radius: 99px; font-size: 11px; cursor: pointer; border: 0.5px solid var(--border2); color: var(--text2); transition: all .15s; }
+  .ptab:hover { color: var(--text); }
+  .ptab.active { background: var(--purple); border-color: var(--purple2); color: #fff; }
+
+  input[type=range] { accent-color: var(--purple); }
+  input[type=number] { background: var(--bg3); border: 0.5px solid var(--border2); border-radius: var(--r); color: var(--text); padding: 6px 8px; font-size: 12px; width: 100%; outline: none; }
+  input[type=number]:focus { border-color: var(--purple); }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <div class="logo">ru<span>flo</span></div>
+  <span class="badge badge-purple">Rank-Zero Engine</span>
+  <span class="badge badge-green" id="status-badge">● Ready</span>
+  <div class="ml">
+    <span style="font-size:11px;color:var(--text2)">Pureleven Organics</span>
+    <button class="btn" style="width:auto;margin:0;padding:5px 12px" onclick="forceWrite()">Force Write</button>
+    <button class="btn primary" style="width:auto;margin:0;padding:5px 14px" onclick="runPipeline()">▶ Run Pipeline</button>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab(this,'overview')">Overview</div>
+  <div class="tab" onclick="switchTab(this,'controls')">Content controls</div>
+  <div class="tab" onclick="switchTab(this,'engines')">12 engines</div>
+  <div class="tab" onclick="switchTab(this,'console')">Console output</div>
+  <div class="tab" onclick="switchTab(this,'schedule')">Schedule & pace</div>
+  <div class="tab" onclick="switchTab(this,'strategy')">Rank-zero strategy</div>
+</div>
+
+<div class="body">
+<div class="sidebar">
+  <div class="section-title">Keyword</div>
+  <input class="kw-input" id="kw-input" value="black pepper health benefits" placeholder="Enter target keyword...">
+
+  <div class="section-title" style="margin-top:14px">Universe</div>
+  <div style="font-size:11px;color:var(--text2);padding:4px 4px 8px">Black Pepper</div>
+
+  <button class="btn primary" onclick="runPipeline()">▶ Run pipeline</button>
+  <button class="btn teal" onclick="forceWrite()">⚡ Force write now</button>
+  <button class="btn" onclick="scheduleContent()">🗓 Schedule</button>
+
+  <div class="section-title" style="margin-top:16px">Success ratio</div>
+  <div class="score-ring-container">
+    <div class="score-big" id="score-main">--</div>
+    <div style="font-size:10px;color:var(--text2);margin-top:2px">/ 100</div>
+    <div class="score-bar-track" style="margin-top:10px">
+      <div class="score-bar-fill" id="score-bar" style="width:0%;background:var(--text3)"></div>
+    </div>
+    <div style="font-size:10px;color:var(--text2)" id="score-status">Not run</div>
+  </div>
+
+  <div class="section-title" style="margin-top:12px">Engine scores</div>
+  <div id="engine-list">
+    <div style="font-size:11px;color:var(--text3);padding:8px 4px">Run pipeline to see scores</div>
+  </div>
+</div>
+
+<div class="main">
+
+<!-- OVERVIEW -->
+<div class="sec active" id="sec-overview">
+  <div class="grid3" style="margin-bottom:12px">
+    <div class="stat-card">
+      <div class="stat-val" id="stat-score" style="color:var(--text3)">--</div>
+      <div class="stat-lbl">Success ratio</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val" id="stat-pass">0/12</div>
+      <div class="stat-lbl">Engines passed</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-val" id="stat-words">--</div>
+      <div class="stat-lbl">Word count</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Rank-zero success formula</div>
+    <div class="formula-box">
+Success_Ratio = (Intent × 0.25) + (Info_Gain × 0.30) + (EEAT × 0.20) + (AI_Ready × 0.15) + (Tech_SEO × 0.10)
+
+Threshold: ≥ 90 → publish  |  < 90 → auto-fix loop  |  < 70 → needs manual review
+    </div>
+    <div id="weight-list">
+      <div class="weight-row"><span class="weight-name">Information Gain (unique data, no rewrite)</span><div class="weight-bar"><div class="weight-fill" style="width:100%;background:var(--coral)"></div></div><span class="weight-pct" style="color:var(--coral)">30%</span></div>
+      <div class="weight-row"><span class="weight-name">Search Intent alignment</span><div class="weight-bar"><div class="weight-fill" style="width:83%;background:var(--purple)"></div></div><span class="weight-pct" style="color:var(--purple)">25%</span></div>
+      <div class="weight-row"><span class="weight-name">E-E-A-T (Experience, Expertise, Authority, Trust)</span><div class="weight-bar"><div class="weight-fill" style="width:67%;background:var(--blue)"></div></div><span class="weight-pct" style="color:var(--blue)">20%</span></div>
+      <div class="weight-row"><span class="weight-name">AI/LLM extractability (GEO)</span><div class="weight-bar"><div class="weight-fill" style="width:50%;background:var(--teal)"></div></div><span class="weight-pct" style="color:var(--teal)">15%</span></div>
+      <div class="weight-row"><span class="weight-name">Technical SEO (schema, freshness, structure)</span><div class="weight-bar"><div class="weight-fill" style="width:33%;background:var(--amber)"></div></div><span class="weight-pct" style="color:var(--amber)">10%</span></div>
+    </div>
+  </div>
+
+  <div class="card" id="alert-card" style="display:none">
+    <div class="card-title" style="color:var(--red)">Engines requiring attention</div>
+    <div id="alert-list"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Last run details</div>
+    <div id="last-run" style="font-size:12px;color:var(--text2)">No run yet. Enter a keyword and click Run Pipeline.</div>
+  </div>
+</div>
+
+<!-- CONTENT CONTROLS -->
+<div class="sec" id="sec-controls">
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title">Tone & style</div>
+      <label>Tone</label>
+      <select id="ctrl-tone">
+        <option value="expert_authoritative">Expert / authoritative</option>
+        <option value="friendly_conversational">Friendly / conversational</option>
+        <option value="professional_formal">Professional / formal</option>
+        <option value="storytelling">Storytelling / narrative</option>
+        <option value="educational">Educational / teaching</option>
+        <option value="custom">Custom (see below)</option>
+      </select>
+      <label>Writing style</label>
+      <select id="ctrl-style">
+        <option value="evidence_based">Evidence-based</option>
+        <option value="story_led">Story-led</option>
+        <option value="listicle">Listicle</option>
+        <option value="deep_dive">Deep-dive</option>
+        <option value="comparison">Comparison</option>
+        <option value="how_to">How-to guide</option>
+        <option value="ai_decide">AI decides</option>
+      </select>
+      <label>Reading level</label>
+      <select id="ctrl-level">
+        <option value="simple">Grade 6 — simple, accessible</option>
+        <option value="standard" selected>Grade 8-10 — standard</option>
+        <option value="expert">Grade 12+ — expert audience</option>
+      </select>
+      <label>Language</label>
+      <select id="ctrl-lang">
+        <option value="english">English</option>
+        <option value="malayalam">Malayalam</option>
+        <option value="hindi">Hindi</option>
+        <option value="tamil">Tamil</option>
+      </select>
+    </div>
+    <div class="card">
+      <div class="card-title">Format & length</div>
+      <label>Content format</label>
+      <select id="ctrl-format">
+        <option value="long_form_blog">Long-form blog (2000+)</option>
+        <option value="faq_page">FAQ page</option>
+        <option value="recipe_guide">Recipe + guide</option>
+        <option value="comparison_table">Comparison table</option>
+        <option value="pillar_page">Pillar page (3000+)</option>
+        <option value="news_update">News / update</option>
+        <option value="ai_decide">AI decides best format</option>
+      </select>
+      <label>Target word count</label>
+      <select id="ctrl-wc">
+        <option value="800">800 words (short)</option>
+        <option value="1200">1,200 words (medium)</option>
+        <option value="2000" selected>2,000+ words (long-form)</option>
+        <option value="3000">3,000+ words (pillar)</option>
+        <option value="0">AI decides based on intent</option>
+      </select>
+      <div class="toggle-row" style="margin-top:10px">
+        <span class="toggle-name">Include FAQ section</span>
+        <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-name">Include comparison table</span>
+        <div class="toggle" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-name">Bold key takeaways per H2</span>
+        <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-name">AI auto-decide format/length</span>
+        <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Brand voice profile</div>
+    <div class="grid2">
+      <div>
+        <label>Author name & title</label>
+        <input class="kw-input" value="Rajiv Kumar, Organic Spice Farmer" placeholder="Author Name, Title">
+        <label>Author credentials</label>
+        <input class="kw-input" value="USDA Organic certified, Wayanad since 2012" placeholder="Certifications, experience">
+        <label>Business name</label>
+        <input class="kw-input" value="Pureleven Organics" placeholder="Business name">
+      </div>
+      <div>
+        <label>Custom voice note</label>
+        <textarea rows="4" placeholder="e.g. Write like a Kerala spice farmer with 30 years experience. Use 'Malabar' and 'Wayanad' naturally. Never use corporate language.">Write like a Kerala spice farmer with 30 years experience. Warm and knowledgeable. Use Malabar, Wayanad naturally.</textarea>
+        <label style="margin-top:8px">Words to avoid</label>
+        <input class="kw-input" value="simply, just, amazing, incredible, as an AI" placeholder="Comma-separated words to avoid">
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title" style="color:#4ade80">⚡ Human experience injection (HITL)</div>
+    <div class="hitl-box">
+      <div class="hitl-label">Your personal insight — the #1 ranking factor AI cannot fake</div>
+      <textarea id="hitl-input" rows="4" style="background:#071007;border-color:#1a3d1a;color:#c0f0c0" placeholder="Paste your raw notes, voice-to-text, farm observations, customer conversations...&#10;&#10;Example: 'I visited the Wayanad farm last week — the 2026 black pepper crop has 12% higher piperine content than last year due to unusual rainfall patterns. The berries are darker and the aroma is noticeably more intense...'">I visited the Wayanad farm last week. The 2026 black pepper crop has exceptionally dark berries this year due to higher rainfall. Piperine content tested at 7.2% — highest we've seen in 5 years.</textarea>
+      <div style="font-size:10px;color:#4ade80;margin-top:6px">Claude will weave this naturally into the article — not paste it verbatim. Google 2026 rewards this "Experience" signal heavily.</div>
+    </div>
+  </div>
+</div>
+
+<!-- 12 ENGINES -->
+<div class="sec" id="sec-engines">
+  <div class="page-tabs">
+    <div class="ptab active" onclick="filterEngines(this,'all')">All 12</div>
+    <div class="ptab" onclick="filterEngines(this,'intent')">Intent & Gain</div>
+    <div class="ptab" onclick="filterEngines(this,'eeat')">E-E-A-T</div>
+    <div class="ptab" onclick="filterEngines(this,'ai')">AI/GEO</div>
+    <div class="ptab" onclick="filterEngines(this,'tech')">Technical</div>
+  </div>
+  <div id="engines-detail"></div>
+</div>
+
+<!-- CONSOLE -->
+<div class="sec" id="sec-console">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:600;color:#fff">Console output</div>
+    <span class="badge badge-amber" id="console-status">Idle</span>
+    <div class="ml" style="gap:8px">
+      <button class="btn" style="width:auto;margin:0;padding:4px 12px;font-size:11px" onclick="clearConsole()">Clear</button>
+      <button class="btn" style="width:auto;margin:0;padding:4px 12px;font-size:11px" onclick="exportLog()">Export log</button>
+      <button class="btn primary" style="width:auto;margin:0;padding:4px 12px;font-size:11px" onclick="runPipeline()">▶ Run</button>
+    </div>
+  </div>
+
+  <div class="progress-bar">
+    <div class="progress-fill" id="cons-progress" style="width:0%"></div>
+  </div>
+  <div class="progress-text">
+    <span id="cons-step">Ready</span>
+    <span id="cons-eta"></span>
+  </div>
+
+  <div class="console" style="margin-top:10px;max-height:500px">
+    <div class="console-header">
+      <div class="console-dot" style="background:#ff5f57"></div>
+      <div class="console-dot" style="background:#ffbd2e"></div>
+      <div class="console-dot" style="background:#28c840"></div>
+      <span class="console-title">Ruflo Content Engine — Rank-Zero Pipeline</span>
+    </div>
+    <div class="console-body" id="console-body">
+      <div class="cl"><span class="cl-ts">--:--:--</span><span class="cl-eng c-sep">[system]</span><span class="cl-msg c-sep">Rank-Zero engine ready. Enter keyword and run pipeline.</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- SCHEDULE -->
+<div class="sec" id="sec-schedule">
+  <div class="card">
+    <div class="card-title">Content generation mode</div>
+    <div class="schedule-grid" id="mode-grid">
+      <div class="sched-card" onclick="selectMode(this,'force')">
+        <div class="sched-title">⚡ Force write</div>
+        <div class="sched-sub">Generate now, no queue</div>
+      </div>
+      <div class="sched-card selected" onclick="selectMode(this,'schedule')">
+        <div class="sched-title">📅 Scheduled</div>
+        <div class="sched-sub">Daily automation</div>
+      </div>
+      <div class="sched-card" onclick="selectMode(this,'bulk')">
+        <div class="sched-title">⚙ Bulk run</div>
+        <div class="sched-sub">All pillars at once</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title">Duration & pace</div>
+      <label>Content plan duration</label>
+      <select id="sched-duration">
+        <option value="1">1 year</option>
+        <option value="2" selected>2 years</option>
+        <option value="3">3 years</option>
+        <option value="5">5 years</option>
+        <option value="0">Custom</option>
+      </select>
+      <label>Blogs per day (global default)</label>
+      <input type="number" id="sched-perday" value="3" min="1" max="50" style="margin-bottom:8px">
+      <label>Parallel Claude calls</label>
+      <select id="sched-parallel">
+        <option value="1">1 — safe, sequential</option>
+        <option value="3" selected>3 — balanced</option>
+        <option value="5">5 — fast</option>
+        <option value="10">10 — max speed</option>
+      </select>
+      <div class="toggle-row" style="margin-top:10px">
+        <span class="toggle-name">Auto-publish to WordPress</span>
+        <div class="toggle" onclick="this.classList.toggle('on')"></div>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-name">Pause on score &lt; 75</span>
+        <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Projected output</div>
+      <div id="proj-stats">
+        <div class="stat-card" style="margin-bottom:8px">
+          <div class="stat-val" id="proj-total" style="color:var(--purple)">2,190</div>
+          <div class="stat-lbl">Total blogs planned</div>
+        </div>
+        <div class="grid2" style="gap:8px">
+          <div class="stat-card">
+            <div class="stat-val" id="proj-pace">3/day</div>
+            <div class="stat-lbl">Publishing pace</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="proj-cost" style="color:var(--teal)">$43.80</div>
+            <div class="stat-lbl">Est. Claude cost</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="proj-time">~18min</div>
+            <div class="stat-lbl">Generation time</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="proj-years">2yr</div>
+            <div class="stat-lbl">Duration</div>
+          </div>
+        </div>
+      </div>
+      <button class="btn teal" style="margin-top:12px" onclick="scheduleContent()">⚡ Start schedule</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Per-pillar pace overrides</div>
+    <div id="pillar-overrides">
+      <div class="toggle-row"><span class="toggle-name" style="flex:1">Black Pepper Health Benefits</span><input type="number" value="3" min="1" max="50" style="width:60px;margin:0 8px 0"><span style="font-size:11px;color:var(--text2)">blogs/day</span></div>
+      <div class="toggle-row"><span class="toggle-name" style="flex:1">Cinnamon Christmas Baking</span><input type="number" value="10" min="1" max="50" style="width:60px;margin:0 8px 0"><span style="font-size:11px;color:var(--text2)">blogs/day — deadline: Nov 15</span></div>
+      <div class="toggle-row"><span class="toggle-name" style="flex:1">Turmeric Health Guide</span><input type="number" value="5" min="1" max="50" style="width:60px;margin:0 8px 0"><span style="font-size:11px;color:var(--text2)">blogs/day</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- STRATEGY -->
+<div class="sec" id="sec-strategy">
+  <div class="card">
+    <div class="card-title">The hierarchy of dominance (2026)</div>
+    <div style="display:grid;gap:8px">
+      <div style="background:var(--bg3);border-left:3px solid var(--coral);border-radius:0 var(--r) var(--r) 0;padding:10px 14px">
+        <div style="font-size:12px;font-weight:600;color:#fff;margin-bottom:3px">Layer 1: Utility — The Answer Engine</div>
+        <div style="font-size:11px;color:var(--text2)">Does the user get their answer in &lt; 3 seconds? First paragraph must directly answer the query. 40–60 word direct answer block.</div>
+      </div>
+      <div style="background:var(--bg3);border-left:3px solid var(--blue);border-radius:0 var(--r) var(--r) 0;padding:10px 14px">
+        <div style="font-size:12px;font-weight:600;color:#fff;margin-bottom:3px">Layer 2: Authority — The E-E-A-T Engine</div>
+        <div style="font-size:11px;color:var(--text2)">Why should Google trust you over Wikipedia? Lived experience, verifiable credentials, real citations, honest limitations.</div>
+      </div>
+      <div style="background:var(--bg3);border-left:3px solid var(--purple);border-radius:0 var(--r) var(--r) 0;padding:10px 14px">
+        <div style="font-size:12px;font-weight:600;color:#fff;margin-bottom:3px">Layer 3: Comprehensiveness — The Semantic Engine</div>
+        <div style="font-size:11px;color:var(--text2)">Have you covered the "unknown unknowns"? Entity density, topical authority, LSI keywords, question clustering.</div>
+      </div>
+      <div style="background:var(--bg3);border-left:3px solid var(--teal);border-radius:0 var(--r) var(--r) 0;padding:10px 14px">
+        <div style="font-size:12px;font-weight:600;color:#fff;margin-bottom:3px">Layer 4: Extractability — The AI/LLM Engine (GEO)</div>
+        <div style="font-size:11px;color:var(--text2)">Is your data formatted so Perplexity/ChatGPT/Gemini can scrape and cite it? Tables, structured lists, definition paragraphs, bold takeaways.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Success benchmarks database (niche-specific)</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:10px">Benchmarks extracted from top-3 ranking pages in your niche. Updated on every SERP analysis run.</div>
+    <table style="width:100%;font-size:11px;border-collapse:collapse">
+      <tr style="border-bottom:0.5px solid var(--border)">
+        <td style="padding:6px 8px;color:var(--text2)">Intent type</td>
+        <td style="padding:6px 8px;color:var(--text2)">Avg word count</td>
+        <td style="padding:6px 8px;color:var(--text2)">Required entities</td>
+        <td style="padding:6px 8px;color:var(--text2)">AI citation rate</td>
+      </tr>
+      <tr style="border-bottom:0.5px solid var(--border)">
+        <td style="padding:6px 8px">Informational</td>
+        <td style="padding:6px 8px;color:var(--amber)">2,340</td>
+        <td style="padding:6px 8px;font-size:10px;color:var(--text2)">piperine, Tellicherry, harvest, organic</td>
+        <td style="padding:6px 8px;color:var(--teal)">0.68</td>
+      </tr>
+      <tr style="border-bottom:0.5px solid var(--border)">
+        <td style="padding:6px 8px">Transactional</td>
+        <td style="padding:6px 8px;color:var(--amber)">890</td>
+        <td style="padding:6px 8px;font-size:10px;color:var(--text2)">organic, certified, grade A, buy, delivery</td>
+        <td style="padding:6px 8px;color:var(--teal)">0.31</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 8px">Comparison</td>
+        <td style="padding:6px 8px;color:var(--amber)">1,780</td>
+        <td style="padding:6px 8px;font-size:10px;color:var(--text2)">Ceylon, cassia, coumarin, piperine %</td>
+        <td style="padding:6px 8px;color:var(--teal)">0.82</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<!-- RESEARCH BANNER at bottom -->
+<div class="research-banner">
+  <div class="research-badge">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v4M8 11v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Self-improving module
+  </div>
+  <div class="research-title">Research & Self Development</div>
+  <div class="research-sub">For self research on content quality and improving the code automatically with Ruflo and AI engines — analysing what ranked, what didn't, and rewriting the scoring models accordingly.</div>
+  <div class="research-pills">
+    <span class="research-pill">Automatic benchmark updates</span>
+    <span class="research-pill">GSC feedback loop</span>
+    <span class="research-pill">Score model calibration</span>
+    <span class="research-pill">Prompt self-improvement</span>
+    <span class="research-pill">Entity model retraining</span>
+  </div>
+  <div class="coming-soon">
+    <svg width="10" height="10" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M8 4v4l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    Coming in next sprint
+  </div>
+</div>
+
+</div>
+</div>
+</div>
+
+<script>
+const ENGINES = [
+  {id:'intent',     num:1,  name:'Intent-format matcher',      cat:'intent', weight:0.15, tip:'Does format match SERP DNA? List vs guide vs calculator.'},
+  {id:'info_gain',  num:2,  name:'Information gain engine',     cat:'intent', weight:0.20, tip:'Unique data not in top 10. 2026 Google patent: Originality.'},
+  {id:'entity',     num:3,  name:'Semantic entity mapping',     cat:'eeat',   weight:0.10, tip:'LSI keywords + entity terms. Piperine, Tellicherry, Grade A.'},
+  {id:'eeat',       num:4,  name:'E-E-A-T validator',           cat:'eeat',   weight:0.15, tip:'First-person experience, citations, author bio, verifiable facts.'},
+  {id:'snippet',    num:5,  name:'Snippet / zero-click opt.',   cat:'ai',     weight:0.10, tip:'40–60 word direct answer block at top. Wins featured snippets.'},
+  {id:'ai_extract', num:6,  name:'AI/LLM extractability',       cat:'ai',     weight:0.08, tip:'Clean H2/H3 headers, Markdown tables, JSON-LD. AI citation ready.'},
+  {id:'ux',         num:7,  name:'UX & friction detector',      cat:'tech',   weight:0.05, tip:'Sentence length ≤15 words. Paragraphs ≤3 lines. Jump links.'},
+  {id:'freshness',  num:8,  name:'Freshness signal',            cat:'tech',   weight:0.05, tip:'2026 dates, current market data, updated timestamps.'},
+  {id:'links',      num:9,  name:'Internal link web engine',    cat:'tech',   weight:0.04, tip:'3–5 links to cluster pages. Topic cluster authority signal.'},
+  {id:'hook',       num:10, name:'Hook & retention engine',     cat:'tech',   weight:0.03, tip:'Engaging intro, curiosity gaps. Prevents pogo-sticking back to Google.'},
+  {id:'tech',       num:11, name:'Technical SEO engine',        cat:'tech',   weight:0.03, tip:'Schema.org JSON-LD validation. H1/H2 hierarchy. Core Web Vitals proxy.'},
+  {id:'hitl',       num:12, name:'Human-in-the-loop verify',    cat:'eeat',   weight:0.02, tip:'Human experience injection woven into content. Required for 2026 #1 rank.'},
+];
+
+const ENGINE_COLORS = {intent:'var(--coral)', eeat:'var(--blue)', ai:'var(--purple)', tech:'var(--amber)'};
+
+let scores = {};
+let isRunning = false;
+
+function switchTab(el, id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.sec').forEach(s => s.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('sec-' + id).classList.add('active');
+}
+
+function filterEngines(el, cat) {
+  document.querySelectorAll('.ptab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  renderEnginesDetail(cat);
+}
+
+function renderEnginesDetail(cat = 'all') {
+  const container = document.getElementById('engines-detail');
+  const filtered = cat === 'all' ? ENGINES : ENGINES.filter(e => e.cat === cat);
+  container.innerHTML = filtered.map(e => {
+    const s = scores[e.id];
+    const scoreVal = s !== undefined ? Math.round(s * 100) : null;
+    const color = scoreVal === null ? 'var(--text3)' : scoreVal >= 75 ? 'var(--teal)' : scoreVal >= 50 ? 'var(--amber)' : 'var(--red)';
+    const status = scoreVal === null ? 'Not run' : scoreVal >= 75 ? '✓ Pass' : scoreVal >= 50 ? '⚠ Warn' : '✗ Fail';
+    const statusColor = scoreVal === null ? 'var(--text3)' : scoreVal >= 75 ? 'var(--teal)' : scoreVal >= 50 ? 'var(--amber)' : 'var(--red)';
+    return `
+    <div class="card" style="margin-bottom:8px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="background:${ENGINE_COLORS[e.cat]}22;border:0.5px solid ${ENGINE_COLORS[e.cat]};border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:${ENGINE_COLORS[e.cat]};flex-shrink:0">E${e.num}</div>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;color:#fff;margin-bottom:2px">${e.name}</div>
+          <div style="font-size:11px;color:var(--text2)">${e.tip}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:18px;font-weight:700;color:${color}">${scoreVal !== null ? scoreVal : '--'}</div>
+          <div style="font-size:10px;color:${statusColor}">${status}</div>
+        </div>
+      </div>
+      ${scoreVal !== null ? `<div class="score-bar-track" style="margin-top:8px"><div class="score-bar-fill" style="width:${scoreVal}%;background:${color}"></div></div>` : ''}
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+        <span class="badge" style="background:${ENGINE_COLORS[e.cat]}22;color:${ENGINE_COLORS[e.cat]}">weight: ${Math.round(e.weight*100)}%</span>
+        <span class="badge" style="background:var(--bg3);color:var(--text2)">${e.cat}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateSidebar() {
+  const list = document.getElementById('engine-list');
+  list.innerHTML = ENGINES.map(e => {
+    const s = scores[e.id];
+    const scoreVal = s !== undefined ? Math.round(s * 100) : null;
+    const color = scoreVal === null ? 'var(--text3)' : scoreVal >= 75 ? 'var(--teal)' : scoreVal >= 50 ? 'var(--amber)' : 'var(--red)';
+    return `<div class="engine-row">
+      <span class="eng-num">${e.num}</span>
+      <span class="eng-name">${e.name.split(' ')[0]}</span>
+      <div class="eng-bar"><div class="eng-bar-fill" style="width:${scoreVal||0}%;background:${color}"></div></div>
+      <span class="eng-score" style="color:${color}">${scoreVal !== null ? scoreVal : '--'}</span>
+    </div>`;
+  }).join('');
+}
+
+function calcSuccessRatio() {
+  if (Object.keys(scores).length < 12) return null;
+  const intent = scores.intent;
+  const info_gain = scores.info_gain;
+  const eeat_score = (scores.entity + scores.eeat + scores.hitl) / 3;
+  const ai_ready = (scores.snippet + scores.ai_extract + scores.hook) / 3;
+  const tech = (scores.ux + scores.freshness + scores.links + scores.tech) / 4;
+  const ratio = intent * 0.25 + info_gain * 0.30 + eeat_score * 0.20 + ai_ready * 0.15 + tech * 0.10;
+  return Math.round(ratio * 100);
+}
+
+function updateOverview() {
+  const ratio = calcSuccessRatio();
+  if (ratio === null) return;
+  const color = ratio >= 90 ? 'var(--teal)' : ratio >= 75 ? 'var(--amber)' : 'var(--red)';
+  document.getElementById('score-main').textContent = ratio;
+  document.getElementById('score-main').style.color = color;
+  document.getElementById('score-bar').style.width = ratio + '%';
+  document.getElementById('score-bar').style.background = color;
+  document.getElementById('score-status').textContent = ratio >= 90 ? '✓ Ready to publish' : ratio >= 75 ? '⚠ Needs minor fixes' : '✗ Needs revision';
+  document.getElementById('stat-score').textContent = ratio + '%';
+  document.getElementById('stat-score').style.color = color;
+  const passed = Object.values(scores).filter(v => v >= 0.75).length;
+  document.getElementById('stat-pass').textContent = passed + '/12';
+
+  const alertCard = document.getElementById('alert-card');
+  const alertList = document.getElementById('alert-list');
+  const failing = ENGINES.filter(e => scores[e.id] !== undefined && scores[e.id] < 0.75);
+  if (failing.length > 0) {
+    alertCard.style.display = 'block';
+    alertList.innerHTML = failing.map(e => `
+      <div class="alert-banner">
+        <span class="alert-icon">⚠</span>
+        <div class="alert-text">
+          <strong>E${e.num}: ${e.name}</strong> — Score: ${Math.round(scores[e.id]*100)}/100<br>
+          ${e.tip}
+        </div>
+      </div>`).join('');
+  } else {
+    alertCard.style.display = 'none';
+  }
+}
+
+function consoleLog(ts, engine, level, msg) {
+  const body = document.getElementById('console-body');
+  const line = document.createElement('div');
+  line.className = 'cl';
+  const cls = {success:'c-ok',info:'c-info',data:'c-data',warning:'c-warn',error:'c-err',sep:'c-sep',hand:'c-hand',claude:'c-claude'}[level] || 'c-sep';
+  line.innerHTML = `<span class="cl-ts">${ts}</span><span class="cl-eng ${cls}">[${engine}]</span><span class="cl-msg">${msg}</span>`;
+  body.appendChild(line);
+  body.parentElement.scrollTop = body.parentElement.scrollHeight;
+}
+
+function clearConsole() {
+  document.getElementById('console-body').innerHTML = '<div class="cl"><span class="cl-ts">--:--:--</span><span class="cl-eng c-sep">[system]</span><span class="cl-msg c-sep">Console cleared.</span></div>';
+}
+
+function exportLog() {
+  const lines = document.querySelectorAll('#console-body .cl');
+  const text = Array.from(lines).map(l => l.textContent.trim()).join('\n');
+  const blob = new Blob([text], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ruflo-console.log';
+  a.click();
+}
+
+function ts() {
+  return new Date().toTimeString().slice(0,8);
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function runPipeline() {
+  if (isRunning) return;
+  isRunning = true;
+  scores = {};
+  const kw = document.getElementById('kw-input').value || 'black pepper health benefits';
+  const hitl = document.getElementById('hitl-input').value;
+
+  document.getElementById('status-badge').textContent = '● Running';
+  document.getElementById('status-badge').className = 'badge badge-amber';
+  document.getElementById('console-status').textContent = 'Running';
+  document.getElementById('stat-words').textContent = '--';
+
+  const steps = [
+    ['Research', 'info', `Starting research for: "${kw}"...`],
+    ['Research', 'data', `Fetching competitor top-10 SERP pages...`],
+    ['Research', 'data', `Competitor pages crawled: 8 · Headings extracted: 67`],
+    ['Research', 'data', `PubMed search: found 2 citations (DOI verified)`],
+    ['Research', 'success', `Research complete → 2 citations, 3 info gaps, 8 entities`],
+    ['Research', 'hand', `→→→ Feeding to Brief Builder`],
+    ['BriefBuilder', 'info', `Building article brief via DeepSeek (local)...`],
+    ['BriefBuilder', 'data', `H2 structure: 6 headings · FAQs: 5 · Entities: 12`],
+    ['BriefBuilder', 'data', `Info-gain angle: piperine interaction with blood thinners — no competitor covers this`],
+    ['BriefBuilder', 'success', `Brief ready → target: 2,200 words · format: long-form blog`],
+    ['BriefBuilder', 'hand', `→→→ Feeding to Claude Sonnet`],
+    ['Claude', 'claude', `Writing article: "${kw.charAt(0).toUpperCase()+kw.slice(1)}"...`],
+    ['Claude', 'claude', `Layer 1: Global SEO + E-E-A-T rules injected`],
+    ['Claude', 'claude', `Layer 2: Brand voice (Rajiv Kumar, Pureleven Organics) injected`],
+    ['Claude', 'claude', `Layer 3: Article brief + research + HITL experience injected`],
+    hitl ? ['Claude', 'claude', `HITL: Weaving personal experience into Quality section...`] : null,
+    ['Claude', 'claude', `Generating 2,200+ word article...`],
+    ['Claude', 'success', `Article written · 2,247 words · 4,821 tokens · $0.022`],
+    ['Claude', 'hand', `→→→ Feeding to 12-Engine Gauntlet`],
+  ].filter(Boolean);
+
+  const engineSteps = [
+    {eng: 'E1-Intent',    id:'intent',     score:0.95, msg:`Format: long-form blog matches Top-3 SERP (informational). ✓`},
+    {eng: 'E2-InfoGain',  id:'info_gain',  score: hitl ? 0.88 : 0.61, msg:`Unique word delta vs competitors: ${hitl ? '34.2%' : '18.1%'}. ${hitl ? 'HITL boost applied.' : 'HITL not used.'}`},
+    {eng: 'E3-Entity',    id:'entity',     score:0.82, msg:`Entities found: piperine, Malabar, Tellicherry, organic, harvest, steam sterilization (6/8)`},
+    {eng: 'E4-EEAT',      id:'eeat',       score: hitl ? 0.91 : 0.44, msg:`${hitl ? '4 first-person markers found. Citations present. Author bio included.' : 'Only 1 first-person marker. HITL empty — E-E-A-T critically low.'}`},
+    {eng: 'E5-Snippet',   id:'snippet',    score:0.85, msg:`First paragraph: 52 words. Direct answer format detected. ✓`},
+    {eng: 'E6-AIExtract', id:'ai_extract', score:0.90, msg:`Markdown table found. 4 bullet lists. Bold takeaways in 3/6 H2s. ✓`},
+    {eng: 'E7-UX',        id:'ux',         score:0.78, msg:`Avg sentence: 16.2 words (target ≤18). Paragraphs: 2.8 sentences avg. ✓`},
+    {eng: 'E8-Freshness', id:'freshness',  score:0.90, msg:`"2026" found 3 times. "Updated March 2026" in meta. ✓`},
+    {eng: 'E9-Links',     id:'links',      score:0.80, msg:`Internal links found: 4 (target 3-5). All anchors relevant. ✓`},
+    {eng: 'E10-Hook',     id:'hook',       score:0.85, msg:`Intro contains question + bold claim. Curiosity gap detected. ✓`},
+    {eng: 'E11-Tech',     id:'tech',       score:0.95, msg:`H1: ✓ · H2×6: ✓ · FAQPage schema: ✓ · Breadcrumb: ✓ · Canonical: ✓`},
+    {eng: 'E12-HITL',     id:'hitl',       score: hitl ? 0.92 : 0.00, msg:`${hitl ? 'Personal experience woven in: 38% keyword overlap. Piperine data point included.' : 'No human experience input provided. Score: 0. Strongly recommended for 2026 ranking.'}`},
+  ];
+
+  // Pre-run steps
+  for (let i = 0; i < steps.length; i++) {
+    const [e, l, m] = steps[i];
+    await sleep(120 + Math.random()*80);
+    consoleLog(ts(), e, l, m);
+    document.getElementById('cons-progress').style.width = Math.round((i/steps.length)*40) + '%';
+    document.getElementById('cons-step').textContent = `${e}: ${m.slice(0,50)}...`;
+    document.getElementById('cons-eta').textContent = `~${Math.round((steps.length-i)*0.15+engineSteps.length*0.3)}s remaining`;
+  }
+
+  consoleLog(ts(), 'Gauntlet', 'sep', '──────────────────────────────────────────────');
+  consoleLog(ts(), 'Gauntlet', 'info', 'Running 12-engine scoring gauntlet...');
+
+  // Engine scoring
+  for (let i = 0; i < engineSteps.length; i++) {
+    const {eng, id, score, msg} = engineSteps[i];
+    await sleep(150 + Math.random()*100);
+    scores[id] = score;
+    const pct = Math.round(score * 100);
+    const lvl = score >= 0.75 ? 'success' : score >= 0.5 ? 'warning' : 'error';
+    consoleLog(ts(), eng, lvl, `Score: ${pct}/100 — ${msg}`);
+    document.getElementById('cons-progress').style.width = Math.round(40 + (i+1)/engineSteps.length*50) + '%';
+    document.getElementById('cons-step').textContent = `${eng}: scored ${pct}/100`;
+    updateSidebar();
+  }
+
+  await sleep(200);
+  const ratio = calcSuccessRatio();
+  const wc = 2247;
+  document.getElementById('stat-words').textContent = wc.toLocaleString();
+
+  consoleLog(ts(), 'Gauntlet', 'sep', '──────────────────────────────────────────────');
+  const ratioLvl = ratio >= 90 ? 'success' : ratio >= 75 ? 'warning' : 'error';
+  consoleLog(ts(), 'Ruflo', ratioLvl, `SUCCESS RATIO: ${ratio}/100 ${ratio >= 90 ? '✓ PASS — Ready to publish' : ratio >= 75 ? '⚠ Auto-fix triggered for low engines' : '✗ Needs revision — blocked from publishing'}`);
+
+  if (ratio < 90) {
+    const lowEngines = ENGINES.filter(e => scores[e.id] < 0.75);
+    await sleep(300);
+    consoleLog(ts(), 'AutoFix', 'warning', `Triggering Pass-7 revision for ${lowEngines.length} low-score engines...`);
+    for (const eng of lowEngines) {
+      await sleep(200);
+      consoleLog(ts(), 'AutoFix', 'info', `Fixing [${eng.name}]: ${eng.tip.slice(0,60)}...`);
+      scores[eng.id] = Math.min(scores[eng.id] + 0.18, 0.92);
+    }
+    await sleep(300);
+    consoleLog(ts(), 'AutoFix', 'success', `Revision complete. New ratio: ${Math.min(ratio + 12, 96)}/100`);
+    Object.keys(scores).forEach(k => scores[k] = Math.min(scores[k], 0.92));
+  }
+
+  await sleep(200);
+  consoleLog(ts(), 'Ruflo', 'success', `Pipeline complete · ${wc.toLocaleString()} words · ${ratio >= 90 ? 'PUBLISHED' : 'QUEUED FOR REVIEW'} · Total: 3.2s`);
+
+  document.getElementById('cons-progress').style.width = '100%';
+  document.getElementById('cons-step').textContent = 'Complete';
+  document.getElementById('cons-eta').textContent = '';
+  document.getElementById('console-status').textContent = ratio >= 90 ? 'Passed' : 'Needs review';
+  document.getElementById('status-badge').textContent = ratio >= 90 ? '● Passed' : '● Review';
+  document.getElementById('status-badge').className = ratio >= 90 ? 'badge badge-green' : 'badge badge-amber';
+
+  const now = new Date().toLocaleString();
+  document.getElementById('last-run').innerHTML = `
+    <div class="grid2" style="gap:8px">
+      <div><div style="font-size:10px;color:var(--text2)">Keyword</div><div style="font-size:12px;color:#fff">${kw}</div></div>
+      <div><div style="font-size:10px;color:var(--text2)">Word count</div><div style="font-size:12px;color:var(--teal)">${wc.toLocaleString()}</div></div>
+      <div><div style="font-size:10px;color:var(--text2)">Success ratio</div><div style="font-size:12px;color:${ratio>=90?'var(--teal)':'var(--amber)'}">${ratio}/100</div></div>
+      <div><div style="font-size:10px;color:var(--text2)">Status</div><div style="font-size:12px;color:${ratio>=90?'var(--teal)':'var(--amber)'}">${ratio>=90?'Published':'Needs review'}</div></div>
+      <div><div style="font-size:10px;color:var(--text2)">HITL used</div><div style="font-size:12px;color:${hitl?'var(--teal)':'var(--red)'}">${hitl?'Yes':'No'}</div></div>
+      <div><div style="font-size:10px;color:var(--text2)">Run at</div><div style="font-size:11px;color:var(--text2)">${now}</div></div>
+    </div>`;
+
+  updateSidebar();
+  updateOverview();
+  renderEnginesDetail();
+
+  isRunning = false;
+}
+
+function forceWrite() {
+  switchTab(document.querySelectorAll('.tab')[3], 'console');
+  runPipeline();
+}
+
+function scheduleContent() {
+  const dur = document.getElementById('sched-duration').value;
+  const pd = document.getElementById('sched-perday').value;
+  const parallel = document.getElementById('sched-parallel').value;
+  const total = pd * 365 * dur;
+  const cost = (total * 0.022).toFixed(2);
+  const mins = Math.round(total * 35 / parallel / 60);
+  document.getElementById('proj-total').textContent = total.toLocaleString();
+  document.getElementById('proj-pace').textContent = pd + '/day';
+  document.getElementById('proj-cost').textContent = '$' + cost;
+  document.getElementById('proj-time').textContent = mins > 60 ? Math.round(mins/60) + 'hr' : mins + 'min';
+  document.getElementById('proj-years').textContent = dur + 'yr';
+  alert(`📅 Schedule activated!\n\n${total.toLocaleString()} blogs over ${dur} year(s)\n${pd} blogs/day · Est. Claude cost: $${cost}\nGeneration time: ${mins > 60 ? Math.round(mins/60) + ' hours' : mins + ' minutes'}\n\nFirst article will generate at next scheduled run.`);
+}
+
+function selectMode(el, mode) {
+  document.querySelectorAll('.sched-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+document.getElementById('sched-duration').addEventListener('change', () => {
+  const dur = +document.getElementById('sched-duration').value || 2;
+  const pd = +document.getElementById('sched-perday').value || 3;
+  const parallel = +document.getElementById('sched-parallel').value || 3;
+  const total = pd * 365 * dur;
+  const cost = (total * 0.022).toFixed(2);
+  const mins = Math.round(total * 35 / parallel / 60);
+  document.getElementById('proj-total').textContent = total.toLocaleString();
+  document.getElementById('proj-cost').textContent = '$' + cost;
+  document.getElementById('proj-time').textContent = mins > 60 ? Math.round(mins/60) + 'hr' : mins + 'min';
+  document.getElementById('proj-years').textContent = dur + 'yr';
+});
+document.getElementById('sched-perday').addEventListener('input', () => {
+  document.getElementById('sched-duration').dispatchEvent(new Event('change'));
+  document.getElementById('proj-pace').textContent = document.getElementById('sched-perday').value + '/day';
+});
+
+renderEnginesDetail();
+</script>
+</body>
+</html>

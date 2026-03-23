@@ -1,0 +1,56 @@
+# Environment
+.env
+*.env
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Alembic — track all migration files
+# (migration files must be committed so the schema is reproducible)
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# RSD versions (generated snapshots)
+rsd_versions/
+*.json.gz
+*.npy
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Credentials
+gsc-credentials.json
+indexing-credentials.json
+service-account.json

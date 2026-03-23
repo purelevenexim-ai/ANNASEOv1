@@ -1,0 +1,48 @@
+# AnnaSEO — Python Dependencies
+# pip install -r requirements.txt
+
+# Core
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.8.2
+python-dotenv==1.0.1
+httpx==0.27.2
+requests==2.32.3
+
+# Database
+sqlalchemy==2.0.35
+alembic==1.13.3
+aiosqlite==0.20.0
+
+# AI
+anthropic>=0.34.0
+google-generativeai==0.8.3
+groq==0.11.0
+
+# NLP
+spacy==3.7.6
+sentence-transformers==3.1.1
+hdbscan==0.8.38.post1
+scikit-learn==1.5.2
+numpy==1.26.4
+yake==0.4.8
+
+# Web crawling
+beautifulsoup4==4.12.3
+feedparser==6.0.11
+lxml==5.3.0
+
+# Utilities
+psutil==6.0.0
+cryptography>=42.0.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.12
+
+# Dev
+pytest==8.3.3
+pytest-asyncio==0.24.0
+
+# Optional (uncomment for production)
+# psycopg2-binary==2.9.9
+# redis==5.1.1
+# weasyprint==62.3
