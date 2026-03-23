@@ -41,10 +41,11 @@ class WiredRufloOrchestrator(RufloOrchestrator):
       All phases → MetricsCollector.observe (timing + memory)
     """
 
-    def __init__(self, project_id: str = "", run_id: str = ""):
+    def __init__(self, project_id: str = "", run_id: str = "", emit_fn=None):
         super().__init__()
         self._project_id = project_id
         self._run_id     = run_id
+        self._emit_fn    = emit_fn  # callable(event_type, payload) — thread-safe
         self._collector  = self._load_collector()
         self._dce        = self._load_domain_context()
         self._metrics    = self._load_metrics()
@@ -79,6 +80,25 @@ class WiredRufloOrchestrator(RufloOrchestrator):
         """Call before run_seed to attach project/run context."""
         self._project_id = project_id
         self._run_id     = run_id
+
+    def _run_phase(self, name: str, fn, *args, **kwargs):
+        """Override: emit phase_log events to SSE stream around each phase."""
+        if self._emit_fn:
+            try: self._emit_fn("phase_log", {"phase": name, "msg": f"{name} starting..."})
+            except Exception: pass
+        import time as _t; t0 = _t.time()
+        result = super()._run_phase(name, fn, *args, **kwargs)
+        elapsed = round(_t.time() - t0, 1)
+        if self._emit_fn:
+            try:
+                if result is not None:
+                    count = len(result) if hasattr(result, '__len__') else None
+                    msg = f"{name} complete ({elapsed}s)" + (f" — {count} items" if count is not None else "")
+                    self._emit_fn("phase_log", {"phase": name, "msg": msg})
+                else:
+                    self._emit_fn("phase_log", {"phase": name, "msg": f"{name} returned no result ({elapsed}s)", "warn": True})
+            except Exception: pass
+        return result
 
     # ── Overridden run_seed with full wiring ──────────────────────────────────
 
@@ -127,10 +147,18 @@ class WiredRufloOrchestrator(RufloOrchestrator):
             accepted, rejected, ambiguous = self._dce.classify_batch(kws, pid)
             kws = accepted  # pass only accepted + ambiguous for human review
             if rejected:
-                print(f"  [DomainCtx] {len(rejected)} keywords rejected for project {pid}")
+                msg = f"[DomainCtx] {len(rejected)} keywords rejected, {len(accepted)} accepted"
+                print(f"  {msg}")
                 log.info(f"[Wired] Domain filter: {len(rejected)} rejected, {len(accepted)} accepted")
+                if self._emit_fn:
+                    try: self._emit_fn("phase_log", {"phase": "P3_DomainCtx", "msg": msg})
+                    except Exception: pass
             if ambiguous:
-                print(f"  [DomainCtx] {len(ambiguous)} ambiguous — will surface at Gate 3")
+                msg2 = f"[DomainCtx] {len(ambiguous)} ambiguous — will surface at Gate 3"
+                print(f"  {msg2}")
+                if self._emit_fn:
+                    try: self._emit_fn("phase_log", {"phase": "P3_DomainCtx", "msg": msg2})
+                    except Exception: pass
 
         # ✦ Record P3 outputs
         self._record("P3_Normalization", rid, pid,
@@ -188,11 +216,19 @@ class WiredRufloOrchestrator(RufloOrchestrator):
         if self._dce and pid and pillars:
             valid_pillars, rejected_pillars = self._dce.validate_pillars(pillars, pid)
             if rejected_pillars:
-                print(f"  [DomainCtx] {len(rejected_pillars)} pillars rejected:")
+                msg = f"[DomainCtx] {len(rejected_pillars)} pillars rejected by domain filter"
+                print(f"  {msg}")
                 for rp in rejected_pillars:
                     print(f"    ✗ {rp['pillar_keyword']} — {rp['reason'][:60]}")
                 pillars = valid_pillars
-            print(f"  [DomainCtx] {len(pillars)} pillars validated for project {pid}")
+                if self._emit_fn:
+                    try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg})
+                    except Exception: pass
+            msg2 = f"[DomainCtx] {len(pillars)} pillars validated for project {pid}"
+            print(f"  {msg2}")
+            if self._emit_fn:
+                try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg2})
+                except Exception: pass
 
         # ✦ Record P10 pillars
         self._record("P10_PillarIdentification", rid, pid,

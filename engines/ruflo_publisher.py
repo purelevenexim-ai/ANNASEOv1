@@ -1031,6 +1031,51 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SECTION 8b — PUBLISHER ADAPTER (used by main.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Publisher:
+    """
+    Simple adapter for WordPressPublisher that accepts per-project credentials.
+    Used by main.py: Publisher(wp_url=..., wp_user=..., wp_app_password=...)
+    """
+    def __init__(self, wp_url: str = "", wp_user: str = "", wp_app_password: str = ""):
+        import base64, requests as _rq
+        self._base = wp_url.rstrip("/")
+        cred = base64.b64encode(f"{wp_user}:{wp_app_password}".encode()).decode()
+        self._session = _rq.Session()
+        self._session.headers.update({
+            "Authorization": f"Basic {cred}",
+            "Content-Type": "application/json",
+            "User-Agent": "AnnaSEOPublisher/1.0",
+        })
+        self._configured = bool(wp_url and wp_user and wp_app_password)
+
+    def publish(self, article: ArticlePayload) -> dict:
+        """Publish to WordPress. Returns dict with 'url' key."""
+        if not self._configured:
+            return {"url": "", "error": "WordPress not configured", "status": "skipped"}
+        try:
+            payload = {
+                "title":   article.meta_title or article.title,
+                "content": article.body,
+                "status":  "publish",
+                "slug":    article.slug if article.slug else article.title.lower().replace(" ", "-"),
+                "meta": {
+                    "_yoast_wpseo_title":    article.meta_title or article.title,
+                    "_yoast_wpseo_metadesc": article.meta_description or "",
+                }
+            }
+            r = self._session.post(f"{self._base}/wp-json/wp/v2/posts", json=payload, timeout=60)
+            if r.ok:
+                data = r.json()
+                return {"url": data.get("link", ""), "id": data.get("id", ""), "status": "published"}
+            return {"url": "", "error": r.text[:200], "status": "failed"}
+        except Exception as e:
+            return {"url": "", "error": str(e)[:200], "status": "error"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SECTION 9 — TESTS
 # ─────────────────────────────────────────────────────────────────────────────
 

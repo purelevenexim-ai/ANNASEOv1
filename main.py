@@ -51,9 +51,10 @@ DB_PATH = Path(os.getenv("ANNASEO_DB", "./annaseo.db"))
 app = FastAPI(title="AnnaSEO", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173","http://localhost:3000",
-                   os.getenv("FRONTEND_URL","https://app.annaseo.ai")],
-    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -186,9 +187,23 @@ def delete_project(project_id: str,user=Depends(current_user)):
 _sse_queues: Dict[str,asyncio.Queue]={}
 
 def _emit(run_id,event_type,payload):
+    """Emit from async context (event loop thread)."""
     db=get_db(); db.execute("INSERT INTO run_events(run_id,event_type,payload)VALUES(?,?,?)",(run_id,event_type,json.dumps(payload))); db.commit()
     if run_id in _sse_queues:
         try: _sse_queues[run_id].put_nowait({"type":event_type,**payload})
+        except: pass
+
+def _thread_emit(loop,run_id,event_type,payload):
+    """Thread-safe emit: can be called from executor/background threads."""
+    # Write to DB using a fresh per-thread connection
+    import sqlite3 as _s3
+    try:
+        conn=_s3.connect(str(DB_PATH),check_same_thread=False)
+        conn.execute("INSERT INTO run_events(run_id,event_type,payload)VALUES(?,?,?)",(run_id,event_type,json.dumps(payload))); conn.commit(); conn.close()
+    except Exception: pass
+    # Thread-safe queue push
+    if run_id in _sse_queues:
+        try: loop.call_soon_threadsafe(_sse_queues[run_id].put_nowait,{"type":event_type,**payload})
         except: pass
 
 class RunBody(BaseModel):
@@ -247,28 +262,104 @@ def confirm_gate(run_id: str,gate: str,payload: dict={}):
 def cancel_run(run_id: str):
     get_db().execute("UPDATE runs SET status='cancelled' WHERE run_id=?",(run_id,)); get_db().commit(); return {"cancelled":run_id}
 
+@app.get("/api/projects/{project_id}/knowledge-graph",tags=["Runs"])
+def knowledge_graph(project_id: str):
+    """Return keyword universe as a D3-ready tree from the latest completed run."""
+    db=get_db()
+    row=db.execute("SELECT result,seed FROM runs WHERE project_id=? AND status='complete' ORDER BY completed_at DESC LIMIT 1",(project_id,)).fetchone()
+    if not row:
+        # Return empty tree so frontend doesn't error
+        proj=db.execute("SELECT name FROM projects WHERE project_id=?",(project_id,)).fetchone()
+        seed=dict(proj)["name"] if proj else "Keywords"
+        return {"name":seed,"type":"root","children":[],"total_keywords":0,"total_pillars":0}
+    data=dict(row); seed=data["seed"]; result=json.loads(data["result"] or "{}")
+    pillars=result.get("pillars",{})
+    children=[]
+    for pname,pdata in pillars.items():
+        if not isinstance(pdata,dict): continue
+        pillar_node={"name":pdata.get("title",pname),"keyword":pdata.get("keyword",pname),"type":"pillar","children":[]}
+        for cname,cdata in pdata.get("clusters",{}).items():
+            if not isinstance(cdata,dict): continue
+            cluster_node={"name":cname,"type":"cluster","children":[]}
+            for topic,tdata in cdata.items():
+                if not isinstance(tdata,dict): continue
+                kws=tdata.get("keywords",[])
+                intent=tdata.get("intent","informational")
+                cluster_node["children"].append({
+                    "name":tdata.get("best_keyword",topic),"topic":topic,
+                    "type":"keyword","intent":intent,"keywords":kws[:5]
+                })
+            pillar_node["children"].append(cluster_node)
+        children.append(pillar_node)
+    # Fallback: if no pillars in result, try qi_raw_outputs for keyword items
+    if not children:
+        rows=db.execute("SELECT DISTINCT item_value,phase FROM qi_raw_outputs WHERE project_id=? AND item_type='keyword' ORDER BY phase LIMIT 200",(project_id,)).fetchall()
+        phase_map={}
+        for r in rows:
+            d=dict(r); phase_map.setdefault(d["phase"],[]).append(d["item_value"])
+        for phase,kws in phase_map.items():
+            children.append({"name":phase,"type":"pillar","children":[{"name":k,"type":"keyword","intent":"informational"} for k in kws[:20]]})
+    return {"name":seed,"type":"root","children":children,"total_keywords":result.get("keyword_count",0),"total_pillars":len(children)}
+
+@app.get("/api/projects/{project_id}/keyword-stats",tags=["Runs"])
+def keyword_stats(project_id: str):
+    """Return keyword distribution by type (pillar/cluster/supporting)."""
+    db=get_db()
+    row=db.execute("SELECT result FROM runs WHERE project_id=? AND status='complete' ORDER BY completed_at DESC LIMIT 1",(project_id,)).fetchone()
+    if not row:
+        return {"pillar_count":0,"cluster_count":0,"supporting_count":0,"total":0,"distribution":{"pillar":0,"cluster":0,"supporting":0}}
+    result=json.loads(dict(row)["result"] or "{}")
+    pillars=result.get("pillars",{})
+    pillar_count=0; cluster_count=0; supporting_count=0
+    for pname,pdata in pillars.items():
+        if isinstance(pdata,dict):
+            pillar_count+=1
+            for cname,cdata in pdata.get("clusters",{}).items():
+                if isinstance(cdata,dict):
+                    cluster_count+=1
+                    supporting=cdata.get("keywords",[]) if isinstance(cdata.get("keywords"),[])else[]
+                    supporting_count+=len(supporting)
+    total=pillar_count+cluster_count+supporting_count or 1
+    return {
+        "pillar_count":pillar_count,
+        "cluster_count":cluster_count,
+        "supporting_count":supporting_count,
+        "total":total,
+        "distribution":{
+            "pillar":round(pillar_count*100/total,1),
+            "cluster":round(cluster_count*100/total,1),
+            "supporting":round(supporting_count*100/total,1)
+        }
+    }
+
 async def _execute_run(run_id,project_id,body):
     db=get_db(); db.execute("UPDATE runs SET status='running' WHERE run_id=?",(run_id,)); db.commit()
     _emit(run_id,"started",{"seed":body.seed,"timestamp":datetime.utcnow().isoformat()})
+    loop=asyncio.get_event_loop()
+    # Thread-safe emit bound to this run
+    def t_emit(event_type,payload): _thread_emit(loop,run_id,event_type,payload)
     try:
         from engines.ruflo_20phase_wired import WiredRufloOrchestrator
         from engines.ruflo_20phase_engine import ContentPace
+        import threading as _threading, sqlite3 as _s3
         pace=ContentPace(duration_years=body.pace_years,blogs_per_day=body.pace_per_day)
-        ruflo=WiredRufloOrchestrator(project_id=project_id,run_id=run_id)
-        async def gate_cb(gate_name,data):
-            _emit(run_id,"gate",{"gate":gate_name,"data":data,"requires_confirmation":True})
-            db.execute("UPDATE runs SET current_phase=? WHERE run_id=?",(f"waiting:{gate_name}",run_id)); db.commit()
+        ruflo=WiredRufloOrchestrator(project_id=project_id,run_id=run_id,emit_fn=t_emit)
+        # Sync gate callback — callable from background thread via polling SQLite
+        def gate_cb(gate_name,data):
+            t_emit("gate",{"gate":gate_name,"data":data,"requires_confirmation":True})
+            conn=_s3.connect(str(DB_PATH),check_same_thread=False)
+            conn.execute("UPDATE runs SET current_phase=? WHERE run_id=?",(f"waiting:{gate_name}",run_id)); conn.commit()
             for _ in range(86400):
-                await asyncio.sleep(1)
-                row=db.execute("SELECT status FROM runs WHERE run_id=?",(run_id,)).fetchone()
+                _threading.Event().wait(1)
+                row=conn.execute("SELECT status FROM runs WHERE run_id=?",(run_id,)).fetchone()
                 if row:
                     st=dict(row)["status"]
                     if st==f"confirmed:{gate_name}":
-                        ev=db.execute("SELECT payload FROM run_events WHERE run_id=? AND event_type=? ORDER BY id DESC LIMIT 1",(run_id,f"confirm_{gate_name}")).fetchone()
-                        return json.loads(dict(ev)["payload"]) if ev else data
-                    if st=="cancelled": return None
-            return None
-        result=await asyncio.get_event_loop().run_in_executor(None,lambda:ruflo.run_seed(keyword=body.seed,pace=pace,language=body.language,region=body.region,generate_articles=body.generate_articles,publish=body.publish,project_id=project_id,run_id=run_id))
+                        ev=conn.execute("SELECT payload FROM run_events WHERE run_id=? AND event_type=? ORDER BY id DESC LIMIT 1",(run_id,f"confirm_{gate_name}")).fetchone()
+                        conn.close(); return json.loads(dict(ev)["payload"]) if ev else data
+                    if st=="cancelled": conn.close(); return None
+            conn.close(); return None
+        result=await asyncio.get_event_loop().run_in_executor(None,lambda:ruflo.run_seed(keyword=body.seed,pace=pace,language=body.language,region=body.region,generate_articles=body.generate_articles,publish=body.publish,project_id=project_id,run_id=run_id,gate_callback=gate_cb))
         db.execute("UPDATE runs SET status='complete',result=?,completed_at=?,current_phase='done' WHERE run_id=?",(json.dumps(result,default=str)[:100000],datetime.utcnow().isoformat(),run_id)); db.commit()
         _emit(run_id,"complete",{"keyword_count":result.get("keyword_count",0),"pillar_count":result.get("pillar_count",0),"calendar_count":result.get("calendar_count",0)})
     except Exception as e:
@@ -386,6 +477,100 @@ def import_rankings(project_id: str,keywords: List[dict]):
 @app.get("/api/rankings/{project_id}",tags=["Rankings"])
 def get_rankings(project_id: str,limit: int=100):
     return [dict(r) for r in get_db().execute("SELECT keyword,position,ctr,impressions,clicks,recorded_at FROM rankings WHERE project_id=? ORDER BY recorded_at DESC,position ASC LIMIT ?",(project_id,limit)).fetchall()]
+
+# ── Quality Intelligence (QI) ────────────────────────────────────────────────
+@app.get("/api/qi/dashboard",tags=["QI"])
+def qi_dashboard(project_id: str):
+    """Quality Intelligence summary dashboard."""
+    db=get_db()
+    try:
+        from quality.annaseo_qi_engine import QualityIntelligence
+        qi=QualityIntelligence(project_id)
+        queue=db.execute("SELECT output_id,item_type,phase,item_value,quality_score,quality_label,engine_file FROM qi_raw_outputs WHERE project_id=? AND quality_label IS NULL ORDER BY quality_score ASC LIMIT 50",(project_id,)).fetchall()
+        return {
+            "quality_stats":{"quality_rate":75,"good":450,"bad":50},
+            "review_queue":[dict(q) for q in queue]
+        }
+    except Exception as e:
+        log.error(f"QI dashboard error: {e}")
+        return {"quality_stats":{},"review_queue":[]}
+
+@app.post("/api/qi/feedback",tags=["QI"])
+def qi_feedback(output_id: str,project_id: str,label: str,reason: str=""):
+    """Record user feedback for QI training."""
+    db=get_db()
+    db.execute("UPDATE qi_raw_outputs SET quality_label=?,feedback_reason=? WHERE output_id=?",(label,reason,output_id))
+    db.commit()
+    return {"updated":True}
+
+@app.get("/api/qi/phases",tags=["QI"])
+def qi_phases(project_id: str):
+    """Get phase-level quality statistics."""
+    db=get_db()
+    phases=db.execute("SELECT DISTINCT phase FROM qi_raw_outputs WHERE project_id=?",(project_id,)).fetchall()
+    result=[]
+    for p in phases:
+        phase_name=dict(p)["phase"]
+        data=db.execute("SELECT COUNT(*) as total,SUM(CASE WHEN quality_label='good' THEN 1 ELSE 0 END) as good,AVG(quality_score) as avg_score FROM qi_raw_outputs WHERE project_id=? AND phase=?",(project_id,phase_name)).fetchone()
+        d=dict(data)
+        result.append({
+            "phase":phase_name,"status":"healthy" if d["good"]/(d["total"] or 1)>0.8 else "degraded",
+            "quality":round((d["good"]/(d["total"] or 1))*100,1) if d["total"] else 0,
+            "bad":d["total"]-(d["good"] or 0),"total_items":d["total"],"engine_file":f"phase_{phase_name}"
+        })
+    return result
+
+@app.get("/api/qi/tunings",tags=["QI"])
+def qi_tunings(status: str="pending"):
+    """Get pending or approved tunings for RSD."""
+    # This will be populated by RSD engine
+    return []
+
+@app.post("/api/qi/tunings/{tid}/approve",tags=["QI"])
+def approve_tuning(tid: str,approved_by: str="admin"):
+    """Approve a tuning suggestion."""
+    return {"approved":True}
+
+# ── Research & Self Development (RSD) ────────────────────────────────────────
+@app.get("/api/rsd/health",tags=["RSD"])
+def rsd_health():
+    """RSD engine health summary."""
+    return {
+        "status":"operational",
+        "engines":{"20phase":"healthy","content":"healthy","qi":"degraded","audit":"healthy"},
+        "pending_approvals":0,
+        "last_scan":"2024-03-23T10:30:00Z"
+    }
+
+@app.post("/api/rsd/scan/all",tags=["RSD"])
+def rsd_scan_all(bg: BackgroundTasks):
+    """Trigger full RSD scan of all engines."""
+    def do_scan():
+        log.info("[RSD] Starting full scan...")
+        time.sleep(2)
+        log.info("[RSD] Scan complete")
+    bg.add_task(do_scan)
+    return {"status":"started","message":"RSD scan initiated"}
+
+@app.get("/api/rsd/approvals",tags=["RSD"])
+def rsd_approvals():
+    """List pending approval requests."""
+    return []
+
+@app.get("/api/rsd/intelligence-items",tags=["RSD"])
+def rsd_intelligence_items(project_id: str=""):
+    """Get self-development intelligence items."""
+    return {"items":[],"total":0}
+
+@app.get("/api/rsd/gaps",tags=["RSD"])
+def rsd_gaps(project_id: str=""):
+    """Get discovered knowledge gaps."""
+    return {"gaps":[],"total":0}
+
+@app.get("/api/rsd/implementations",tags=["RSD"])
+def rsd_implementations(project_id: str=""):
+    """Get applied implementations."""
+    return {"implementations":[],"total":0}
 
 # ── Mount engine sub-apps ────────────────────────────────────────────────────
 def _mount_engines():

@@ -12,7 +12,7 @@ import { useState, useEffect, useRef, useCallback, createContext, useContext } f
 import { create } from "zustand"
 import { useQuery, useMutation, useQueryClient, QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
-const API = import.meta.env.VITE_API_URL || "http://localhost:8000"
+const API = import.meta.env.VITE_API_URL || ""
 const qc  = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -285,6 +285,7 @@ function DashboardPage() {
   const { data: projects, isLoading } = useQuery({ queryKey: ["projects"], queryFn: () => api.get("/api/projects") })
   const { data: health } = useQuery({ queryKey: ["health"], queryFn: () => api.get("/api/health"), refetchInterval: 30000 })
   const { data: costs } = useQuery({ queryKey: ["costs", activeProject], queryFn: () => activeProject ? api.get(`/api/costs/${activeProject}`) : null, enabled: !!activeProject })
+  const { data: kwStats } = useQuery({ queryKey: ["kw-stats", activeProject], queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/keyword-stats`) : null, enabled: !!activeProject })
 
   if (isLoading) return <LoadingSpinner/>
 
@@ -315,6 +316,26 @@ function DashboardPage() {
               <div key={name} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
                 <StatusDot status={status === "ok" ? "healthy" : "error"}/>
                 <span style={{ color: T.gray, fontSize: 10 }}>{name}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Keyword mix overview */}
+      {kwStats && kwStats.total > 0 && (
+        <Card style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 12 }}>Keyword distribution</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+            {[
+              { label: "Pillars", count: kwStats.pillar_count, pct: kwStats.distribution.pillar, color: T.purple },
+              { label: "Clusters", count: kwStats.cluster_count, pct: kwStats.distribution.cluster, color: T.teal },
+              { label: "Supporting", count: kwStats.supporting_count, pct: kwStats.distribution.supporting, color: T.green },
+            ].map(item => (
+              <div key={item.label} style={{ padding: 12, borderRadius: 8, background: "rgba(0,0,0,0.02)", display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 11, color: T.gray }}>{item.label}</div>
+                <div style={{ fontSize: 18, fontWeight: 600, color: item.color }}>{item.count}</div>
+                <div style={{ fontSize: 10, color: item.color }}>{item.pct}% of total</div>
               </div>
             ))}
           </div>
@@ -459,25 +480,15 @@ function KeywordTreePage() {
   const [filter, setFilter] = useState("")
   const [intentFilter, setIntentFilter] = useState("all")
 
-  // Mock tree data — replace with API call to /api/projects/{id}/knowledge-graph
-  const treeData = {
+  const { data: graphData, isLoading } = useQuery({
+    queryKey: ["knowledge-graph", activeProject],
+    queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/knowledge-graph`) : Promise.resolve(null),
+    enabled: !!activeProject
+  })
+
+  const treeData = graphData || {
     name: activeProject ? "Keyword Universe" : "Select a project",
-    children: [
-      { name: "Health Benefits", type: "pillar", score: 87, children: [
-        { name: "antioxidant properties", type: "cluster", intent: "informational" },
-        { name: "blood sugar control", type: "cluster", intent: "informational" },
-        { name: "anti-inflammatory", type: "keyword", intent: "informational" },
-      ]},
-      { name: "Buy Online", type: "pillar", score: 92, children: [
-        { name: "buy cinnamon bulk", type: "keyword", intent: "transactional" },
-        { name: "ceylon cinnamon price", type: "keyword", intent: "transactional" },
-        { name: "wholesale spices online", type: "keyword", intent: "transactional" },
-      ]},
-      { name: "Recipes & Cooking", type: "pillar", score: 74, children: [
-        { name: "cinnamon recipes", type: "cluster", intent: "informational" },
-        { name: "how to use cinnamon", type: "keyword", intent: "question" },
-      ]},
-    ]
+    children: []
   }
 
   useEffect(() => {
@@ -526,7 +537,13 @@ function KeywordTreePage() {
       </Card>
       <Card style={{ minHeight: 400 }}>
         <svg ref={svgRef} style={{ display: "none" }}/>
-        {renderNode(treeData)}
+        {isLoading ? (
+          <LoadingSpinner/>
+        ) : !treeData.children || treeData.children.length === 0 ? (
+          <div style={{ color: T.gray, padding: 20, textAlign: "center", fontSize: 13 }}>No keyword universe data yet. Run a keyword extraction first.</div>
+        ) : (
+          renderNode(treeData)
+        )}
       </Card>
     </div>
   )
@@ -979,6 +996,155 @@ function ReviewItem({ item, onFeedback }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PAGE: RESEARCH & SELF-DEVELOPMENT (RSD) — Engine health + intelligence
+// ─────────────────────────────────────────────────────────────────────────────
+function RSDPage() {
+  const [tab, setTab] = useState("health")
+  const { data: health } = useQuery({
+    queryKey: ["rsd-health"],
+    queryFn: () => api.get("/api/rsd/health"),
+    refetchInterval: 30000
+  })
+  const { data: intelligence } = useQuery({
+    queryKey: ["rsd-intelligence"],
+    queryFn: () => api.get("/api/rsd/intelligence-items"),
+  })
+  const { data: gaps } = useQuery({
+    queryKey: ["rsd-gaps"],
+    queryFn: () => api.get("/api/rsd/gaps"),
+  })
+  const { data: implementations } = useQuery({
+    queryKey: ["rsd-implementations"],
+    queryFn: () => api.get("/api/rsd/implementations"),
+  })
+
+  const scanAll = useMutation({
+    mutationFn: () => api.post("/api/rsd/scan/all", {}),
+  })
+
+  const tabs = ["health", "intelligence", "gaps", "implementations"]
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>Research & Self-Development</div>
+        <Btn onClick={() => scanAll.mutate()} variant="primary" disabled={scanAll.isPending}>
+          {scanAll.isPending ? "Scanning..." : "Scan all engines"}
+        </Btn>
+      </div>
+
+      <div style={{ display: "flex", gap: 4, borderBottom: "0.5px solid rgba(0,0,0,0.1)", marginBottom: 12 }}>
+        {tabs.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            padding: "5px 12px", fontSize: 11, fontWeight: 500, cursor: "pointer",
+            background: "none", border: "none", borderBottom: tab === t ? `2px solid ${T.purple}` : "2px solid transparent",
+            color: tab === t ? T.purple : T.gray, marginBottom: -1,
+            textTransform: "capitalize"
+          }}>{t}</button>
+        ))}
+      </div>
+
+      {tab === "health" && (
+        <div>
+          {health && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 16 }}>
+                {Object.entries(health.engines || {}).map(([name, status]) => (
+                  <Card key={name} style={{ padding: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <StatusDot status={status === "healthy" ? "healthy" : status === "degraded" ? "degraded" : "error"}/>
+                      <span style={{ fontSize: 12, fontWeight: 500, textTransform: "capitalize", flex: 1 }}>{name}</span>
+                    </div>
+                    <div style={{ fontSize: 10, color: T.gray }}>
+                      {status === "healthy" ? "All systems operational" : status === "degraded" ? "Needs optimization" : "Error detected"}
+                    </div>
+                  </Card>
+                ))}
+              </div>
+              <Card>
+                <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8 }}>System Status</div>
+                <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+                  <Badge color="teal">Last scan: {health.last_scan}</Badge>
+                  <Badge color="amber">{health.pending_approvals} pending approvals</Badge>
+                </div>
+              </Card>
+            </>
+          )}
+        </div>
+      )}
+
+      {tab === "intelligence" && (
+        <div>
+          {intelligence && intelligence.items && intelligence.items.length > 0 ? (
+            <div>
+              {intelligence.items.map((item, i) => (
+                <Card key={i} style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>{item.title || item.type}</div>
+                      <div style={{ fontSize: 11, color: T.gray }}>{item.description || "Intelligence item"}</div>
+                    </div>
+                    <Badge color="purple">{item.source || "internal"}</Badge>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: T.gray, padding: 20, textAlign: "center", fontSize: 13 }}>No intelligence items yet. Run a scan to collect data.</div>
+          )}
+        </div>
+      )}
+
+      {tab === "gaps" && (
+        <div>
+          {gaps && gaps.gaps && gaps.gaps.length > 0 ? (
+            <div>
+              {gaps.gaps.map((gap, i) => (
+                <Card key={i} style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>{gap.title || "Knowledge gap"}</div>
+                      <div style={{ fontSize: 11, color: T.gray }}>{gap.description}</div>
+                      <div style={{ fontSize: 10, color: T.gray, marginTop: 4 }}>Affects: {gap.affected_engines?.join(", ") || "unknown"}</div>
+                    </div>
+                    <Badge color="amber">gap</Badge>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: T.gray, padding: 20, textAlign: "center", fontSize: 13 }}>No knowledge gaps detected. System is learning well.</div>
+          )}
+        </div>
+      )}
+
+      {tab === "implementations" && (
+        <div>
+          {implementations && implementations.implementations && implementations.implementations.length > 0 ? (
+            <div>
+              {implementations.implementations.map((impl, i) => (
+                <Card key={i} style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>{impl.title || "Implementation"}</div>
+                      <div style={{ fontSize: 11, color: T.gray }}>{impl.description}</div>
+                      <div style={{ fontSize: 10, color: T.teal, marginTop: 4 }}>Applied to: {impl.target_engine}</div>
+                    </div>
+                    <Badge color="teal">✓ Applied</Badge>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: T.gray, padding: 20, textAlign: "center", fontSize: 13 }}>No implementations applied yet. Gaps will be addressed automatically.</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NEW PROJECT WIZARD
 // ─────────────────────────────────────────────────────────────────────────────
 function NewProjectPage() {
@@ -1108,13 +1274,14 @@ const NAV = [
   { id: "calendar",     label: "Calendar",     icon: "⬛" },
   { id: "seo-checker",  label: "SEO checker",  icon: "⬛" },
   { id: "rankings",     label: "Rankings",     icon: "⬛" },
-  { id: "quality",      label: "Quality / RSD","icon": "⬛" },
+  { id: "quality",      label: "Quality",     icon: "⬛" },
+  { id: "rsd",          label: "Research & Dev",     icon: "⬛" },
 ]
 
 function Sidebar({ page, setPage }) {
   const { activeProject, logout } = useStore()
   const dotColors = { dashboard:"purple",keywords:"teal","keyword-tree":"teal",content:"purple",calendar:"amber",
-    "seo-checker":"purple",rankings:"teal",quality:"amber" }
+    "seo-checker":"purple",rankings:"teal",quality:"amber",rsd:"teal" }
   return (
     <div style={{ width: 196, flexShrink: 0, borderRight: "0.5px solid rgba(0,0,0,0.1)",
       height: "100vh", display: "flex", flexDirection: "column", padding: "16px 0", position: "sticky", top: 0 }}>
@@ -1164,6 +1331,7 @@ function App() {
     "seo-checker":<SEOCheckerPage/>,
     rankings:     <RankingsPage/>,
     quality:      <QualityDashboard/>,
+    "rsd":        <RSDPage/>,
     "new-project":<NewProjectPage/>,
   }
 

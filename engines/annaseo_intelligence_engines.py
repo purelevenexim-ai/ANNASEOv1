@@ -265,7 +265,7 @@ Format: JSON with keys title, body, meta_title, meta_desc, hreflang (e.g. "ml" f
                           f"Keyword: {keyword}\nRules: {json.dumps(rules)}\n"
                           f"Original (first 1000 words): {article.get('body','')[:2000]}\n\n"
                           f"Write article in {language}. Return JSON: "
-                          f"{{\"title\":\"...\",\"body\":\"...\",\"meta_title\":\"...\",\"meta_desc\":\"...\",\"hreflang\":\"{{'malayalam':'ml','hindi':'hi','tamil':'ta','arabic':'ar'}.get(language,'')}\"}}"
+                          "{\"title\":\"...\",\"body\":\"...\",\"meta_title\":\"...\",\"meta_desc\":\"...\",\"hreflang\":\"\"}"
                       ),
                       "stream":False,"options":{"num_predict":2000}},
                 timeout=120)
