@@ -54,3 +54,4 @@ htmlcov/
 gsc-credentials.json
 indexing-credentials.json
 service-account.json
+.claude/
