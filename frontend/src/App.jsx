@@ -873,13 +873,16 @@ function KeywordsUnifiedPage() {
   const [tab, setTab] = useState("run")
 
   const TABS = [
-    { id: "input", label: "Universe Input",  desc: "Pillars + supporting keywords" },
-    { id: "run",   label: "Run Pipeline",    desc: "20-phase keyword universe" },
-    { id: "tree",  label: "Keyword Tree",    desc: "Explore universe visually" },
+    { id: "input",    label: "Universe Input", desc: "Pillars + supporting keywords" },
+    { id: "run",      label: "Run Pipeline",   desc: "20-phase keyword universe" },
+    { id: "tree",     label: "Keyword Tree",   desc: "Explore universe visually" },
+    { id: "rankings", label: "Rankings",       desc: "GSC keyword positions" },
   ]
 
   return (
     <div>
+      <div style={{ fontSize: 18, fontWeight: 700, color: T.text, marginBottom: 16 }}>Keywords</div>
+
       {/* Tab bar */}
       <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${T.border}`, marginBottom: 24 }}>
         {TABS.map(t => (
@@ -888,7 +891,7 @@ function KeywordsUnifiedPage() {
             fontSize: 13, fontWeight: tab === t.id ? 700 : 500,
             color: tab === t.id ? T.purple : T.gray,
             borderBottom: `3px solid ${tab === t.id ? T.purple : "transparent"}`,
-            marginBottom: -2,
+            marginBottom: -2, transition: "color 0.12s",
           }}>
             {t.label}
             {tab !== t.id && <div style={{ fontSize: 10, color: T.gray, fontWeight: 400, marginTop: 1 }}>{t.desc}</div>}
@@ -896,9 +899,10 @@ function KeywordsUnifiedPage() {
         ))}
       </div>
 
-      {tab === "input" && <KeywordInputPage projectId={activeProject}/>}
-      {tab === "run"   && <KeywordsPage/>}
-      {tab === "tree"  && <KeywordTreePage/>}
+      {tab === "input"    && <KeywordInputPage projectId={activeProject}/>}
+      {tab === "run"      && <KeywordsPage/>}
+      {tab === "tree"     && <KeywordTreePage/>}
+      {tab === "rankings" && <RankingsPage/>}
     </div>
   )
 }
@@ -1792,7 +1796,6 @@ const NAV = [
   { id: "content",      label: "Content",      icon: "⬛" },
   { id: "calendar",     label: "Calendar",     icon: "⬛" },
   { id: "seo-checker",  label: "SEO checker",  icon: "⬛" },
-  { id: "rankings",     label: "Rankings",     icon: "⬛" },
   { id: "quality",      label: "Quality",      icon: "⬛" },
   { id: "rsd",          label: "Research & Dev", icon: "⬛" },
   { id: "bug-fixer",    label: "Bug Fixer",    icon: "⬛" },
@@ -1802,7 +1805,7 @@ const NAV = [
 function Sidebar({ page, setPage }) {
   const { activeProject, logout } = useStore()
   const dotColors = { dashboard:"purple",keywords:"teal",content:"purple",calendar:"amber",
-    "seo-checker":"purple",rankings:"teal",quality:"amber",rsd:"teal" }
+    "seo-checker":"purple",quality:"amber",rsd:"teal" }
   return (
     <div style={{ width: 196, flexShrink: 0, borderRight: "0.5px solid rgba(0,0,0,0.1)",
       height: "100vh", display: "flex", flexDirection: "column", padding: "16px 0", position: "sticky", top: 0 }}>
@@ -2154,7 +2157,6 @@ function App() {
     content:      <ContentPage/>,
     calendar:     <CalendarPage/>,
     "seo-checker":<SEOCheckerPage/>,
-    rankings:     <RankingsPage/>,
     quality:      <QualityDashboard/>,
     "rsd":        <RSDPage/>,
     "bug-fixer":  <BugFixerPage/>,
