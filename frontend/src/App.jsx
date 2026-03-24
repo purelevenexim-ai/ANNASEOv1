@@ -55,7 +55,9 @@ const api = {
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(body),
     })
-    return r.json()
+    if (r.status === 401) { useStore.getState().logout(); return null }
+    const text = await r.text()
+    try { return text ? JSON.parse(text) : {} } catch { return { error: text } }
   },
   put: async (path, body) => {
     const token = useStore.getState().token
@@ -64,7 +66,9 @@ const api = {
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(body),
     })
-    return r.json()
+    if (r.status === 401) { useStore.getState().logout(); return null }
+    const text = await r.text()
+    try { return text ? JSON.parse(text) : {} } catch { return { error: text } }
   },
   delete: async (path) => {
     const token = useStore.getState().token
@@ -72,7 +76,9 @@ const api = {
       method: "DELETE",
       headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     })
-    return r.json()
+    if (r.status === 401) { useStore.getState().logout(); return null }
+    const text = await r.text()
+    try { return text ? JSON.parse(text) : {} } catch { return { error: text } }
   },
 }
 
@@ -1991,7 +1997,7 @@ function BugFixerPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function App() {
-  const { token, currentPage, setPage } = useStore()
+  const { token, currentPage, setPage, activeProject } = useStore()
 
   // Browser error capture → send to /api/errors/report
   useEffect(() => {

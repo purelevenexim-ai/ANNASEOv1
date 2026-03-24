@@ -186,7 +186,7 @@ def get_project(project_id: str,user=Depends(current_user)):
 
 @app.delete("/api/projects/{project_id}",tags=["Projects"])
 def delete_project(project_id: str,user=Depends(current_user)):
-    get_db().execute("UPDATE projects SET status='deleted' WHERE project_id=?",(project_id,)); get_db().commit()
+    db = get_db(); db.execute("UPDATE projects SET status='deleted' WHERE project_id=?",(project_id,)); db.commit()
     return {"deleted":project_id}
 
 # ── Runs + SSE ────────────────────────────────────────────────────────────────
@@ -266,7 +266,7 @@ def confirm_gate(run_id: str,gate: str,payload: dict={}):
 
 @app.post("/api/runs/{run_id}/cancel",tags=["Runs"])
 def cancel_run(run_id: str):
-    get_db().execute("UPDATE runs SET status='cancelled' WHERE run_id=?",(run_id,)); get_db().commit(); return {"cancelled":run_id}
+    db = get_db(); db.execute("UPDATE runs SET status='cancelled' WHERE run_id=?",(run_id,)); db.commit(); return {"cancelled":run_id}
 
 @app.get("/api/projects/{project_id}/knowledge-graph",tags=["Runs"])
 def knowledge_graph(project_id: str):
@@ -401,18 +401,18 @@ def approve(article_id: str,user=Depends(current_user)):
 
 @app.post("/api/content/{article_id}/freeze",tags=["Content"])
 def freeze(article_id: str,user=Depends(current_user)):
-    get_db().execute("UPDATE content_articles SET frozen=1 WHERE article_id=?",(article_id,)); get_db().commit(); return {"frozen":True}
+    db = get_db(); db.execute("UPDATE content_articles SET frozen=1 WHERE article_id=?",(article_id,)); db.commit(); return {"frozen":True}
 
 @app.post("/api/content/{article_id}/unfreeze",tags=["Content"])
 def unfreeze(article_id: str,user=Depends(current_user)):
-    get_db().execute("UPDATE content_articles SET frozen=0 WHERE article_id=?",(article_id,)); get_db().commit(); return {"frozen":False}
+    db = get_db(); db.execute("UPDATE content_articles SET frozen=0 WHERE article_id=?",(article_id,)); db.commit(); return {"frozen":False}
 
 @app.post("/api/content/{article_id}/publish",tags=["Content"])
 async def publish_article(article_id: str,bg: BackgroundTasks,user=Depends(current_user)):
     row=get_db().execute("SELECT * FROM content_articles WHERE article_id=?",(article_id,)).fetchone()
     if not row: raise HTTPException(404,"Not found")
     if dict(row)["status"]!="approved": raise HTTPException(400,"Must be approved first")
-    get_db().execute("UPDATE content_articles SET status='publishing' WHERE article_id=?",(article_id,)); get_db().commit()
+    db = get_db(); db.execute("UPDATE content_articles SET status='publishing' WHERE article_id=?",(article_id,)); db.commit()
     bg.add_task(_publish_article,article_id,dict(row)); return {"status":"publishing"}
 
 async def _gen_article(article_id,body):
