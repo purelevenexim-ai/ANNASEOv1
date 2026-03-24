@@ -11,6 +11,7 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from "react"
 import { create } from "zustand"
 import { useQuery, useMutation, useQueryClient, QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import KeywordInputPage from "./KeywordInput"
 
 const API = import.meta.env.VITE_API_URL || ""
 const qc  = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } })
@@ -1658,6 +1659,7 @@ function NewProjectPage() {
 
 const NAV = [
   { id: "dashboard",    label: "Dashboard",    icon: "⬛" },
+  { id: "kw-input",     label: "KW Input",     icon: "⬛" },
   { id: "keywords",     label: "Keywords",     icon: "⬛" },
   { id: "keyword-tree", label: "Keyword tree", icon: "⬛" },
   { id: "content",      label: "Content",      icon: "⬛" },
@@ -2021,6 +2023,7 @@ function App() {
 
   const pages = {
     dashboard:    <DashboardPage/>,
+    "kw-input":   <KeywordInputPage projectId={activeProject}/>,
     "keywords":   <KeywordsPage/>,
     "keyword-tree":<KeywordTreePage/>,
     content:      <ContentPage/>,

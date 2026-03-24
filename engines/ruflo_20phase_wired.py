@@ -124,11 +124,30 @@ class WiredRufloOrchestrator(RufloOrchestrator):
             return {"error": "P1 failed"}
 
         # ── P2 Expansion ─────────────────────────────────────────────────────
-        with self._observe("P2_KeywordExpansion"):
-            raw_kws = self._run_phase("P2", self.p2.run, seed)
-        if not raw_kws:
-            return {"error": "P2 failed"}
-        print(f"  P2: {len(raw_kws)} raw keywords from 5 sources")
+        # Try P2_Enhanced first (uses customer pillars+supporting from DB)
+        _p2e_kws = None
+        if pid:
+            try:
+                from annaseo_p2_enhanced import P2_Enhanced
+                p2e = P2_Enhanced()
+                _p2e_kws = p2e.run_from_input(pid, language=language, region=region)
+                if _p2e_kws:
+                    log.info(f"[Wired] P2_Enhanced returned {len(_p2e_kws)} keywords for {pid}")
+                    if self._emit_fn:
+                        try: self._emit_fn("phase_log", {"phase": "P2", "msg": f"P2 Enhanced: {len(_p2e_kws)} phrases from pillars"})
+                        except Exception: pass
+            except Exception as _p2e_err:
+                log.debug(f"[Wired] P2_Enhanced skipped: {_p2e_err}")
+
+        if _p2e_kws:
+            raw_kws = _p2e_kws
+            print(f"  P2: {len(raw_kws)} keywords from pillar+supporting model")
+        else:
+            with self._observe("P2_KeywordExpansion"):
+                raw_kws = self._run_phase("P2", self.p2.run, seed)
+            if not raw_kws:
+                return {"error": "P2 failed"}
+            print(f"  P2: {len(raw_kws)} raw keywords from 5 sources")
 
         # ✦ Record P2 outputs
         self._record("P2_KeywordExpansion", rid, pid,
@@ -168,10 +187,13 @@ class WiredRufloOrchestrator(RufloOrchestrator):
         # ── GATE A: Universe keywords confirmed ───────────────────────────────
         if gate_callback:
             confirmed = gate_callback("universe_keywords",
-                                       {"count": len(kws), "sample": kws[:20]})
+                                       {"count": len(kws), "keywords": kws})
             if confirmed is None:
                 return {"status": "stopped_at_gate_A"}
-            kws = confirmed.get("keywords", kws)
+            confirmed_kws = confirmed.get("keywords", kws)
+            if isinstance(confirmed_kws, list):
+                kws = confirmed_kws
+            # else: keep original kws (guard against dict/string being passed)
 
         # ── P4–P9 (unchanged from base class) ────────────────────────────────
         with self._observe("P4_EntityDetection"):

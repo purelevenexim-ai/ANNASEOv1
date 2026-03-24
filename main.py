@@ -371,7 +371,7 @@ async def _execute_run(run_id,project_id,body):
     except Exception as e:
         import traceback; err=traceback.format_exc()[:500]
         db.execute("UPDATE runs SET status='error',error=? WHERE run_id=?",(err,run_id)); db.commit()
-        _emit(run_id,"error",{"error":str(e)[:200]}); log.error(f"Run {run_id} failed: {e}")
+        _emit(run_id,"error",{"error":str(e)[:200],"traceback":err}); log.error(f"Run {run_id} failed: {e}")
 
 # ── Content workflow ──────────────────────────────────────────────────────────
 class GenBody(BaseModel):
@@ -961,4 +961,165 @@ def rollback_fix(fix_id: str, user=Depends(current_user)):
     if not ok:
         raise HTTPException(400, "Rollback failed — no snapshot available")
     return {"rolled_back": True, "fix_id": fix_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KEYWORD INPUT ENGINE ROUTES
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent / "engines"))
+    from engines.annaseo_keyword_input import KeywordInputEngine as _KIE, _db as _ki_db
+
+    _kie = _KIE()
+    _ki_db()   # auto-creates all 5 KI tables
+
+    class _KIInput(BaseModel):
+        pillars: list
+        supporting: list
+        intent_focus: str = "transactional"
+        customer_url: Optional[str] = None
+        competitor_urls: list = []
+
+    class _KIAction(BaseModel):
+        item_id: str
+        action: str             # accept | reject | edit | move_pillar
+        new_keyword: Optional[str] = None
+        new_pillar: Optional[str] = None
+
+    class _KIAcceptAll(BaseModel):
+        pillar: Optional[str] = None
+        intent: Optional[str] = None
+
+    @app.post("/api/ki/{project_id}/input", tags=["KeywordInput"])
+    def ki_save_input(project_id: str, body: _KIInput, user=Depends(current_user)):
+        """Save customer pillar + supporting keywords, return session_id."""
+        sid = _kie.save_customer_input(
+            project_id=project_id,
+            pillars=body.pillars,
+            supporting=body.supporting,
+            intent_focus=body.intent_focus,
+            customer_url=body.customer_url,
+            competitor_urls=body.competitor_urls,
+        )
+        return {"session_id": sid, "status": "saved"}
+
+    @app.post("/api/ki/{project_id}/generate/{session_id}", tags=["KeywordInput"])
+    def ki_generate(project_id: str, session_id: str, bg: BackgroundTasks, user=Depends(current_user)):
+        """Trigger universe generation in background."""
+        bg.add_task(
+            _kie.generate_universe,
+            project_id=project_id,
+            session_id=session_id,
+        )
+        return {"status": "generating", "session_id": session_id}
+
+    @app.get("/api/ki/{project_id}/session/{session_id}", tags=["KeywordInput"])
+    def ki_get_session(project_id: str, session_id: str, user=Depends(current_user)):
+        """Get session status and counts."""
+        db = _ki_db()
+        row = db.execute(
+            "SELECT * FROM keyword_input_sessions WHERE session_id=? AND project_id=?",
+            (session_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Session not found")
+        return dict(row)
+
+    @app.get("/api/ki/{project_id}/pillars", tags=["KeywordInput"])
+    def ki_get_pillars(project_id: str, user=Depends(current_user)):
+        """List pillar keywords for a project."""
+        db = _ki_db()
+        rows = db.execute(
+            "SELECT * FROM pillar_keywords WHERE project_id=? ORDER BY priority ASC",
+            (project_id,)
+        ).fetchall()
+        return {"pillars": [dict(r) for r in rows]}
+
+    @app.get("/api/ki/{project_id}/review/{session_id}", tags=["KeywordInput"])
+    def ki_review_queue(
+        project_id: str, session_id: str,
+        pillar: Optional[str] = None, intent: Optional[str] = None,
+        status: str = "pending", limit: int = 30, offset: int = 0,
+        user=Depends(current_user)
+    ):
+        """Get paginated keyword review queue."""
+        from engines.annaseo_keyword_input import ReviewManager
+        rm = ReviewManager()
+        db = _ki_db()
+        result = rm.get_review_queue(
+            session_id=session_id, db=db,
+            pillar=pillar, intent=intent, status=status,
+            limit=limit, offset=offset,
+        )
+        return result
+
+    @app.post("/api/ki/{project_id}/review/{session_id}/action", tags=["KeywordInput"])
+    def ki_review_action(project_id: str, session_id: str, body: _KIAction, user=Depends(current_user)):
+        """Accept, reject, edit, or move a keyword."""
+        from engines.annaseo_keyword_input import ReviewManager
+        rm = ReviewManager()
+        db = _ki_db()
+        ok = rm.apply_action(
+            item_id=body.item_id, action=body.action, db=db,
+            new_keyword=body.new_keyword, new_pillar=body.new_pillar,
+        )
+        return {"ok": ok, "item_id": body.item_id, "action": body.action}
+
+    @app.post("/api/ki/{project_id}/review/{session_id}/accept-all", tags=["KeywordInput"])
+    def ki_accept_all(project_id: str, session_id: str, body: _KIAcceptAll, user=Depends(current_user)):
+        """Accept all pending keywords (optionally filtered by pillar/intent)."""
+        from engines.annaseo_keyword_input import ReviewManager
+        rm = ReviewManager()
+        db = _ki_db()
+        count = rm.accept_all(session_id=session_id, db=db, pillar=body.pillar, intent=body.intent)
+        return {"accepted": count}
+
+    @app.post("/api/ki/{project_id}/confirm/{session_id}", tags=["KeywordInput"])
+    def ki_confirm(project_id: str, session_id: str, user=Depends(current_user)):
+        """Confirm the universe — lock session and return keyword list for pipeline."""
+        keywords = _kie.confirm_universe(session_id=session_id, project_id=project_id)
+        db = _ki_db()
+        stats = db.execute(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END) as accepted "
+            "FROM keyword_universe_items WHERE session_id=? AND project_id=?",
+            (session_id, project_id)
+        ).fetchone()
+        pillars = db.execute(
+            "SELECT COUNT(DISTINCT pillar) FROM keyword_universe_items WHERE session_id=? AND project_id=?",
+            (session_id, project_id)
+        ).fetchone()
+        return {
+            "status": "confirmed",
+            "session_id": session_id,
+            "keyword_count": len(keywords),
+            "accepted_count": (stats["accepted"] if stats else 0) or 0,
+            "pillar_count": (pillars[0] if pillars else 0) or 0,
+        }
+
+    @app.get("/api/ki/{project_id}/universe/{session_id}/by-pillar", tags=["KeywordInput"])
+    def ki_by_pillar(project_id: str, session_id: str, user=Depends(current_user)):
+        """Get universe grouped by pillar with counts per status."""
+        db = _ki_db()
+        rows = db.execute(
+            """
+            SELECT pillar,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN status='accepted' THEN 1 ELSE 0 END) as accepted,
+                   SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) as rejected,
+                   SUM(CASE WHEN status='pending'  THEN 1 ELSE 0 END) as pending
+            FROM keyword_universe_items
+            WHERE session_id=? AND project_id=?
+            GROUP BY pillar ORDER BY pillar
+            """,
+            (session_id, project_id)
+        ).fetchall()
+        return {"pillars": [dict(r) for r in rows]}
+
+    log.info("[main] KeywordInputEngine routes registered at /api/ki/")
+
+except Exception as _ki_err:
+    log.warning(f"[main] KeywordInputEngine not loaded: {_ki_err}")
 
