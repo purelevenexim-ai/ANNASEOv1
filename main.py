@@ -359,10 +359,10 @@ async def _execute_run(run_id,project_id,body):
                 _threading.Event().wait(1)
                 row=conn.execute("SELECT status FROM runs WHERE run_id=?",(run_id,)).fetchone()
                 if row:
-                    st=dict(row)["status"]
+                    st=row[0]
                     if st==f"confirmed:{gate_name}":
                         ev=conn.execute("SELECT payload FROM run_events WHERE run_id=? AND event_type=? ORDER BY id DESC LIMIT 1",(run_id,f"confirm_{gate_name}")).fetchone()
-                        conn.close(); return json.loads(dict(ev)["payload"]) if ev else data
+                        conn.close(); return json.loads(ev[0]) if ev else data
                     if st=="cancelled": conn.close(); return None
             conn.close(); return None
         result=await asyncio.get_event_loop().run_in_executor(None,lambda:ruflo.run_seed(keyword=body.seed,pace=pace,language=body.language,region=body.region,generate_articles=body.generate_articles,publish=body.publish,project_id=project_id,run_id=run_id,gate_callback=gate_cb))
@@ -748,3 +748,217 @@ def health():
 
 @app.get("/",tags=["System"])
 def root(): return {"name":"AnnaSEO","version":"1.0.0","docs":"/docs","health":"/api/health"}
+
+# ── CRUD additions ────────────────────────────────────────────────────────────
+
+class ProjectUpdateBody(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    seed_keywords: Optional[List[str]] = None
+    language: Optional[str] = None
+    region: Optional[str] = None
+    religion: Optional[str] = None
+    wp_url: Optional[str] = None
+    wp_user: Optional[str] = None
+    wp_password: Optional[str] = None
+    industry: Optional[str] = None
+
+@app.put("/api/projects/{project_id}", tags=["Projects"])
+def update_project(project_id: str, body: ProjectUpdateBody, user=Depends(current_user)):
+    db = get_db()
+    row = db.execute("SELECT * FROM projects WHERE project_id=?", (project_id,)).fetchone()
+    if not row: raise HTTPException(404, "Not found")
+    p = dict(row)
+    fields, vals = [], []
+    if body.name        is not None: fields.append("name=?");              vals.append(body.name)
+    if body.description is not None: fields.append("description=?");       vals.append(body.description)
+    if body.seed_keywords is not None: fields.append("seed_keywords=?");   vals.append(json.dumps(body.seed_keywords))
+    if body.language    is not None: fields.append("language=?");          vals.append(body.language)
+    if body.region      is not None: fields.append("region=?");            vals.append(body.region)
+    if body.religion    is not None: fields.append("religion=?");          vals.append(body.religion)
+    if body.wp_url      is not None: fields.append("wp_url=?");            vals.append(body.wp_url)
+    if body.wp_user     is not None: fields.append("wp_user=?");           vals.append(body.wp_user)
+    if body.wp_password is not None: fields.append("wp_pass_enc=?");       vals.append(_encrypt(body.wp_password))
+    if body.industry    is not None:
+        if body.industry not in VALID_INDUSTRIES: raise HTTPException(400, f"Unknown industry '{body.industry}'")
+        fields.append("industry=?"); vals.append(body.industry)
+    if not fields: return {"updated": False}
+    fields.append("updated_at=?"); vals.append(datetime.utcnow().isoformat())
+    vals.append(project_id)
+    db.execute(f"UPDATE projects SET {','.join(fields)} WHERE project_id=?", vals)
+    db.commit()
+    return {"updated": True, "project_id": project_id}
+
+class ArticleUpdateBody(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    meta_title: Optional[str] = None
+    meta_desc: Optional[str] = None
+    keyword: Optional[str] = None
+    status: Optional[str] = None
+
+@app.put("/api/content/{article_id}", tags=["Content"])
+def update_article(article_id: str, body: ArticleUpdateBody, user=Depends(current_user)):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM content_articles WHERE article_id=?", (article_id,)).fetchone():
+        raise HTTPException(404, "Not found")
+    fields, vals = [], []
+    if body.title      is not None: fields.append("title=?");      vals.append(body.title)
+    if body.body       is not None: fields.append("body=?");        vals.append(body.body)
+    if body.meta_title is not None: fields.append("meta_title=?"); vals.append(body.meta_title)
+    if body.meta_desc  is not None: fields.append("meta_desc=?");  vals.append(body.meta_desc)
+    if body.keyword    is not None: fields.append("keyword=?");    vals.append(body.keyword)
+    if body.status     is not None: fields.append("status=?");     vals.append(body.status)
+    if not fields: return {"updated": False}
+    fields.append("updated_at=?"); vals.append(datetime.utcnow().isoformat())
+    vals.append(article_id)
+    db.execute(f"UPDATE content_articles SET {','.join(fields)} WHERE article_id=?", vals)
+    db.commit()
+    return {"updated": True, "article_id": article_id}
+
+@app.delete("/api/content/{article_id}", tags=["Content"])
+def delete_article(article_id: str, user=Depends(current_user)):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM content_articles WHERE article_id=?", (article_id,)).fetchone():
+        raise HTTPException(404, "Not found")
+    db.execute("DELETE FROM content_articles WHERE article_id=?", (article_id,))
+    db.commit()
+    return {"deleted": article_id}
+
+@app.delete("/api/runs/{run_id}", tags=["Runs"])
+def delete_run(run_id: str, user=Depends(current_user)):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone():
+        raise HTTPException(404, "Not found")
+    db.execute("DELETE FROM run_events WHERE run_id=?", (run_id,))
+    db.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+    db.commit()
+    return {"deleted": run_id}
+
+
+# ── Error/Bug Collector & Fixer ───────────────────────────────────────────────
+
+def _ensure_error_tables(db: sqlite3.Connection):
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS error_reports (
+        error_id   TEXT PRIMARY KEY,
+        source     TEXT DEFAULT 'engine',
+        message    TEXT DEFAULT '',
+        traceback  TEXT DEFAULT '',
+        context    TEXT DEFAULT '{}',
+        status     TEXT DEFAULT 'new',
+        run_id     TEXT DEFAULT '',
+        project_id TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS fix_proposals (
+        fix_id            TEXT PRIMARY KEY,
+        error_id          TEXT NOT NULL,
+        target_file       TEXT DEFAULT '',
+        target_function   TEXT DEFAULT '',
+        original_snippet  TEXT DEFAULT '',
+        proposed_snippet  TEXT DEFAULT '',
+        diff_text         TEXT DEFAULT '',
+        snapshot_text     TEXT DEFAULT '',
+        ai_draft_model    TEXT DEFAULT 'groq',
+        claude_verdict    TEXT DEFAULT 'pending',
+        claude_reason     TEXT DEFAULT '',
+        status            TEXT DEFAULT 'pending',
+        created_at        TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
+    db.commit()
+
+# Call at startup
+@app.on_event("startup")
+async def _init_error_tables():
+    _ensure_error_tables(get_db())
+
+class ErrorReportBody(BaseModel):
+    source: str = "browser"
+    message: str = ""
+    traceback: str = ""
+    context: dict = {}
+    project_id: str = ""
+    run_id: str = ""
+
+@app.post("/api/errors/report", tags=["BugFixer"])
+def report_error(body: ErrorReportBody):
+    """Receive browser or engine error — no auth required."""
+    db = get_db()
+    _ensure_error_tables(db)
+    from engines.annaseo_error_fixer import ErrorCollector
+    eid = ErrorCollector().store_browser_error(
+        message=body.message, traceback=body.traceback,
+        context=body.context, project_id=body.project_id, db=db
+    )
+    if body.run_id:
+        db.execute("UPDATE error_reports SET run_id=? WHERE error_id=?", (body.run_id, eid))
+        db.commit()
+    return {"error_id": eid}
+
+@app.get("/api/errors", tags=["BugFixer"])
+def list_errors(limit: int = 100, user=Depends(current_user)):
+    db = get_db()
+    _ensure_error_tables(db)
+    rows = db.execute(
+        "SELECT error_id,source,message,traceback,status,run_id,project_id,created_at "
+        "FROM error_reports ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/errors/{error_id}/analyze", tags=["BugFixer"])
+async def analyze_error(error_id: str, bg: BackgroundTasks, user=Depends(current_user)):
+    """Trigger Groq→Claude analysis in background. Returns immediately."""
+    db = get_db()
+    _ensure_error_tables(db)
+    if not db.execute("SELECT 1 FROM error_reports WHERE error_id=?", (error_id,)).fetchone():
+        raise HTTPException(404, "Not found")
+    def _do():
+        from engines.annaseo_error_fixer import BugAnalyzer
+        BugAnalyzer().analyze(error_id, get_db())
+    bg.add_task(_do)
+    return {"status": "analyzing", "error_id": error_id}
+
+@app.get("/api/fixes", tags=["BugFixer"])
+def list_fixes(limit: int = 50, user=Depends(current_user)):
+    db = get_db()
+    _ensure_error_tables(db)
+    rows = db.execute(
+        "SELECT fix_id,error_id,target_file,target_function,"
+        "original_snippet,proposed_snippet,diff_text,"
+        "ai_draft_model,claude_verdict,claude_reason,status,created_at "
+        "FROM fix_proposals ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/fixes/{fix_id}/approve", tags=["BugFixer"])
+def approve_fix(fix_id: str, user=Depends(current_user)):
+    db = get_db()
+    _ensure_error_tables(db)
+    from engines.annaseo_error_fixer import FixApplicator
+    ok = FixApplicator().apply(fix_id, db)
+    if not ok:
+        raise HTTPException(400, "Could not apply fix — check target file and snippet match")
+    return {"applied": True, "fix_id": fix_id}
+
+@app.post("/api/fixes/{fix_id}/reject", tags=["BugFixer"])
+def reject_fix(fix_id: str, user=Depends(current_user)):
+    db = get_db()
+    _ensure_error_tables(db)
+    if not db.execute("SELECT 1 FROM fix_proposals WHERE fix_id=?", (fix_id,)).fetchone():
+        raise HTTPException(404, "Not found")
+    db.execute("UPDATE fix_proposals SET status='rejected' WHERE fix_id=?", (fix_id,))
+    db.commit()
+    return {"rejected": True, "fix_id": fix_id}
+
+@app.post("/api/fixes/{fix_id}/rollback", tags=["BugFixer"])
+def rollback_fix(fix_id: str, user=Depends(current_user)):
+    db = get_db()
+    _ensure_error_tables(db)
+    from engines.annaseo_error_fixer import FixRollback
+    ok = FixRollback().rollback(fix_id, db)
+    if not ok:
+        raise HTTPException(400, "Rollback failed — no snapshot available")
+    return {"rolled_back": True, "fix_id": fix_id}
+

@@ -65,6 +65,14 @@ const api = {
     })
     return r.json()
   },
+  delete: async (path) => {
+    const token = useStore.getState().token
+    const r = await fetch(`${API}${path}`, {
+      method: "DELETE",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    })
+    return r.json()
+  },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +218,97 @@ function LoadingSpinner() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MODAL — Edit Project
+// ─────────────────────────────────────────────────────────────────────────────
+function EditProjectModal({ project, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    name: project.name || "",
+    description: project.description || "",
+    seed_keywords: JSON.parse(project.seed_keywords || "[]").join(", "),
+    language: project.language || "english",
+    region: project.region || "india",
+    religion: project.religion || "general",
+    wp_url: project.wp_url || "",
+    wp_user: project.wp_user || "",
+    wp_password: "",
+  })
+  const [saving, setSaving] = useState(false)
+
+  const save = async () => {
+    setSaving(true)
+    await api.put(`/api/projects/${project.project_id}`, {
+      ...form,
+      seed_keywords: form.seed_keywords.split(",").map(s => s.trim()).filter(Boolean),
+    })
+    setSaving(false)
+    onSaved()
+    onClose()
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000,
+      display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 24, width: 440, maxHeight: "80vh", overflowY: "auto" }}>
+        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Edit project</div>
+        {[
+          ["Project name", "name", "text"],
+          ["Description", "description", "text"],
+          ["Seed keywords (comma-separated)", "seed_keywords", "text"],
+          ["WordPress URL", "wp_url", "text"],
+          ["WordPress user", "wp_user", "text"],
+          ["WordPress password", "wp_password", "password"],
+        ].map(([label, key, type]) => (
+          <div key={key} style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 11, color: T.gray, display: "block", marginBottom: 3 }}>{label}</label>
+            <input type={type} value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })}
+              style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12, boxSizing: "border-box" }}/>
+          </div>
+        ))}
+        {[
+          ["Language", "language", ["english","malayalam","hindi","tamil","arabic"]],
+          ["Region", "region", ["india","kerala","wayanad","global","south_india"]],
+          ["Religion context", "religion", ["general","ayurveda","halal","unani","hindu","christian"]],
+        ].map(([label, key, opts]) => (
+          <div key={key} style={{ marginBottom: 10 }}>
+            <label style={{ fontSize: 11, color: T.gray, display: "block", marginBottom: 3 }}>{label}</label>
+            <select value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })}
+              style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12, boxSizing: "border-box" }}>
+              {opts.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <Btn onClick={onClose}>Cancel</Btn>
+          <Btn onClick={save} variant="primary" disabled={saving} style={{ flex: 1 }}>
+            {saving ? "Saving..." : "Save changes"}
+          </Btn>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODAL — Confirm delete
+// ─────────────────────────────────────────────────────────────────────────────
+function ConfirmModal({ message, onConfirm, onClose }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000,
+      display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 24, width: 320 }}>
+        <div style={{ fontSize: 14, marginBottom: 20 }}>{message}</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn onClick={onClose} style={{ flex: 1 }}>Cancel</Btn>
+          <Btn onClick={onConfirm} variant="danger" style={{ flex: 1 }}>Delete</Btn>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PAGE: LOGIN
 // ─────────────────────────────────────────────────────────────────────────────
 function LoginPage() {
@@ -282,6 +381,9 @@ function LoginPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 function DashboardPage() {
   const { activeProject, setPage, setProject } = useStore()
+  const qclient = useQueryClient()
+  const [editingProject, setEditingProject] = useState(null)
+  const [deletingProject, setDeletingProject] = useState(null)
   const { data: projects, isLoading } = useQuery({ queryKey: ["projects"], queryFn: () => api.get("/api/projects") })
   const { data: health } = useQuery({ queryKey: ["health"], queryFn: () => api.get("/api/health"), refetchInterval: 30000 })
   const { data: costs } = useQuery({ queryKey: ["costs", activeProject], queryFn: () => activeProject ? api.get(`/api/costs/${activeProject}`) : null, enabled: !!activeProject })
@@ -342,14 +444,20 @@ function DashboardPage() {
       {/* Projects grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, marginBottom: 20 }}>
         {(projects || []).map(p => (
-          <Card key={p.project_id} onClick={() => { setProject(p.project_id); setPage("keywords") }}
+          <Card key={p.project_id}
             style={{ cursor: "pointer", borderColor: activeProject === p.project_id ? T.purple : "rgba(0,0,0,0.1)", borderWidth: activeProject === p.project_id ? 1.5 : 0.5 }}>
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
-              <div>
+              <div onClick={() => { setProject(p.project_id); setPage("keywords") }} style={{ flex: 1, cursor: "pointer" }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{p.name}</div>
                 <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>{p.industry}</div>
               </div>
-              <Badge color={p.status === "active" ? "teal" : "gray"}>{p.status}</Badge>
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <Badge color={p.status === "active" ? "teal" : "gray"}>{p.status}</Badge>
+                <button onClick={e => { e.stopPropagation(); setEditingProject(p) }}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.gray, padding: "0 3px" }} title="Edit">✎</button>
+                <button onClick={e => { e.stopPropagation(); setDeletingProject(p) }}
+                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.red, padding: "0 3px" }} title="Delete">✕</button>
+              </div>
             </div>
             <div style={{ marginTop: 10, fontSize: 11, color: T.gray }}>
               {JSON.parse(p.seed_keywords || "[]").slice(0,3).join(", ") || "No seeds yet"}
@@ -357,6 +465,20 @@ function DashboardPage() {
           </Card>
         ))}
       </div>
+
+      {editingProject && (
+        <EditProjectModal project={editingProject} onClose={() => setEditingProject(null)}
+          onSaved={() => qclient.invalidateQueries(["projects"])}/>
+      )}
+      {deletingProject && (
+        <ConfirmModal message={`Delete project "${deletingProject.name}"? This cannot be undone.`}
+          onClose={() => setDeletingProject(null)}
+          onConfirm={async () => {
+            await api.delete(`/api/projects/${deletingProject.project_id}`)
+            qclient.invalidateQueries(["projects"])
+            setDeletingProject(null)
+          }}/>
+      )}
 
       {/* Cost overview */}
       {costs && (
@@ -374,42 +496,67 @@ function DashboardPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 // PAGE: KEYWORDS / UNIVERSE (P2) — with SSE console
 // ─────────────────────────────────────────────────────────────────────────────
+// PAGE: KEYWORD UNIVERSE — 20-phase runner with editable gates
+// ─────────────────────────────────────────────────────────────────────────────
 function KeywordsPage() {
   const { activeProject } = useStore()
+  const qclient = useQueryClient()
   const [seed, setSeed] = useState("")
   const [runId, setRunId] = useState(null)
   const [events, setEvents] = useState([])
   const [runStatus, setRunStatus] = useState("idle") // idle | running | waiting_gate | complete | error
   const [gateData, setGateData] = useState(null)
   const [gateName, setGateName] = useState(null)
+  // editable state per gate
+  const [editedKeywords, setEditedKeywords] = useState("")       // textarea for universe_keywords
+  const [editedClusters, setEditedClusters] = useState([])       // [{name,checked}] for pillars
   const esRef = useRef(null)
-  const { data: runs } = useQuery({ queryKey: ["runs", activeProject], queryFn: () => api.get(`/api/projects/${activeProject}/runs`), enabled: !!activeProject })
+  const { data: runs, refetch: refetchRuns } = useQuery({ queryKey: ["runs", activeProject], queryFn: () => api.get(`/api/projects/${activeProject}/runs`), enabled: !!activeProject })
 
   const startRun = async () => {
     if (!seed.trim() || !activeProject) return
-    setEvents([]); setRunStatus("running")
+    setEvents([]); setRunStatus("running"); setGateData(null); setGateName(null)
     const data = await api.post(`/api/projects/${activeProject}/runs`, { seed: seed.trim(), language: "english", region: "india" })
     if (!data?.run_id) { setRunStatus("error"); return }
     setRunId(data.run_id)
-    // Connect SSE
     if (esRef.current) esRef.current.close()
     const es = new EventSource(`${API}${data.stream_url}`)
     esRef.current = es
     es.onmessage = (e) => {
       const ev = JSON.parse(e.data)
-      ev.timestamp = new Date().toISOString()
+      ev.ts = new Date().toLocaleTimeString()
       setEvents(prev => [...prev, ev])
-      if (ev.type === "gate") { setGateData(ev.data); setGateName(ev.gate); setRunStatus("waiting_gate") }
-      if (ev.type === "complete") { setRunStatus("complete"); es.close() }
-      if (ev.type === "error") { setRunStatus("error"); es.close() }
+      if (ev.type === "gate") {
+        setGateData(ev.data); setGateName(ev.gate); setRunStatus("waiting_gate")
+        if (ev.gate === "universe_keywords") {
+          setEditedKeywords((ev.data?.keywords || []).join("\n"))
+        }
+        if (ev.gate === "pillars") {
+          setEditedClusters((ev.data?.clusters || []).map(c => ({ name: c, checked: true })))
+        }
+      }
+      if (ev.type === "complete") { setRunStatus("complete"); es.close(); refetchRuns() }
+      if (ev.type === "error") { setRunStatus("error"); es.close(); refetchRuns() }
     }
     es.onerror = () => { setRunStatus("error"); es.close() }
   }
 
-  const confirmGate = async () => {
-    await api.post(`/api/runs/${runId}/confirm/${gateName}`, gateData || {})
+  const confirmGate = async (payload) => {
+    await api.post(`/api/runs/${runId}/confirm/${gateName}`, payload)
     setRunStatus("running"); setGateData(null); setGateName(null)
   }
+
+  const confirmKeywords = () => {
+    const kws = editedKeywords.split("\n").map(k => k.trim()).filter(Boolean)
+    confirmGate({ keywords: kws })
+  }
+
+  const confirmPillars = () => {
+    const removed = editedClusters.filter(c => !c.checked).map(c => c.name)
+    confirmGate({ removed_clusters: removed })
+  }
+
+  const statusColor = { idle: T.gray, running: T.teal, waiting_gate: T.amber, complete: T.teal, error: T.red }
 
   return (
     <div>
@@ -419,31 +566,106 @@ function KeywordsPage() {
       <Card style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Run 20-phase keyword universe</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <input value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Enter seed keyword (e.g. cinnamon)"
+          <input value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Enter seed keyword (e.g. turmeric)"
             onKeyDown={e => e.key === "Enter" && startRun()}
             style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 13 }}/>
           <Btn onClick={startRun} variant="primary" disabled={runStatus === "running"}>
             {runStatus === "running" ? "Running..." : "Start run"}
           </Btn>
         </div>
-        {runStatus === "waiting_gate" && (
-          <div style={{ marginTop: 12, padding: "10px 12px", background: T.amberLight, borderRadius: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 500, color: T.amber, marginBottom: 6 }}>
-              Gate {gateName} — review and confirm to continue
-            </div>
-            <div style={{ fontSize: 11, color: T.gray, marginBottom: 8 }}>
-              {gateData ? JSON.stringify(gateData).slice(0, 200) : ""}
-            </div>
-            <Btn onClick={confirmGate} variant="success" small>✓ Confirm and continue</Btn>
-          </div>
-        )}
       </Card>
+
+      {/* Gate: universe_keywords — editable keyword list after P3 */}
+      {runStatus === "waiting_gate" && gateName === "universe_keywords" && (
+        <Card style={{ marginBottom: 16, border: `1.5px solid ${T.amber}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.amber }}>Gate A — P3 Keywords</div>
+              <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
+                {editedKeywords.split("\n").filter(Boolean).length} keywords ready for P4–P9.
+                Edit the list below — remove irrelevant ones, add new ones (one per line).
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn onClick={() => confirmGate({ keywords: gateData?.keywords || [] })} small>Skip edits</Btn>
+              <Btn onClick={confirmKeywords} variant="success" small>
+                ✓ Confirm {editedKeywords.split("\n").filter(Boolean).length} keywords → P4
+              </Btn>
+            </div>
+          </div>
+          <textarea
+            value={editedKeywords}
+            onChange={e => setEditedKeywords(e.target.value)}
+            rows={12}
+            style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)",
+                     fontSize: 12, fontFamily: "monospace", resize: "vertical", boxSizing: "border-box",
+                     background: "#fafafa", lineHeight: 1.6 }}
+            placeholder="One keyword per line…"
+          />
+          <div style={{ marginTop: 6, fontSize: 11, color: T.gray }}>
+            Tip: Remove keywords that are off-topic, too broad, or low-value before continuing.
+          </div>
+        </Card>
+      )}
+
+      {/* Gate: pillars — cluster checklist after P9 */}
+      {runStatus === "waiting_gate" && gateName === "pillars" && (
+        <Card style={{ marginBottom: 16, border: `1.5px solid ${T.amber}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.amber }}>Gate B — Pillar Review</div>
+              <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
+                {editedClusters.filter(c=>c.checked).length}/{editedClusters.length} pillars selected.
+                Uncheck any pillar to remove it from the content plan.
+              </div>
+            </div>
+            <Btn onClick={confirmPillars} variant="success" small>
+              ✓ Confirm {editedClusters.filter(c=>c.checked).length} pillars → P10
+            </Btn>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            {editedClusters.map((c, i) => (
+              <label key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+                borderRadius: 8, background: c.checked ? T.tealLight : "#f5f5f5",
+                cursor: "pointer", fontSize: 12, fontWeight: c.checked ? 500 : 400,
+                color: c.checked ? T.teal : T.gray, border: `0.5px solid ${c.checked ? T.teal : "transparent"}` }}>
+                <input type="checkbox" checked={c.checked}
+                  onChange={() => setEditedClusters(prev => prev.map((x,j) => j===i ? {...x,checked:!x.checked} : x))}
+                  style={{ accentColor: T.teal }}/>
+                {c.name}
+              </label>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Gate: content_calendar — confirm calendar */}
+      {runStatus === "waiting_gate" && gateName === "content_calendar" && (
+        <Card style={{ marginBottom: 16, border: `1.5px solid ${T.amber}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.amber }}>Gate C — Content Calendar</div>
+              <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
+                {gateData?.calendar_count || 0} articles planned. Review and confirm to start generation.
+              </div>
+            </div>
+            <Btn onClick={() => confirmGate(gateData || {})} variant="success" small>
+              ✓ Confirm and generate content
+            </Btn>
+          </div>
+          <pre style={{ fontSize: 11, color: T.gray, background: "#f8f8f8", padding: 10, borderRadius: 8,
+                        maxHeight: 200, overflow: "auto", margin: 0 }}>
+            {JSON.stringify(gateData, null, 2)}
+          </pre>
+        </Card>
+      )}
 
       {/* SSE Console */}
       <Card style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
           Engine console
           {runStatus === "running" && <span style={{ width: 7, height: 7, borderRadius: "50%", background: T.teal, display: "inline-block", animation: "pulse 1s infinite" }}/>}
+          {runStatus === "waiting_gate" && <Badge color="amber">Waiting for review</Badge>}
           {runStatus === "complete" && <Badge color="teal">Complete</Badge>}
           {runStatus === "error" && <Badge color="red">Error</Badge>}
         </div>
@@ -460,6 +682,11 @@ function KeywordsPage() {
               <span style={{ flex: 1, fontWeight: 500 }}>{r.seed}</span>
               <Badge color={r.status === "complete" ? "teal" : r.status === "error" ? "red" : "amber"}>{r.status}</Badge>
               <span style={{ color: T.gray, fontSize: 11 }}>{r.started_at?.slice(0,16)}</span>
+              <button onClick={async () => {
+                if (!window.confirm(`Delete run "${r.seed}"?`)) return
+                await api.delete(`/api/runs/${r.run_id}`)
+                qclient.invalidateQueries(["runs", activeProject])
+              }} style={{ background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:13 }} title="Delete run">✕</button>
             </div>
           ))}
         </Card>
@@ -554,6 +781,7 @@ function ContentPage() {
   const qclient = useQueryClient()
   const [kw, setKw] = useState("")
   const [selected, setSelected] = useState(null)
+  const [editingArticle, setEditingArticle] = useState(null) // {article_id, title, meta_title, meta_desc}
   const { data: articles, isLoading } = useQuery({
     queryKey: ["articles", activeProject],
     queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/content`) : [],
@@ -623,25 +851,58 @@ function ContentPage() {
         </Card>
 
         {isLoading ? <LoadingSpinner/> : (articles || []).map(a => (
-          <Card key={a.article_id} onClick={() => setSelected(a)}
-            style={{ marginBottom: 8, cursor: "pointer", borderColor: selected?.article_id === a.article_id ? T.purple : "rgba(0,0,0,0.1)" }}>
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 500, color: "#1a1a1a" }}>{a.title || a.keyword}</div>
-                <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>{a.keyword}</div>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                <Badge color={statusColor[a.status] || "gray"}>{a.status}</Badge>
-                {a.seo_score > 0 && <div style={{ display: "flex", gap: 4 }}>
-                  {[["SEO", a.seo_score], ["EEAT", a.eeat_score], ["GEO", a.geo_score]].map(([l, s]) => (
-                    <span key={l} style={{ fontSize: 9, color: (s||0) >= 75 ? T.teal : T.amber }}>
-                      {l}:{Math.round(s||0)}
-                    </span>
-                  ))}
-                </div>}
-              </div>
-            </div>
-          </Card>
+          <div key={a.article_id}>
+            {editingArticle?.article_id === a.article_id ? (
+              <Card style={{ marginBottom: 8, border: `1.5px solid ${T.purple}` }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: T.purple, marginBottom: 8 }}>Editing: {a.keyword}</div>
+                {[["Title", "title"], ["Meta title", "meta_title"], ["Meta description", "meta_desc"]].map(([label, field]) => (
+                  <div key={field} style={{ marginBottom: 7 }}>
+                    <label style={{ fontSize: 10, color: T.gray, display: "block", marginBottom: 2 }}>{label}</label>
+                    <input value={editingArticle[field] || ""} onChange={e => setEditingArticle({ ...editingArticle, [field]: e.target.value })}
+                      style={{ width: "100%", padding: "6px 8px", borderRadius: 7, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 11, boxSizing: "border-box" }}/>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <Btn small onClick={() => setEditingArticle(null)}>Cancel</Btn>
+                  <Btn small variant="primary" onClick={async () => {
+                    await api.put(`/api/content/${a.article_id}`, {
+                      title: editingArticle.title,
+                      meta_title: editingArticle.meta_title,
+                      meta_desc: editingArticle.meta_desc,
+                    })
+                    qclient.invalidateQueries(["articles", activeProject])
+                    setEditingArticle(null)
+                  }}>Save</Btn>
+                </div>
+              </Card>
+            ) : (
+              <Card onClick={() => setSelected(a)}
+                style={{ marginBottom: 8, cursor: "pointer", borderColor: selected?.article_id === a.article_id ? T.purple : "rgba(0,0,0,0.1)" }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500, color: "#1a1a1a" }}>{a.title || a.keyword}</div>
+                    <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>{a.keyword}</div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <Badge color={statusColor[a.status] || "gray"}>{a.status}</Badge>
+                      <button onClick={e => { e.stopPropagation(); setEditingArticle({ article_id: a.article_id, title: a.title || "", meta_title: a.meta_title || "", meta_desc: a.meta_desc || "" }) }}
+                        style={{ background:"none",border:"none",cursor:"pointer",color:T.gray,fontSize:13 }} title="Edit">✎</button>
+                      <button onClick={e => { e.stopPropagation(); if(window.confirm("Delete this article?")) { api.delete(`/api/content/${a.article_id}`).then(() => qclient.invalidateQueries(["articles", activeProject])) }}}
+                        style={{ background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:12 }} title="Delete">✕</button>
+                    </div>
+                    {a.seo_score > 0 && <div style={{ display: "flex", gap: 4 }}>
+                      {[["SEO", a.seo_score], ["EEAT", a.eeat_score], ["GEO", a.geo_score]].map(([l, s]) => (
+                        <span key={l} style={{ fontSize: 9, color: (s||0) >= 75 ? T.teal : T.amber }}>
+                          {l}:{Math.round(s||0)}
+                        </span>
+                      ))}
+                    </div>}
+                  </div>
+                </div>
+              </Card>
+            )}
+          </div>
         ))}
       </div>
 
@@ -1403,9 +1664,10 @@ const NAV = [
   { id: "calendar",     label: "Calendar",     icon: "⬛" },
   { id: "seo-checker",  label: "SEO checker",  icon: "⬛" },
   { id: "rankings",     label: "Rankings",     icon: "⬛" },
-  { id: "quality",      label: "Quality",     icon: "⬛" },
+  { id: "quality",      label: "Quality",      icon: "⬛" },
   { id: "rsd",          label: "Research & Dev", icon: "⬛" },
-  { id: "settings",     label: "Settings",    icon: "⬛" },
+  { id: "bug-fixer",    label: "Bug Fixer",    icon: "⬛" },
+  { id: "settings",     label: "Settings",     icon: "⬛" },
 ]
 
 function Sidebar({ page, setPage }) {
@@ -1560,11 +1822,200 @@ function SettingsPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PAGE: BUG FIXER — error collector + AI fix proposals
+// ─────────────────────────────────────────────────────────────────────────────
+function BugFixerPage() {
+  const [tab, setTab] = useState("errors")
+  const qclient = useQueryClient()
+
+  const { data: errors, isLoading: errLoading } = useQuery({
+    queryKey: ["errors"],
+    queryFn: () => api.get("/api/errors?limit=50"),
+    refetchInterval: 15000,
+  })
+  const { data: fixes, isLoading: fixLoading } = useQuery({
+    queryKey: ["fixes"],
+    queryFn: () => api.get("/api/fixes?limit=50"),
+    refetchInterval: 15000,
+  })
+
+  const analyze = useMutation({
+    mutationFn: (id) => api.post(`/api/errors/${id}/analyze`, {}),
+    onSuccess: () => { setTimeout(() => qclient.invalidateQueries(["errors"]), 2000) }
+  })
+  const approveFix = useMutation({
+    mutationFn: (id) => api.post(`/api/fixes/${id}/approve`, {}),
+    onSuccess: () => qclient.invalidateQueries(["fixes"])
+  })
+  const rejectFix = useMutation({
+    mutationFn: (id) => api.post(`/api/fixes/${id}/reject`, {}),
+    onSuccess: () => qclient.invalidateQueries(["fixes"])
+  })
+  const rollbackFix = useMutation({
+    mutationFn: (id) => api.post(`/api/fixes/${id}/rollback`, {}),
+    onSuccess: () => qclient.invalidateQueries(["fixes"])
+  })
+
+  const statusColor = {
+    new: "gray", analyzing: "amber", fix_ready: "purple",
+    approved: "teal", applied: "teal", rejected: "red", rolled_back: "gray"
+  }
+  const verdictColor = { approved: "teal", rejected: "red", pending: "amber" }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>Bug Fixer</div>
+        <div style={{ fontSize: 12, color: T.gray }}>
+          {(errors || []).filter(e => e.status === "new").length} new errors ·
+          {" "}{(fixes || []).filter(f => f.status === "pending").length} fixes awaiting approval
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 4, borderBottom: "0.5px solid rgba(0,0,0,0.1)", marginBottom: 14 }}>
+        {["errors","fixes"].map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            padding: "5px 14px", fontSize: 11, fontWeight: 500, cursor: "pointer",
+            background: "none", border: "none",
+            borderBottom: tab === t ? `2px solid ${T.purple}` : "2px solid transparent",
+            color: tab === t ? T.purple : T.gray, marginBottom: -1,
+          }}>{t === "errors" ? `Errors (${(errors||[]).length})` : `Fix Proposals (${(fixes||[]).length})`}</button>
+        ))}
+      </div>
+
+      {tab === "errors" && (
+        <div>
+          {errLoading ? <LoadingSpinner/> : (errors || []).length === 0 ? (
+            <div style={{ color: T.gray, fontSize: 13, padding: "20px 0", textAlign: "center" }}>No errors recorded yet.</div>
+          ) : (errors || []).map(e => (
+            <Card key={e.error_id} style={{ marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 4, flexWrap: "wrap" }}>
+                    <Badge color={e.source === "browser" ? "amber" : "purple"}>{e.source}</Badge>
+                    <Badge color={statusColor[e.status] || "gray"}>{e.status}</Badge>
+                    <span style={{ fontSize: 10, color: T.gray }}>{e.created_at?.slice(0,16)}</span>
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: "#1a1a1a", marginBottom: 3 }}>
+                    {e.message?.slice(0, 120)}
+                  </div>
+                  {e.traceback && (
+                    <div style={{ fontSize: 10, color: T.gray, fontFamily: "monospace",
+                      background: "#f5f5f5", borderRadius: 6, padding: "4px 8px", marginTop: 4,
+                      maxHeight: 60, overflow: "hidden" }}>
+                      {e.traceback?.slice(0, 200)}
+                    </div>
+                  )}
+                </div>
+                {["new","fix_ready"].includes(e.status) && (
+                  <Btn small variant="primary" disabled={analyze.isPending || e.status === "analyzing"}
+                    onClick={() => analyze.mutate(e.error_id)}>
+                    {e.status === "analyzing" ? "Analyzing..." : "Analyze"}
+                  </Btn>
+                )}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {tab === "fixes" && (
+        <div>
+          {fixLoading ? <LoadingSpinner/> : (fixes || []).length === 0 ? (
+            <div style={{ color: T.gray, fontSize: 13, padding: "20px 0", textAlign: "center" }}>No fix proposals yet. Analyze an error first.</div>
+          ) : (fixes || []).map(f => (
+            <Card key={f.fix_id} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <Badge color={statusColor[f.status] || "gray"}>{f.status}</Badge>
+                <Badge color={verdictColor[f.claude_verdict] || "gray"}>Claude: {f.claude_verdict}</Badge>
+                <span style={{ fontSize: 11, color: T.gray }}>{f.target_file} → {f.target_function}</span>
+                <span style={{ fontSize: 10, color: T.gray, marginLeft: "auto" }}>{f.created_at?.slice(0,16)}</span>
+              </div>
+
+              {f.claude_reason && (
+                <div style={{ fontSize: 11, color: f.claude_verdict === "approved" ? T.teal : T.amber,
+                  background: f.claude_verdict === "approved" ? T.tealLight : T.amberLight,
+                  borderRadius: 6, padding: "5px 10px", marginBottom: 8 }}>
+                  Claude: {f.claude_reason}
+                </div>
+              )}
+
+              {/* Diff view */}
+              {f.diff_text && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: T.red, fontWeight: 500, marginBottom: 3 }}>Original</div>
+                    <pre style={{ fontSize: 10, background: "#FFF5F5", borderRadius: 6, padding: "6px 8px",
+                      maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
+                      margin: 0, color: T.red }}>
+                      {f.original_snippet?.slice(0, 400) || "(not extracted)"}
+                    </pre>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, color: T.teal, fontWeight: 500, marginBottom: 3 }}>Proposed fix</div>
+                    <pre style={{ fontSize: 10, background: "#F0FFF4", borderRadius: 6, padding: "6px 8px",
+                      maxHeight: 120, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all",
+                      margin: 0, color: T.teal }}>
+                      {f.proposed_snippet?.slice(0, 400)}
+                    </pre>
+                  </div>
+                </div>
+              )}
+
+              {f.status === "pending" && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Btn small variant="success" disabled={approveFix.isPending}
+                    onClick={() => approveFix.mutate(f.fix_id)}>✓ Approve & Apply</Btn>
+                  <Btn small variant="danger" disabled={rejectFix.isPending}
+                    onClick={() => rejectFix.mutate(f.fix_id)}>✕ Reject</Btn>
+                </div>
+              )}
+              {f.status === "applied" && (
+                <Btn small variant="danger" disabled={rollbackFix.isPending}
+                  onClick={() => { if(window.confirm("Roll back this fix?")) rollbackFix.mutate(f.fix_id) }}>
+                  ↩ Rollback
+                </Btn>
+              )}
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────────────────────
 
 function App() {
   const { token, currentPage, setPage } = useStore()
+
+  // Browser error capture → send to /api/errors/report
+  useEffect(() => {
+    const onError = (e) => {
+      api.post("/api/errors/report", {
+        source: "browser",
+        message: e.message || String(e),
+        traceback: `${e.filename || ""}:${e.lineno || 0}`,
+        context: { colno: e.colno, type: e.type },
+      }).catch(() => {})
+    }
+    const onUnhandled = (e) => {
+      api.post("/api/errors/report", {
+        source: "browser",
+        message: String(e.reason || "Unhandled promise rejection"),
+        traceback: "",
+        context: {},
+      }).catch(() => {})
+    }
+    window.addEventListener("error", onError)
+    window.addEventListener("unhandledrejection", onUnhandled)
+    return () => {
+      window.removeEventListener("error", onError)
+      window.removeEventListener("unhandledrejection", onUnhandled)
+    }
+  }, [])
 
   if (!token || currentPage === "login") return <LoginPage/>
 
@@ -1578,6 +2029,7 @@ function App() {
     rankings:     <RankingsPage/>,
     quality:      <QualityDashboard/>,
     "rsd":        <RSDPage/>,
+    "bug-fixer":  <BugFixerPage/>,
     "new-project":<NewProjectPage/>,
     settings:     <SettingsPage/>,
   }
