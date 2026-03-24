@@ -76,6 +76,8 @@ class Cfg:
     GEMINI_RATE     = float(os.getenv("GEMINI_RATE", "4.0"))
     ANTHROPIC_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL",   "claude-sonnet-4-6")
+    GROQ_KEY        = os.getenv("GROQ_API_KEY",   "")
+    GROQ_MODEL      = os.getenv("GROQ_MODEL",     "llama-3.3-70b-versatile")
     EMBED_MODEL     = "all-MiniLM-L6-v2"
 
     # Cache TTL (seconds)
@@ -91,6 +93,9 @@ class Cfg:
         "P13": 20,  "P14": 40,  "P15": 30,  "P16": 50,
         "P17": 30,  "P18": 10,  "P19": 20,  "P20": 40,
     }
+
+    # Quality gate threshold: minimum score for auto-publish
+    PUBLISH_THRESHOLD = 75  # 0-100, articles below this go to review queue
 
     # Heavy phases that must not run simultaneously
     HEAVY_PHASES = {"P4", "P8"}
@@ -356,6 +361,27 @@ class AI:
             log.warning(f"[AI] Gemini: {e}")
             return cls.deepseek(prompt, temperature=temperature)
 
+    @classmethod
+    def groq(cls, prompt: str, system: str = "You are an SEO expert.",
+              temperature: float = 0.2) -> str:
+        """Groq Llama — fast free inference. Primary AI for bulk processing."""
+        if not Cfg.GROQ_KEY:
+            return cls.deepseek(prompt, system=system, temperature=temperature)
+        try:
+            from groq import Groq
+            client = Groq(api_key=Cfg.GROQ_KEY)
+            resp = client.chat.completions.create(
+                model=Cfg.GROQ_MODEL,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user",   "content": prompt}],
+                temperature=temperature,
+                max_tokens=4096,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            log.warning(f"[AI] Groq: {e}")
+            return cls.deepseek(prompt, system=system, temperature=temperature)
+
     @staticmethod
     def claude(prompt: str, system: str, max_tokens: int = 4096) -> Tuple[str, int]:
         if not Cfg.ANTHROPIC_KEY:
@@ -430,11 +456,14 @@ class AI:
 
     @staticmethod
     def parse_json(text: str) -> Any:
-        text = re.sub(r"<think>.*?</think>","",text,flags=re.DOTALL)
-        text = re.sub(r"```(?:json)?","",text).strip().rstrip("`").strip()
-        m = re.search(r'(\{.*\}|\[.*\])',text,re.DOTALL)
-        if m: return json.loads(m.group(1))
-        return json.loads(text)
+        try:
+            text = re.sub(r"<think>.*?</think>","",text,flags=re.DOTALL)
+            text = re.sub(r"```(?:json)?","",text).strip().rstrip("`").strip()
+            m = re.search(r'(\{.*\}|\[.*\])',text,re.DOTALL)
+            if m: return json.loads(m.group(1))
+            return json.loads(text)
+        except (json.JSONDecodeError, Exception):
+            return {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -776,10 +805,12 @@ class P5_IntentClassification:
     RULES = {
         "transactional": ["buy","order","purchase","price","cheap","discount","shop",
                            "wholesale","bulk","delivery","near me","online","cost"],
-        "commercial":    ["best","top","review","compare","vs","versus","alternative",
-                           "recommendation","which","ranking","rated","test"],
-        "comparison":    ["vs","versus","or","difference between","compare","better",
-                           "which is","ceylon vs","type of"],
+        # comparison checked before commercial — "vs"/"versus" belong to comparison
+        "comparison":    ["vs ","versus"," vs","difference between","compare","better",
+                           "which is","ceylon vs","type of"," or "],
+        "commercial":    ["best","top","review","alternative",
+                           "recommendation","recommended","suggest","which",
+                           "ranking","ranked","rated","test"],
         "navigational":  ["brand","website","official","login","contact",".com"],
         "informational": ["what","how","why","when","does","is","are","can","benefits",
                            "uses","effects","meaning","definition","guide","truth",
@@ -985,11 +1016,18 @@ class P8_TopicDetection:
         for kw, label in zip(keywords, labels):
             topic_map.setdefault(int(label), []).append(kw)
 
-        # Name each topic using DeepSeek
+        # Name each topic using DeepSeek — deduplicate names to prevent key collisions
         named: Dict[str, List[str]] = {}
+        used_names: set = set()
         for cluster_id, kw_list in topic_map.items():
-            top_kws = sorted(kw_list, key=lambda k: scores.get(k,0), reverse=True)[:5]
-            name = self._name_topic(top_kws)
+            top_kws = sorted(kw_list, key=lambda k: scores.get(k, 0), reverse=True)[:5]
+            name = self._name_topic(top_kws, cluster_id)
+            # Ensure uniqueness — append suffix if name already used
+            base_name, suffix = name, 2
+            while name in used_names:
+                name = f"{base_name} {suffix}"
+                suffix += 1
+            used_names.add(name)
             named[name] = kw_list
 
         # Unload SBERT model — free 380MB
@@ -999,13 +1037,18 @@ class P8_TopicDetection:
         Cache.save_checkpoint(seed.id, self.phase, named)
         return named
 
-    def _name_topic(self, top_kws: List[str]) -> str:
+    def _name_topic(self, top_kws: List[str], fallback_id: int = 0) -> str:
         text = AI.deepseek(
             f"Name this topic cluster in 2-4 words based on these keywords: {top_kws}. "
             f"Return ONLY the topic name, nothing else.",
             temperature=0.0
         )
-        return text.strip().strip('"').title() or f"Topic {top_kws[0].title()}"
+        cleaned = text.strip().strip('"').title()
+        if cleaned:
+            return cleaned
+        if top_kws:
+            return f"Topic {top_kws[0].title()}"
+        return f"Topic {fallback_id + 1}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1041,13 +1084,15 @@ Return ONLY valid JSON: {{"Cluster Name": ["Topic 1", "Topic 2", ...], ...}}"""
             clusters = AI.parse_json(text)
             if not isinstance(clusters, dict):
                 raise ValueError("Expected dict")
+            # Ensure clusters contain keyword lists (not topic name strings)
+            # If AI returned topic_name→topic_name structure, fall back
+            all_ai_vals = [v for vals in clusters.values() for v in (vals if isinstance(vals, list) else [])]
+            if not all_ai_vals or not any(v in all_ai_vals for v in
+                                           [kw for kws in topic_map.values() for kw in kws[:1]]):
+                raise ValueError("AI clusters don't contain keywords")
         except Exception:
-            # Fallback: alphabetical grouping
-            clusters = {}
-            chunk_size = max(1, len(topics) // n)
-            for i in range(0, len(topics), chunk_size):
-                name = f"Cluster {i//chunk_size + 1}"
-                clusters[name] = topics[i:i+chunk_size]
+            # Fallback: return original topic_map structure unchanged
+            clusters = {k: list(v) for k, v in topic_map.items()}
 
         Cache.save_checkpoint(seed.id, self.phase, clusters)
         log.info(f"[P9] {len(clusters)} clusters formed from {len(topics)} topics")

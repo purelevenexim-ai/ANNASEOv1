@@ -322,24 +322,21 @@ function DashboardPage() {
         </Card>
       )}
 
-      {/* Keyword mix overview */}
-      {kwStats && kwStats.total > 0 && (
-        <Card style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 12 }}>Keyword distribution</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-            {[
-              { label: "Pillars", count: kwStats.pillar_count, pct: kwStats.distribution.pillar, color: T.purple },
-              { label: "Clusters", count: kwStats.cluster_count, pct: kwStats.distribution.cluster, color: T.teal },
-              { label: "Supporting", count: kwStats.supporting_count, pct: kwStats.distribution.supporting, color: T.green },
-            ].map(item => (
-              <div key={item.label} style={{ padding: 12, borderRadius: 8, background: "rgba(0,0,0,0.02)", display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ fontSize: 11, color: T.gray }}>{item.label}</div>
-                <div style={{ fontSize: 18, fontWeight: 600, color: item.color }}>{item.count}</div>
-                <div style={{ fontSize: 10, color: item.color }}>{item.pct}% of total</div>
-              </div>
-            ))}
-          </div>
-        </Card>
+      {/* Universe hierarchy summary */}
+      {kwStats && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
+          {[
+            { label: "Universes", count: kwStats.universe_count || 1, color: T.purple, icon: "🌐" },
+            { label: "Pillars", count: kwStats.pillar_count || 0, color: T.purpleDark, icon: "📌" },
+            { label: "Clusters", count: kwStats.cluster_count || 0, color: T.teal, icon: "🔗" },
+            { label: "Keywords", count: kwStats.total || 0, color: T.green, icon: "🔑" },
+          ].map(item => (
+            <Card key={item.label} style={{ padding: 12 }}>
+              <div style={{ fontSize: 11, color: T.gray, marginBottom: 4 }}>{item.icon} {item.label}</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: item.color }}>{item.count?.toLocaleString()}</div>
+            </Card>
+          ))}
+        </div>
       )}
 
       {/* Projects grid */}
@@ -577,10 +574,44 @@ function ContentPage() {
 
   if (!activeProject) return <div style={{ color: T.gray, padding: 20 }}>Select a project to manage content.</div>
 
+  const lifecycle = ["draft","generating","review","approved","publishing","published","failed"]
+  const lifeCounts = lifecycle.reduce((acc, s) => {
+    acc[s] = (articles || []).filter(a => a.status === s).length; return acc
+  }, {})
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: selected ? "1fr 1fr" : "1fr", gap: 16 }}>
       <div>
-        <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Content</div>
+        <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 12 }}>Content</div>
+        {/* Lifecycle pipeline */}
+        <Card style={{ marginBottom: 12, padding: "10px 14px" }}>
+          <div style={{ fontSize: 11, color: T.gray, marginBottom: 8, fontWeight: 500 }}>Content lifecycle</div>
+          <div style={{ display: "flex", gap: 0, alignItems: "center", overflowX: "auto" }}>
+            {lifecycle.filter(s => s !== "failed").map((s, i, arr) => (
+              <div key={s} style={{ display: "flex", alignItems: "center" }}>
+                <div style={{
+                  padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 500, whiteSpace: "nowrap",
+                  background: lifeCounts[s] > 0 ? {
+                    draft:T.purpleLight,generating:"#FFF3CD",review:T.purpleLight,
+                    approved:T.tealLight,publishing:"#FFF3CD",published:T.tealLight
+                  }[s] : "rgba(0,0,0,0.04)",
+                  color: lifeCounts[s] > 0 ? {
+                    draft:T.purple,generating:T.amber,review:T.purpleDark,
+                    approved:T.teal,publishing:T.amber,published:T.teal
+                  }[s] : T.gray,
+                }}>
+                  {s} {lifeCounts[s] > 0 && <strong>({lifeCounts[s]})</strong>}
+                </div>
+                {i < arr.length-1 && <span style={{ color: T.gray, padding: "0 2px", fontSize: 10 }}>→</span>}
+              </div>
+            ))}
+            {lifeCounts.failed > 0 && (
+              <div style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 20, fontSize: 11, background:"#FEE2E2", color: T.red }}>
+                failed ({lifeCounts.failed})
+              </div>
+            )}
+          </div>
+        </Card>
         <Card style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 8 }}>
             <input value={kw} onChange={e=>setKw(e.target.value)} placeholder="Keyword to generate article for..."
@@ -648,57 +679,112 @@ function ContentPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 function CalendarPage() {
   const { activeProject } = useStore()
+  const qclient = useQueryClient()
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
   const [year] = useState(new Date().getFullYear())
+  const [selectedMonth, setSelectedMonth] = useState(null)
 
-  // Mock data — replace with /api/projects/{id}/calendar
-  const mockItems = [
-    { month: 0, count: 4, published: 2 },
-    { month: 1, count: 6, published: 3 },
-    { month: 2, count: 8, published: 5 },
-    { month: 3, count: 5, published: 0 },
-  ]
+  const { data: cal, isLoading } = useQuery({
+    queryKey: ["calendar", activeProject],
+    queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/calendar-items`) : null,
+    enabled: !!activeProject,
+    refetchInterval: 60000,
+  })
+
+  const freeze = async (id) => {
+    await api.post(`/api/content/${id}/freeze`)
+    qclient.invalidateQueries(["calendar", activeProject])
+  }
+  const unfreeze = async (id) => {
+    await api.post(`/api/content/${id}/unfreeze`)
+    qclient.invalidateQueries(["calendar", activeProject])
+  }
+
+  if (!activeProject) return <div style={{ color: T.gray, padding: 20 }}>Select a project to view calendar.</div>
+  if (isLoading) return <LoadingSpinner/>
+
+  const byMonth = cal?.by_month || {}
+
+  // Build month-indexed summary
+  const monthSummary = months.map((m, i) => {
+    const ym = `${year}-${String(i+1).padStart(2,"0")}`
+    const items = byMonth[ym] || []
+    const published = items.filter(x => x.status === "published").length
+    const frozen = items.filter(x => x.frozen).length
+    return { label: m, ym, items, published, frozen, count: items.length }
+  })
+
+  const displayItems = selectedMonth
+    ? (byMonth[selectedMonth] || [])
+    : (cal?.items || []).filter(x => {
+        const sd = x.schedule_date || x.created_at || ""
+        return sd.startsWith(String(year))
+      }).slice(0, 20)
+
+  const statusColor = { draft:"gray", generating:"amber", review:"purple", approved:"teal", publishing:"amber", published:"teal", failed:"red" }
 
   return (
     <div>
-      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Content Calendar {year}</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>Content Calendar {year}</div>
+        <div style={{ display: "flex", gap: 10, fontSize: 12, color: T.gray }}>
+          <span>{cal?.total || 0} total</span>
+          <span style={{ color: T.teal }}>{cal?.published || 0} published</span>
+          <span style={{ color: T.amber }}>{cal?.frozen || 0} frozen</span>
+        </div>
+      </div>
+
+      {/* 12-month grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
-        {months.map((m, i) => {
-          const d = mockItems.find(x => x.month === i)
-          const isPast = i < new Date().getMonth()
+        {monthSummary.map(({ label, ym, count, published, frozen }) => {
+          const isPast = months.indexOf(label) < new Date().getMonth() && year === new Date().getFullYear()
+          const isSelected = selectedMonth === ym
           return (
-            <Card key={m} style={{ opacity: isPast ? 0.7 : 1 }}>
-              <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8 }}>{m} {year}</div>
-              {d ? (
+            <Card key={ym} onClick={() => setSelectedMonth(isSelected ? null : ym)}
+              style={{ opacity: isPast && count === 0 ? 0.5 : 1, cursor: "pointer",
+                borderColor: isSelected ? T.purple : "rgba(0,0,0,0.1)", borderWidth: isSelected ? 1.5 : 0.5 }}>
+              <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8 }}>{label} {year}</div>
+              {count > 0 ? (
                 <>
-                  <div style={{ fontSize: 22, fontWeight: 600, color: T.purple }}>{d.count}</div>
-                  <div style={{ fontSize: 10, color: T.gray }}>articles planned</div>
+                  <div style={{ fontSize: 22, fontWeight: 600, color: T.purple }}>{count}</div>
+                  <div style={{ fontSize: 10, color: T.gray }}>articles</div>
                   <div style={{ marginTop: 8 }}>
-                    <div style={{ display: "flex", height: 5, borderRadius: 99, overflow: "hidden", background: T.purpleLight }}>
-                      <div style={{ width: `${(d.published/d.count)*100}%`, background: T.teal }}/>
+                    <div style={{ display: "flex", height: 4, borderRadius: 99, overflow: "hidden", background: T.purpleLight }}>
+                      <div style={{ width: `${count ? (published/count)*100 : 0}%`, background: T.teal }}/>
                     </div>
-                    <div style={{ fontSize: 10, color: T.teal, marginTop: 3 }}>{d.published} published</div>
+                    <div style={{ fontSize: 10, color: T.teal, marginTop: 3 }}>{published} published · {frozen} frozen</div>
                   </div>
                 </>
               ) : (
-                <div style={{ fontSize: 11, color: T.gray }}>No articles scheduled</div>
+                <div style={{ fontSize: 11, color: T.gray }}>No articles</div>
               )}
             </Card>
           )
         })}
       </div>
+
+      {/* Article list */}
       <Card>
-        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Upcoming articles</div>
-        {[
-          { kw: "ceylon cinnamon health benefits", date: "Apr 5", status: "approved" },
-          { kw: "buy cinnamon online kerala", date: "Apr 8", status: "draft" },
-          { kw: "cinnamon vs cassia difference", date: "Apr 12", status: "generating" },
-          { kw: "organic cinnamon wholesale price", date: "Apr 15", status: "draft" },
-        ].map((a, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
-            <span style={{ color: T.gray, minWidth: 40, fontSize: 11 }}>{a.date}</span>
-            <span style={{ flex: 1 }}>{a.kw}</span>
-            <Badge color={{ approved:"teal",draft:"gray",generating:"amber" }[a.status] || "gray"}>{a.status}</Badge>
+        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>
+          {selectedMonth ? `Articles — ${selectedMonth}` : "Upcoming articles"}
+          {selectedMonth && <Btn small onClick={() => setSelectedMonth(null)} style={{ marginLeft: 8 }}>Clear</Btn>}
+        </div>
+        {displayItems.length === 0 ? (
+          <div style={{ fontSize: 12, color: T.gray, padding: "12px 0" }}>No articles scheduled.</div>
+        ) : displayItems.map((a, i) => (
+          <div key={a.article_id || i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0",
+            borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+            <span style={{ color: T.gray, minWidth: 72, fontSize: 11 }}>
+              {(a.schedule_date || a.created_at || "").slice(0,10)}
+            </span>
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {a.title || a.keyword}
+            </span>
+            <Badge color={statusColor[a.status] || "gray"}>{a.status}</Badge>
+            {a.frozen
+              ? <Btn small variant="danger" onClick={() => unfreeze(a.article_id)}>Unfreeze</Btn>
+              : <Btn small onClick={() => freeze(a.article_id)}>Freeze</Btn>
+            }
           </div>
         ))}
       </Card>
@@ -811,22 +897,42 @@ function RankingsPage() {
       </div>
 
       {rankings?.length > 0 ? (
-        <Card>
-          <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Keyword positions ({rankings.length})</div>
-          {rankings.slice(0, 30).map((r, i) => (
-            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
-              <div style={{
-                width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 11, fontWeight: 600,
-                background: r.position <= 3 ? T.tealLight : r.position <= 10 ? T.purpleLight : T.grayLight,
-                color: r.position <= 3 ? T.teal : r.position <= 10 ? T.purple : T.gray,
-              }}>{Math.round(r.position)}</div>
-              <span style={{ flex: 1 }}>{r.keyword}</span>
-              <span style={{ fontSize: 11, color: T.gray }}>{r.clicks} clicks</span>
-              <span style={{ fontSize: 11, color: T.gray }}>{(r.ctr * 100).toFixed(1)}% CTR</span>
-            </div>
-          ))}
-        </Card>
+        <>
+          {/* Position distribution summary */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
+            {[
+              { label: "Top 3", count: rankings.filter(r=>r.position<=3).length, color: T.teal },
+              { label: "Top 10", count: rankings.filter(r=>r.position<=10).length, color: T.purple },
+              { label: "Top 30", count: rankings.filter(r=>r.position<=30).length, color: T.gray },
+            ].map(b => (
+              <Card key={b.label} style={{ padding: 12, textAlign: "center" }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: b.color }}>{b.count}</div>
+                <div style={{ fontSize: 11, color: T.gray }}>{b.label}</div>
+              </Card>
+            ))}
+          </div>
+          <Card>
+            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Keyword positions ({rankings.length})</div>
+            {rankings.slice(0, 30).map((r, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+                <div style={{
+                  width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 11, fontWeight: 600,
+                  background: r.position <= 3 ? T.tealLight : r.position <= 10 ? T.purpleLight : T.grayLight,
+                  color: r.position <= 3 ? T.teal : r.position <= 10 ? T.purple : T.gray,
+                }}>{Math.round(r.position)}</div>
+                <span style={{ flex: 1 }}>{r.keyword}</span>
+                {/* Mini position bar */}
+                <div style={{ width: 60, height: 4, background: "rgba(0,0,0,0.06)", borderRadius: 2, overflow:"hidden" }}>
+                  <div style={{ width: `${Math.max(0,100-r.position*3)}%`, height: "100%",
+                    background: r.position<=3?T.teal:r.position<=10?T.purple:T.gray }}/>
+                </div>
+                <span style={{ fontSize: 11, color: T.gray, minWidth: 50, textAlign:"right" }}>{r.clicks} clicks</span>
+                <span style={{ fontSize: 11, color: T.gray, minWidth: 55, textAlign:"right" }}>{(r.ctr * 100).toFixed(1)}% CTR</span>
+              </div>
+            ))}
+          </Card>
+        </>
       ) : (
         <Card style={{ textAlign: "center", padding: 40 }}>
           <div style={{ fontSize: 13, color: T.gray }}>No ranking data yet.</div>
@@ -1153,7 +1259,8 @@ function NewProjectPage() {
   const [step, setStep] = useState(0)
   const [form, setForm] = useState({
     name: "", industry: "food_spices", description: "",
-    seed_keywords: "", language: "english", region: "india",
+    seed_keywords: "", competitor_urls: "", language: "english",
+    region: "india", religion: "general",
     wp_url: "", wp_user: "", wp_password: "",
   })
   const industries = ["food_spices","tourism","healthcare","ecommerce","agriculture","education","real_estate","tech_saas","wellness","restaurant","fashion","general"]
@@ -1172,8 +1279,9 @@ function NewProjectPage() {
 
   const steps = [
     { label: "Business", icon: "①" },
-    { label: "Keywords", icon: "②" },
-    { label: "Publishing", icon: "③" },
+    { label: "Universe", icon: "②" },
+    { label: "Context", icon: "③" },
+    { label: "Publishing", icon: "④" },
   ]
 
   return (
@@ -1214,11 +1322,25 @@ function NewProjectPage() {
 
       {step === 1 && (
         <Card style={{ padding: 20 }}>
-          <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Seed keywords (comma-separated) *</label>
-          <textarea value={form.seed_keywords} onChange={e=>setForm({...form,seed_keywords:e.target.value})} rows={3}
-            placeholder="cinnamon, black pepper, cardamom"
+          <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Universe seeds — one keyword per line or comma-separated *</label>
+          <textarea value={form.seed_keywords} onChange={e=>setForm({...form,seed_keywords:e.target.value})} rows={4}
+            placeholder="black pepper&#10;cinnamon&#10;cardamom"
             style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,resize:"vertical",marginBottom:12,boxSizing:"border-box" }}/>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Competitor URLs (one per line — used for pillar extraction)</label>
+          <textarea value={form.competitor_urls} onChange={e=>setForm({...form,competitor_urls:e.target.value})} rows={3}
+            placeholder="https://competitor1.com&#10;https://competitor2.com"
+            style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,resize:"vertical",marginBottom:12,boxSizing:"border-box" }}/>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn onClick={() => setStep(0)}>← Back</Btn>
+            <Btn onClick={() => setStep(2)} variant="primary" style={{ flex: 1 }} disabled={!form.seed_keywords}>Continue →</Btn>
+          </div>
+        </Card>
+      )}
+
+      {step === 2 && (
+        <Card style={{ padding: 20 }}>
+          <div style={{ fontSize: 12, color: T.gray, marginBottom: 12 }}>Language, region and religion — used for content variants and keyword expansion.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
             <div>
               <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Language</label>
               <select value={form.language} onChange={e=>setForm({...form,language:e.target.value})}
@@ -1233,15 +1355,22 @@ function NewProjectPage() {
                 {["india","kerala","wayanad","global","south_india"].map(r=><option key={r}>{r}</option>)}
               </select>
             </div>
+            <div>
+              <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Religion context</label>
+              <select value={form.religion} onChange={e=>setForm({...form,religion:e.target.value})}
+                style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,boxSizing:"border-box" }}>
+                {["general","ayurveda","halal","unani","hindu","christian"].map(r=><option key={r}>{r}</option>)}
+              </select>
+            </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={() => setStep(0)}>← Back</Btn>
-            <Btn onClick={() => setStep(2)} variant="primary" style={{ flex: 1 }} disabled={!form.seed_keywords}>Continue →</Btn>
+            <Btn onClick={() => setStep(1)}>← Back</Btn>
+            <Btn onClick={() => setStep(3)} variant="primary" style={{ flex: 1 }}>Continue →</Btn>
           </div>
         </Card>
       )}
 
-      {step === 2 && (
+      {step === 3 && (
         <Card style={{ padding: 20 }}>
           <div style={{ fontSize: 12, color: T.gray, marginBottom: 12 }}>WordPress publishing (optional — can add later)</div>
           <input value={form.wp_url} onChange={e=>setForm({...form,wp_url:e.target.value})} placeholder="https://yoursite.com"
@@ -1251,7 +1380,7 @@ function NewProjectPage() {
           <input value={form.wp_password} onChange={e=>setForm({...form,wp_password:e.target.value})} placeholder="Application password" type="password"
             style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,marginBottom:16,boxSizing:"border-box" }}/>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={() => setStep(1)}>← Back</Btn>
+            <Btn onClick={() => setStep(2)}>← Back</Btn>
             <Btn onClick={() => create.mutate()} variant="primary" style={{ flex: 1 }} disabled={create.isPending}>
               {create.isPending ? "Creating..." : "Create project"}
             </Btn>
@@ -1275,7 +1404,8 @@ const NAV = [
   { id: "seo-checker",  label: "SEO checker",  icon: "⬛" },
   { id: "rankings",     label: "Rankings",     icon: "⬛" },
   { id: "quality",      label: "Quality",     icon: "⬛" },
-  { id: "rsd",          label: "Research & Dev",     icon: "⬛" },
+  { id: "rsd",          label: "Research & Dev", icon: "⬛" },
+  { id: "settings",     label: "Settings",    icon: "⬛" },
 ]
 
 function Sidebar({ page, setPage }) {
@@ -1314,6 +1444,122 @@ function Sidebar({ page, setPage }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SETTINGS PAGE — API Keys, AI configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SettingsPage() {
+  const [keys, setKeys] = useState({
+    groq_key: "", gemini_key: "", anthropic_key: "", openai_key: "",
+    ollama_url: "http://localhost:11434", ollama_model: "deepseek-r1:7b",
+    groq_model: "llama-3.3-70b-versatile",
+  })
+  const [status, setStatus] = useState({})
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [msg, setMsg] = useState("")
+  const { data: current } = useQuery({
+    queryKey: ["api-keys"],
+    queryFn: () => api.get("/api/settings/api-keys"),
+  })
+
+  const save = async () => {
+    setSaving(true); setMsg("")
+    const toSave = {}
+    Object.entries(keys).forEach(([k,v]) => { if(v.trim()) toSave[k] = v.trim() })
+    const r = await api.post("/api/settings/api-keys", toSave)
+    setSaving(false)
+    setMsg(r?.status === "ok" ? `✓ Saved ${r.saved?.length || 0} keys` : "Error saving")
+  }
+
+  const testKeys = async () => {
+    setTesting(true)
+    const r = await api.post("/api/settings/test-keys", {})
+    setStatus(r || {})
+    setTesting(false)
+  }
+
+  const Field = ({ label, k, type="text", placeholder="" }) => (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+        <label style={{ fontSize: 12, fontWeight: 500 }}>{label}</label>
+        {current?.[k] !== undefined && (
+          <Badge color={current[k] ? "teal" : "red"}>{current[k] ? "configured" : "not set"}</Badge>
+        )}
+      </div>
+      <input type={type} value={keys[k] || ""} onChange={e=>setKeys({...keys,[k]:e.target.value})}
+        placeholder={placeholder || `Enter ${label}...`}
+        style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",
+                 fontSize:12,boxSizing:"border-box",fontFamily:"monospace" }}/>
+    </div>
+  )
+
+  return (
+    <div style={{ maxWidth: 640 }}>
+      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Settings</div>
+      <div style={{ fontSize: 12, color: T.gray, marginBottom: 24 }}>API keys are encrypted before storage. They are never exposed in logs.</div>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, color: T.purple }}>
+          AI Model Configuration
+        </div>
+        <div style={{ fontSize: 11, color: T.gray, background: T.purpleLight, borderRadius: 6, padding: "8px 12px", marginBottom: 16 }}>
+          <strong>Routing:</strong> Groq Llama (primary, free) → Ollama/DeepSeek (offline fallback) → Claude (quality gates ≤1000 tokens only)
+        </div>
+        <Field label="Groq API Key (primary — free tier)" k="groq_key" type="password"
+               placeholder="gsk_..." />
+        <Field label="Groq Model" k="groq_model" placeholder="llama-3.3-70b-versatile" />
+        <Field label="Ollama URL (local DeepSeek)" k="ollama_url" placeholder="http://localhost:11434" />
+        <Field label="Ollama Model" k="ollama_model" placeholder="deepseek-r1:7b" />
+        <Field label="Google Gemini API Key" k="gemini_key" type="password"
+               placeholder="AIzaSy..." />
+        <Field label="Anthropic Claude Key (verification only)" k="anthropic_key" type="password"
+               placeholder="sk-ant-..." />
+        <Field label="OpenAI API Key (optional)" k="openai_key" type="password"
+               placeholder="sk-..." />
+
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <Btn onClick={save} variant="primary" disabled={saving}>{saving ? "Saving..." : "Save keys"}</Btn>
+          <Btn onClick={testKeys} disabled={testing}>{testing ? "Testing..." : "Test connection"}</Btn>
+        </div>
+        {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.startsWith("✓") ? T.teal : T.red }}>{msg}</div>}
+
+        {Object.keys(status).length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8 }}>Connection test results:</div>
+            {Object.entries(status).map(([k,v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "4px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)" }}>
+                <span style={{ fontWeight: 500 }}>{k}</span>
+                <Badge color={v === "ok" ? "teal" : v.startsWith("not") ? "gray" : "red"}>{v}</Badge>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>AI Routing Priority</div>
+        {[
+          { model: "Groq Llama-3.3-70b", use: "Bulk analysis: intent, clusters, scoring, universe generation", cost: "Free", badge: "teal" },
+          { model: "Ollama/DeepSeek-R1:7b", use: "Offline fallback when Groq unavailable", cost: "Free (local)", badge: "teal" },
+          { model: "Claude Sonnet", use: "Quality gates only — pillar validation, content quality check", cost: "~$0.001/check (≤1000 tokens)", badge: "amber" },
+          { model: "Google Gemini Flash", use: "P9 clustering, P10 pillar identification", cost: "Free tier", badge: "teal" },
+        ].map(r => (
+          <div key={r.model} style={{ display: "flex", gap: 12, padding: "8px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12, fontWeight: 500 }}>{r.model}</div>
+              <div style={{ fontSize: 11, color: T.gray }}>{r.use}</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <Badge color={r.badge}>{r.cost}</Badge>
+            </div>
+          </div>
+        ))}
+      </Card>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1333,6 +1579,7 @@ function App() {
     quality:      <QualityDashboard/>,
     "rsd":        <RSDPage/>,
     "new-project":<NewProjectPage/>,
+    settings:     <SettingsPage/>,
   }
 
   return (

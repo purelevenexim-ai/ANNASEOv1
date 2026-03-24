@@ -48,7 +48,7 @@ class TestOffTopicFilter:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "modules"))
         from annaseo_addons import OffTopicFilter
         f = OffTopicFilter()
-        kept, removed = f.filter(["cinnamon benefits", "cinnamon meme", "cinnamon viral"])
+        kept, removed = f.filter_tuple(["cinnamon benefits", "cinnamon meme", "cinnamon viral"])
         assert "cinnamon benefits" in kept
         assert any("meme" in r or "viral" in r for r in removed)
 
@@ -56,7 +56,7 @@ class TestOffTopicFilter:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "modules"))
         from annaseo_addons import OffTopicFilter
         f = OffTopicFilter(seed_kill_words=["candle", "perfume"])
-        kept, removed = f.filter(["cinnamon candle", "buy cinnamon", "cinnamon perfume"])
+        kept, removed = f.filter_tuple(["cinnamon candle", "buy cinnamon", "cinnamon perfume"])
         assert "buy cinnamon" in kept
         assert len(removed) == 2
 

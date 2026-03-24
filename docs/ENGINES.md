@@ -4,20 +4,54 @@
 
 | File | Lines | Role | Port |
 |------|-------|------|------|
-| `ruflo_20phase_engine.py` | 2,269 | 20-phase keyword universe | 8000 |
+| `ruflo_20phase_engine.py` | 2,269 | 20-phase keyword universe (P1–P20) | 8000 |
+| `ruflo_20phase_wired.py` | — | WiredRufloOrchestrator — RawCollector + DCE wrapper | 8000 |
+| `ruflo_v3_keyword_system.py` | — | Ruflo v3 — 4-level universe hierarchy | 8000 |
 | `ruflo_content_engine.py` | 1,645 | 7-pass content generation | 8000 |
 | `ruflo_strategy_dev_engine.py` | 1,309 | Business strategy + personas | 8000 |
 | `ruflo_final_strategy_engine.py` | 1,295 | Claude strategy synthesis | 8000 |
 | `ruflo_confirmation_pipeline.py` | 1,715 | 5-gate user approval | 8000 |
 | `ruflo_seo_audit.py` | 1,677 | 14 checks + AI visibility | 8000 |
 | `ruflo_publisher.py` | 1,337 | WordPress + Shopify publish | 8000 |
-| `ruflo_rank_zero_engine.html` | 900 | Rank-Zero 12-engine UI | — |
-| `annaseo_addons.py` | 929 | HDBSCAN, OffTopicFilter, etc. | — |
+| `annaseo_addons.py` | 929 | HDBSCAN, OffTopicFilter, lifecycle | — |
 | `annaseo_doc2_addons.py` | 933 | ClusterType, Memory, Versioning | — |
 | `annaseo_qi_engine.py` | 1,698 | Quality intelligence master | 8006 |
 | `annaseo_domain_context.py` | ~700 | Per-project domain classification | 8007 |
 | `annaseo_rsd_engine.py` | 2,061 | Code quality + engine tuning | 8004 |
 | `annaseo_self_dev.py` | 1,948 | Intelligence crawling + features | 8005 |
+
+---
+
+## Ruflo v3 — 4-level keyword universe
+
+**File:** `engines/ruflo_v3_keyword_system.py`
+**Entry:** `RufloV3KeywordSystem.run_universe(seed, project_id)`
+
+### Hierarchy
+
+```
+Universe  ← customer input ("black pepper")
+  └── Pillar  ← competitor traffic discovery (top competitor pages for the seed)
+        └── Cluster  ← semantic grouping (HDBSCAN + sentence-transformers)
+              └── Supporting keywords  ← 8 long-tail methods × language/region/religion
+```
+
+### Key classes
+
+| Class | Role |
+|-------|------|
+| `PillarExtractor` | Crawls SERP for competitor URLs, extracts pillar topics from competitor pages |
+| `SerpScraper` | Collects SERP data for keywords — difficulty, featured snippet, PAA, video |
+| `UniverseCollector` | Combines seed expansion + pillar discovery into raw keyword pool |
+| `RufloV3KeywordSystem` | Orchestrates full pipeline, returns `UniverseTree` JSON |
+
+### Methods
+
+| Method | What it does |
+|--------|-------------|
+| `run_universe(seed)` | Full 20-phase pipeline for one seed |
+| `run_all_universes(seeds)` | Parallel universe generation for all seeds |
+| `get_universe_tree(project_id)` | Return JSON tree: Universe→Pillar→Cluster→Keywords |
 
 ---
 

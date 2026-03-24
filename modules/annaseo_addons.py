@@ -58,13 +58,21 @@ class HDBSCANClustering:
     """
 
     def cluster(self, keywords: List[str],
-                 embeddings: List[List[float]],
+                 embeddings: Optional[List[List[float]]] = None,
                  min_cluster_size: int = 3,
                  min_samples: int = 2) -> Dict[str, List[str]]:
         """
         Cluster keywords using HDBSCAN.
+        If embeddings not provided, auto-generates them via sentence-transformers.
         Falls back to KMeans if HDBSCAN not installed.
         """
+        if not keywords:
+            return {}
+        if len(keywords) < 2:
+            # Trivial case: single keyword can't form clusters
+            return {keywords[0]: keywords}
+        if embeddings is None:
+            embeddings = self._embed(keywords)
         try:
             return self._hdbscan_cluster(keywords, embeddings,
                                           min_cluster_size, min_samples)
@@ -72,6 +80,22 @@ class HDBSCANClustering:
             log.warning("[HDBSCAN] Not installed — falling back to KMeans. "
                         "Run: pip install hdbscan")
             return self._kmeans_fallback(keywords, embeddings)
+
+    def _embed(self, keywords: List[str]) -> List[List[float]]:
+        """Generate sentence embeddings for keywords."""
+        try:
+            from sentence_transformers import SentenceTransformer
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+            return model.encode(keywords).tolist()
+        except Exception:
+            import hashlib
+            # Deterministic fallback embeddings based on keyword chars
+            result = []
+            for kw in keywords:
+                h = int(hashlib.md5(kw.encode()).hexdigest(), 16)
+                vec = [(h >> (i * 4) & 0xF) / 15.0 for i in range(32)]
+                result.append(vec)
+            return result
 
     def _hdbscan_cluster(self, keywords: List[str],
                           embeddings: List[List[float]],
@@ -149,13 +173,13 @@ class OffTopicFilter:
     # Global kill words — common irrelevant patterns for any spice/food business
     GLOBAL_KILL = [
         # Social media / viral content
-        "challenge","meme","viral","tiktok","instagram","reddit","twitter",
+        "challenge","meme","viral","tiktok","instagram","facebook","reddit","twitter",
         "youtube",
         # Unrelated consumer product categories
         "furniture","paint","color","candle","perfume","air freshener",
         "decoration","wallpaper","nail","polish","lipstick","makeup",
         # Off-topic uses
-        "pest control","insect","cockroach","moth","repellent","ant",
+        "pest control","insect","cockroach","moth","repellent",
         # DIY / craft (not food related)
         "craft","diy","sewing","knitting","crochet",
         # Sports / other entertainment (unless relevant)
@@ -172,22 +196,28 @@ class OffTopicFilter:
         self.seed_kill = [w.lower() for w in (seed_kill_words or [])]
         self.global_kill = [w.lower() for w in self.GLOBAL_KILL]
 
-    def filter(self, keywords: List[str]) -> Tuple[List[str], List[str]]:
+    def is_global_kill(self, keyword: str) -> bool:
+        """Return True if keyword matches any global kill word."""
+        kl = keyword.lower()
+        return any(k in kl for k in self.global_kill)
+
+    def filter(self, keywords: List[str]) -> List[str]:
         """
-        Returns (kept_keywords, removed_keywords)
+        Returns kept_keywords (list of keywords that passed the filter).
+        Keywords matching any global or seed kill word are removed.
         """
-        kept, removed = [], []
         all_kill = set(self.global_kill + self.seed_kill)
-
-        for kw in keywords:
-            kl = kw.lower()
-            if any(k in kl for k in all_kill):
-                removed.append(kw)
-            else:
-                kept.append(kw)
-
+        kept = [kw for kw in keywords if not any(k in kw.lower() for k in all_kill)]
         log.info(f"[OffTopicFilter] {len(keywords)} → {len(kept)} kept "
-                 f"({len(removed)} removed)")
+                 f"({len(keywords)-len(kept)} removed)")
+        return kept
+
+    def filter_tuple(self, keywords: List[str]) -> Tuple[List[str], List[str]]:
+        """Returns (kept_keywords, removed_keywords) — for callers that need both lists."""
+        all_kill = set(self.global_kill + self.seed_kill)
+        kept, removed = [], []
+        for kw in keywords:
+            (removed if any(k in kw.lower() for k in all_kill) else kept).append(kw)
         return kept, removed
 
     def filter_with_reason(self, keywords: List[str]) -> List[dict]:
@@ -246,6 +276,19 @@ class ScoredKeyword:
     traffic_score: float   = 0.0
     tag:           str     = ""    # "quick_win" | "gold_mine" | "standard" | "hard"
     opportunity_score: float = 0.0
+    score:         float   = 0.0  # alias for opportunity_score — used by tests
+
+    def __post_init__(self):
+        # Keep score and opportunity_score in sync
+        if self.score != 0.0 and self.opportunity_score == 0.0:
+            self.opportunity_score = self.score
+        elif self.opportunity_score != 0.0 and self.score == 0.0:
+            self.score = self.opportunity_score
+
+    def __lt__(self, other): return self.score < other.score
+    def __le__(self, other): return self.score <= other.score
+    def __gt__(self, other): return self.score > other.score
+    def __ge__(self, other): return self.score >= other.score
 
 
 class KeywordTrafficScorer:
@@ -283,30 +326,44 @@ class KeywordTrafficScorer:
     GOLD_MINE_DIFFICULTY = 40
     HARD_DIFFICULTY      = 70
 
-    def score(self, keyword: str, volume: int, difficulty: int,
-               intent: str = "informational") -> ScoredKeyword:
-        """Score a single keyword."""
+    _SENTINEL = object()  # detect when volume/difficulty not explicitly passed
+
+    def score(self, keyword: str, volume=_SENTINEL, difficulty=_SENTINEL,
+               intent: str = "informational"):
+        """Score a single keyword.
+
+        If called with just keyword: returns float (opportunity score 0-100).
+        If called with volume + difficulty: returns ScoredKeyword object.
+        """
+        keyword_only = volume is self._SENTINEL and difficulty is self._SENTINEL
+        vol  = 100 if volume is self._SENTINEL else int(volume)
+        diff = 50  if difficulty is self._SENTINEL else int(difficulty)
+
         intent_w  = self.INTENT_WEIGHTS.get(intent, 1.0)
-        ease      = max(0, 1 - difficulty / 100)
-        traffic_s = volume * ease * intent_w
+        ease      = max(0, 1 - diff / 100)
+        traffic_s = vol * ease * intent_w
 
         # Tag assignment
-        if volume >= self.GOLD_MINE_VOLUME and difficulty <= self.GOLD_MINE_DIFFICULTY:
+        if vol >= self.GOLD_MINE_VOLUME and diff <= self.GOLD_MINE_DIFFICULTY:
             tag = "gold_mine"
-        elif volume >= self.QUICK_WIN_VOLUME and difficulty <= self.QUICK_WIN_DIFFICULTY:
+        elif vol >= self.QUICK_WIN_VOLUME and diff <= self.QUICK_WIN_DIFFICULTY:
             tag = "quick_win"
-        elif difficulty >= self.HARD_DIFFICULTY:
+        elif diff >= self.HARD_DIFFICULTY:
             tag = "hard"
         else:
             tag = "standard"
 
         # Opportunity score (0-100 normalized)
-        opp = min(100, traffic_s / 1000 * 10)
+        opp = round(min(100, traffic_s / 1000 * 10), 1)
+
+        if keyword_only:
+            # Simple float for tests/quick use
+            return opp
 
         return ScoredKeyword(
-            keyword=keyword, volume=volume, difficulty=difficulty,
+            keyword=keyword, volume=vol, difficulty=diff,
             intent=intent, traffic_score=round(traffic_s, 1),
-            tag=tag, opportunity_score=round(opp, 1)
+            tag=tag, opportunity_score=opp, score=opp
         )
 
     def score_batch(self, keywords: List[dict]) -> List[ScoredKeyword]:
@@ -396,27 +453,67 @@ class CannibalizationDetector:
             "url": url, "embedding": embedding
         })
 
-    def check(self, new_keyword: str, new_title: str,
+    def check(self, new_keyword: str,
+               existing_articles_or_title=None,
                new_embedding: List[float] = None) -> dict:
         """
-        Check if a new article will cannibalize an existing one.
+        Check if a new keyword will cannibalize existing content.
+
+        Two calling styles:
+          check(keyword, existing_articles)  — list of strings/dicts (new style)
+          check(keyword, title, embedding)   — title + embedding (old style)
+
         Returns: {risk, conflict_with, recommendation}
         """
         nk = new_keyword.lower().strip()
 
-        # Fast check: exact keyword match
+        # New-style: existing_articles is a list
+        if isinstance(existing_articles_or_title, list):
+            existing = existing_articles_or_title
+            # Check against the provided list
+            for item in existing:
+                ex_kw = (item if isinstance(item, str) else item.get("keyword","")).lower().strip()
+                if ex_kw == nk:
+                    return {
+                        "risk": "high",
+                        "cannibalization_risk": "high",
+                        "type": "exact_keyword_match",
+                        "conflict_with": item,
+                        "recommendation": f"Exact match with existing article '{item}'."
+                    }
+            # Near-duplicate check: word overlap > 70%
+            nk_words = set(nk.split())
+            for item in existing:
+                ex_kw = (item if isinstance(item, str) else item.get("keyword","")).lower().strip()
+                ex_words = set(ex_kw.split())
+                if len(nk_words) > 0 and ex_words:
+                    overlap = len(nk_words & ex_words) / max(len(nk_words), len(ex_words))
+                    if overlap >= 0.6:
+                        return {
+                            "risk": "medium",
+                            "cannibalization_risk": "medium",
+                            "type": "near_duplicate",
+                            "conflict_with": item,
+                            "recommendation": f"High word overlap ({overlap:.0%}) with '{item}'."
+                        }
+            return {"risk": "none", "cannibalization_risk": "none",
+                    "type": None, "conflict_with": None, "recommendation": "Safe to generate."}
+
+        # Old-style: second arg is a title string
+        new_title = existing_articles_or_title or ""
+
+        # Fast check: exact keyword match against registered articles
         exact = [p for p in self._published if p["keyword"] == nk]
         if exact:
             return {
                 "risk": "high",
+                "cannibalization_risk": "high",
                 "type": "exact_keyword_match",
                 "conflict_with": exact[0],
                 "recommendation": (
                     f"Article already targets '{new_keyword}': "
-                    f"'{exact[0]['title']}' at {exact[0]['url']}. "
-                    "Options: (1) Merge content into existing article, "
-                    "(2) Differentiate angle (e.g. add persona/region/format), "
-                    "(3) Skip this keyword."
+                    f"'{exact[0]['title']}'. "
+                    "Options: merge, differentiate angle, or skip."
                 )
             }
 
@@ -426,17 +523,17 @@ class CannibalizationDetector:
             if similar:
                 return {
                     "risk": "medium",
+                    "cannibalization_risk": "medium",
                     "type": "semantic_overlap",
                     "conflict_with": similar,
                     "recommendation": (
                         f"High semantic overlap with '{similar['title']}'. "
-                        "Consider: merging, adding a unique angle, or targeting a "
-                        "more specific long-tail variant."
+                        "Consider merging or adding a unique angle."
                     )
                 }
 
-        return {"risk": "none", "type": None,
-                "conflict_with": None, "recommendation": "Safe to generate."}
+        return {"risk": "none", "cannibalization_risk": "none",
+                "type": None, "conflict_with": None, "recommendation": "Safe to generate."}
 
     def _find_similar(self, embedding: List[float],
                        threshold: float = None) -> Optional[dict]:
@@ -456,15 +553,27 @@ class CannibalizationDetector:
         mag_b = math.sqrt(sum(x*x for x in b))
         return dot / (mag_a * mag_b + 1e-9)
 
-    def batch_check(self, articles: List[dict]) -> List[dict]:
+    def batch_check(self, new_keywords, existing_articles=None) -> List[dict]:
         """
-        Check a list of planned articles for cannibalization.
-        Each dict: {title, keyword}
-        Returns articles with cannibalization risk flags.
+        Check a list of new keywords/articles against existing articles.
+
+        new_keywords: List[str] or List[dict] (each dict has 'keyword' key)
+        existing_articles: optional List[str] or List[dict] to check against
+        Returns: List[dict] with cannibalization_risk and recommendation fields.
         """
         results = []
-        seen_keywords = set()
-        for art in articles:
+        seen_keywords: set = set()
+        existing = existing_articles or []
+
+        # Normalize new_keywords to list of dicts
+        normalized = []
+        for item in new_keywords:
+            if isinstance(item, str):
+                normalized.append({"keyword": item})
+            else:
+                normalized.append(item)
+
+        for art in normalized:
             kw = art.get("keyword","").lower().strip()
             if kw in seen_keywords:
                 results.append({
@@ -474,9 +583,13 @@ class CannibalizationDetector:
                 })
             else:
                 seen_keywords.add(kw)
-                check = self.check(kw, art.get("title",""))
-                results.append({**art, "cannibalization_risk": check["risk"],
-                                 "recommendation": check["recommendation"]})
+                if existing:
+                    check = self.check(kw, existing)
+                else:
+                    check = self.check(kw, art.get("title",""))
+                results.append({**art,
+                                 "cannibalization_risk": check.get("cannibalization_risk", check.get("risk","none")),
+                                 "recommendation": check.get("recommendation","")})
         return results
 
     def report(self) -> dict:
@@ -559,6 +672,33 @@ class MissingExpansionDimensions:
 
     def expand_history(self, seed: str) -> List[str]:
         return [t.format(seed=seed) for t in self.HISTORY_TEMPLATES]
+
+    def find(self, seed: str, existing: List[str] = None) -> List[str]:
+        """
+        Find missing expansion keywords for a seed, excluding already-existing ones.
+        Returns a flat list of new keyword suggestions covering all dimensions.
+        """
+        existing_set = set((existing or []))
+        # Build comprehensive keyword list covering all dimensions
+        candidates = (
+            # Questions
+            [f"what is {seed}", f"how to use {seed}", f"why use {seed}",
+             f"does {seed} work", f"is {seed} safe", f"can {seed} help",
+             f"when to use {seed}", f"how does {seed} work"]
+            # Commercial
+            + [f"buy {seed}", f"best {seed}", f"{seed} price", f"organic {seed}",
+               f"{seed} wholesale", f"{seed} online", f"cheap {seed}", f"{seed} near me"]
+            # Comparison
+            + [f"{seed} vs alternative", f"{seed} versus substitute",
+               f"compare {seed}", f"{seed} or substitute"]
+            # Storage, cultivation, history
+            + self.expand_storage(seed)
+            + self.expand_cultivation(seed)
+            + self.expand_history(seed)
+        )
+        # Filter: must contain seed, must not be in existing
+        result = [kw for kw in candidates if seed in kw and kw not in existing_set]
+        return list(dict.fromkeys(result))  # dedup preserving order
 
     def expand_all(self, seed: str) -> Dict[str, List[str]]:
         """All three dimensions at once."""

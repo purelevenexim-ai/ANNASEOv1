@@ -78,6 +78,12 @@ def get_db() -> sqlite3.Connection:
     CREATE INDEX IF NOT EXISTS ix_rankings_project ON rankings(project_id);
     CREATE INDEX IF NOT EXISTS ix_events_run ON run_events(run_id);
     """)
+    # Migrate: add schedule_date column if absent (safe on existing DBs)
+    try:
+        db.execute("ALTER TABLE content_articles ADD COLUMN schedule_date TEXT DEFAULT ''")
+        db.commit()
+    except Exception:
+        pass  # column already exists
     db.commit()
     return db
 
@@ -435,6 +441,64 @@ async def _publish_article(article_id,article):
     except Exception as e:
         db.execute("UPDATE content_articles SET status='publish_failed' WHERE article_id=?",(article_id,)); db.commit(); log.error(f"Publish failed: {e}")
 
+# ── Calendar ──────────────────────────────────────────────────────────────────
+@app.get("/api/projects/{project_id}/calendar-items", tags=["Calendar"])
+def get_calendar_items(project_id: str, month: Optional[str]=None, pillar: Optional[str]=None):
+    """Return content calendar items for a project.
+
+    Pulls from content_articles with schedule_date set, or scaffolds a 1-year
+    plan from pending/draft articles if no scheduled items exist yet.
+    """
+    db = get_db()
+    rows = db.execute(
+        "SELECT article_id,keyword,title,status,frozen,schedule_date,published_at,created_at "
+        "FROM content_articles WHERE project_id=? ORDER BY schedule_date,created_at",
+        (project_id,)
+    ).fetchall()
+    items = [dict(r) for r in rows]
+
+    # If no schedule_dates set, auto-scaffold: spread articles across next 12 months
+    unscheduled = [i for i in items if not i.get("schedule_date")]
+    if unscheduled:
+        from datetime import date, timedelta
+        start = date.today().replace(day=1)
+        for idx, item in enumerate(unscheduled):
+            # 2 articles per week starting from today
+            sched = start + timedelta(days=idx * 3)
+            item["schedule_date"] = sched.isoformat()
+            item["auto_scheduled"] = True
+
+    # Filter by month (YYYY-MM) if requested
+    if month:
+        items = [i for i in items if (i.get("schedule_date") or "").startswith(month)]
+
+    # Group by month for calendar view
+    monthly: dict = {}
+    for item in items:
+        sd = item.get("schedule_date") or item.get("created_at","")[:10]
+        ym = sd[:7] if sd else "undated"
+        monthly.setdefault(ym, []).append(item)
+
+    return {
+        "items": items,
+        "by_month": monthly,
+        "total": len(items),
+        "scheduled": len([i for i in items if i.get("schedule_date")]),
+        "frozen": len([i for i in items if i.get("frozen")]),
+        "published": len([i for i in items if i.get("status") == "published"]),
+    }
+
+@app.put("/api/content/{article_id}/schedule", tags=["Calendar"])
+def schedule_article(article_id: str, schedule_date: str, user=Depends(current_user)):
+    """Set a publish schedule date for an article (YYYY-MM-DD)."""
+    db = get_db()
+    if not db.execute("SELECT 1 FROM content_articles WHERE article_id=?", (article_id,)).fetchone():
+        raise HTTPException(404, "Not found")
+    db.execute("UPDATE content_articles SET schedule_date=?,updated_at=? WHERE article_id=?",
+               (schedule_date, datetime.utcnow().isoformat(), article_id))
+    db.commit()
+    return {"article_id": article_id, "schedule_date": schedule_date}
+
 # ── Costs ─────────────────────────────────────────────────────────────────────
 @app.get("/api/costs/{project_id}",tags=["Costs"])
 def costs(project_id: str):
@@ -579,6 +643,95 @@ def _mount_engines():
             import importlib; mod=importlib.import_module(module); sub=getattr(mod,attr,None)
             if sub: app.mount(prefix,sub); log.info(f"Mounted {module} at {prefix}")
         except Exception as e: log.warning(f"Could not mount {module}: {e}")
+
+# ── API Settings (encrypted key storage) ──────────────────────────────────────
+
+class APIKeySettings(BaseModel):
+    groq_key:       Optional[str] = None
+    gemini_key:     Optional[str] = None
+    anthropic_key:  Optional[str] = None
+    openai_key:     Optional[str] = None
+    ollama_url:     Optional[str] = None
+    ollama_model:   Optional[str] = None
+    groq_model:     Optional[str] = None
+
+def _ensure_settings_table(db: sqlite3.Connection):
+    db.execute("""CREATE TABLE IF NOT EXISTS api_settings (
+        key TEXT PRIMARY KEY, value_enc TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    db.commit()
+
+@app.get("/api/settings/api-keys", tags=["Settings"])
+def get_api_keys(user=Depends(current_user)):
+    """Return masked API key status (not the actual keys)."""
+    db = get_db()
+    _ensure_settings_table(db)
+    rows = db.execute("SELECT key, value_enc FROM api_settings").fetchall()
+    stored = {r["key"]: bool(r["value_enc"]) for r in rows}
+    return {
+        "groq_key":      stored.get("groq_key",      bool(os.getenv("GROQ_API_KEY"))),
+        "gemini_key":    stored.get("gemini_key",     bool(os.getenv("GEMINI_API_KEY"))),
+        "anthropic_key": stored.get("anthropic_key",  bool(os.getenv("ANTHROPIC_API_KEY"))),
+        "openai_key":    stored.get("openai_key",     False),
+        "ollama_url":    os.getenv("OLLAMA_URL",      "http://localhost:11434"),
+        "ollama_model":  os.getenv("OLLAMA_MODEL",    "deepseek-r1:7b"),
+        "groq_model":    os.getenv("GROQ_MODEL",      "llama-3.3-70b-versatile"),
+    }
+
+@app.post("/api/settings/api-keys", tags=["Settings"])
+def save_api_keys(body: APIKeySettings, user=Depends(current_user)):
+    """Save API keys (encrypted). Sets env vars for current process."""
+    db = get_db()
+    _ensure_settings_table(db)
+    mapping = {
+        "groq_key":      ("GROQ_API_KEY",      body.groq_key),
+        "gemini_key":    ("GEMINI_API_KEY",     body.gemini_key),
+        "anthropic_key": ("ANTHROPIC_API_KEY",  body.anthropic_key),
+        "openai_key":    ("OPENAI_API_KEY",     body.openai_key),
+        "ollama_url":    ("OLLAMA_URL",          body.ollama_url),
+        "ollama_model":  ("OLLAMA_MODEL",        body.ollama_model),
+        "groq_model":    ("GROQ_MODEL",          body.groq_model),
+    }
+    saved = []
+    for db_key, (env_key, val) in mapping.items():
+        if val is not None:
+            enc = _encrypt(val)
+            db.execute("""INSERT OR REPLACE INTO api_settings (key, value_enc, updated_at)
+                          VALUES (?, ?, ?)""", (db_key, enc, datetime.utcnow().isoformat()))
+            os.environ[env_key] = val   # apply immediately in current process
+            saved.append(db_key)
+    db.commit()
+    return {"saved": saved, "status": "ok"}
+
+@app.post("/api/settings/test-keys", tags=["Settings"])
+def test_api_keys(user=Depends(current_user)):
+    """Test that configured API keys are valid."""
+    results = {}
+    # Test Groq
+    if os.getenv("GROQ_API_KEY"):
+        try:
+            from groq import Groq
+            g = Groq(api_key=os.getenv("GROQ_API_KEY"))
+            g.chat.completions.create(model="llama-3.3-70b-versatile",
+                messages=[{"role":"user","content":"hi"}], max_tokens=5)
+            results["groq"] = "ok"
+        except Exception as e:
+            results["groq"] = f"error: {str(e)[:80]}"
+    else:
+        results["groq"] = "not configured"
+    # Test Ollama
+    try:
+        import requests as req
+        r = req.get(f"{os.getenv('OLLAMA_URL','http://localhost:11434')}/api/tags", timeout=3)
+        results["ollama"] = "ok" if r.status_code == 200 else f"error: {r.status_code}"
+    except Exception as e:
+        results["ollama"] = f"offline: {str(e)[:50]}"
+    # Claude/Anthropic
+    if os.getenv("ANTHROPIC_API_KEY"):
+        results["anthropic"] = "configured (not tested)"
+    else:
+        results["anthropic"] = "not configured"
+    return results
 
 # ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/api/health",tags=["System"])

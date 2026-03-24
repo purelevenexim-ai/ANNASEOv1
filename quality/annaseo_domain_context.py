@@ -161,10 +161,13 @@ CROSS_DOMAIN_VOCABULARY: Dict[str, Dict[str, str]] = {
 
     # ── DIY / craft / social media ────────────────────────────────────────────
     "challenge":  {Industry.TOURISM: "reject",    Industry.FOOD_SPICES: "reject",
-                   Industry.ECOMMERCE: "reject"},
+                   Industry.ECOMMERCE: "reject",  Industry.HEALTHCARE: "reject"},
     "meme":       {"__all__": "reject"},
     "viral":      {"__all__": "reject"},
     "tiktok":     {"__all__": "reject"},
+    "instagram":  {"__all__": "reject"},
+    "twitter":    {"__all__": "reject"},
+    "facebook":   {"__all__": "reject"},
 }
 
 
@@ -173,6 +176,7 @@ INDUSTRY_ACCEPT_SIGNALS: Dict[str, List[str]] = {
     Industry.FOOD_SPICES: [
         "spice","spices","herb","herbs","flavour","flavor","aroma","seasoning",
         "cinnamon","turmeric","cardamom","pepper","clove","ginger","nutmeg",
+        "piperine","curcumin","capsaicin","oleoresin","allicin",
         "organic","natural","pure","ceylon","malabar","wayanad",
         "benefits","health","recipe","cooking","culinary","wholesale","bulk",
         "buy","price","kg","gram","export","import","supplier","manufacturer",
@@ -490,17 +494,44 @@ class DomainContextEngine:
         reject_list   = json.loads(profile.get("reject_overrides","[]"))
         cross_rules   = json.loads(profile.get("cross_domain_rules","{}"))
 
-        # 1. Check project-level explicit overrides first (highest priority)
-        for phrase in accept_list:
-            if phrase.lower() in kw_lower:
-                return self._result("accept", 95, f"Explicit accept override: '{phrase}'",
-                                     industry, project_id, keyword, True)
+        # ── GATE 0: Universal noise — __all__: reject — no project rule can override ──
+        # Must run first so meme/viral/tiktok/instagram always reject regardless of
+        # project cross-domain rules (e.g. tourism project accepting "cinnamon").
+        for word in words:
+            vocab = CROSS_DOMAIN_VOCABULARY.get(word, {})
+            if vocab.get("__all__") == "reject":
+                return self._result("reject", 0,
+                    f"Universal noise word: '{word}'",
+                    industry, project_id, keyword, True)
+
+        # ── GATE 1: Project explicit reject overrides ─────────────────────────────────
         for phrase in reject_list:
             if phrase.lower() in kw_lower:
                 return self._result("reject", 5, f"Project reject override: '{phrase}'",
                                      industry, project_id, keyword, True)
 
-        # 2. Check project-level cross-domain rules
+        # ── GATE 2: Cross-domain vocabulary industry-specific rejects ─────────────────
+        # Scan ALL words before any accept rule fires — prevents a project cross-domain
+        # accept rule (e.g. "cinnamon" → accept for tourism) from rescuing a keyword
+        # that also contains a hard industry-reject word (e.g. "buy", "kg" for tourism).
+        is_cross_domain = False
+        for word in words:
+            vocab = CROSS_DOMAIN_VOCABULARY.get(word, {})
+            if not vocab:
+                continue
+            is_cross_domain = True
+            if vocab.get(industry) == "reject":
+                return self._result("reject", 5,
+                    f"Cross-domain word '{word}' = rejected for {industry}",
+                    industry, project_id, keyword, True)
+
+        # ── GATE 3: Project explicit accept overrides ─────────────────────────────────
+        for phrase in accept_list:
+            if phrase.lower() in kw_lower:
+                return self._result("accept", 95, f"Explicit accept override: '{phrase}'",
+                                     industry, project_id, keyword, True)
+
+        # ── GATE 4: Project cross-domain rules ────────────────────────────────────────
         for word, verdict in cross_rules.items():
             if word.lower() in kw_lower:
                 if verdict == "accept":
@@ -512,33 +543,18 @@ class DomainContextEngine:
                         f"Project cross-domain rule: '{word}' = reject for {industry}",
                         industry, project_id, keyword, True)
 
-        # 3. Check global cross-domain vocabulary
-        is_cross_domain = False
+        # ── GATE 5: Cross-domain vocabulary industry-specific accepts ─────────────────
         for word in words:
-            if word in CROSS_DOMAIN_VOCABULARY:
-                is_cross_domain = True
-                vocab = CROSS_DOMAIN_VOCABULARY[word]
-                # Check __all__ (universal reject)
-                if vocab.get("__all__") == "reject":
-                    return self._result("reject", 0,
-                        f"Universal reject word: '{word}'",
-                        industry, project_id, keyword, True)
-                # Check industry-specific verdict
-                verdict = vocab.get(industry)
-                if verdict == "reject":
-                    return self._result("reject", 5,
-                        f"Cross-domain word '{word}' = rejected for {industry}",
-                        industry, project_id, keyword, True)
-                if verdict == "accept":
-                    score = self._domain_score(kw_lower, industry)
-                    return self._result("accept", max(score, 70),
-                        f"Cross-domain word '{word}' = accepted for {industry}",
-                        industry, project_id, keyword, True)
-                if verdict == "conditional":
-                    # Fall through to domain scoring — don't reject outright
-                    pass
+            vocab = CROSS_DOMAIN_VOCABULARY.get(word, {})
+            verdict = vocab.get(industry)
+            if verdict == "accept":
+                score = self._domain_score(kw_lower, industry)
+                return self._result("accept", max(score, 70),
+                    f"Cross-domain word '{word}' = accepted for {industry}",
+                    industry, project_id, keyword, True)
+            # conditional falls through to domain scoring
 
-        # 4. Domain scoring — how many accept signals does this keyword have?
+        # ── GATE 6: Domain scoring — how many accept signals does this keyword have? ──
         score = self._domain_score(kw_lower, industry)
         if score >= 65:
             return self._result("accept", score,

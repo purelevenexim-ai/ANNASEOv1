@@ -109,6 +109,52 @@ ANNASEOv1/
 
 ---
 
+## Keyword universe — 4-level hierarchy
+
+AnnaSEO builds a 4-level keyword tree per project:
+
+```
+Universe  (customer input — e.g. "black pepper")
+  └── Pillar  (competitor-traffic-driven — top pages on competitor sites)
+        └── Cluster  (semantic group — HDBSCAN/embedding-based)
+              └── Supporting keywords  (long-tail, language/region/religion variants)
+```
+
+**Key rule:** Pillars are NOT customer inputs. They are discovered from competitor SERP traffic.
+A Universe is what the customer types. A Pillar is what ranks for competitors.
+
+### Ruflo v3 keyword system
+
+`engines/ruflo_v3_keyword_system.py` — `RufloV3KeywordSystem`
+
+| Method | What it does |
+|--------|-------------|
+| `run_universe(seed)` | Full 20-phase pipeline for one seed |
+| `run_all_universes(seeds)` | Parallel universe generation for all seeds |
+| `get_universe_tree(project_id)` | Return JSON tree: Universe→Pillar→Cluster→Keywords |
+
+### Keyword mix strategy (50/30/15/5)
+
+| Bucket | KD range | Share | Goal |
+|--------|----------|-------|------|
+| Easy wins | KD < 10 | 50% | Quick rankings in 60–90 days |
+| Medium | KD 10–30 | 30% | 6-month targets |
+| Hard | KD 30–60 | 15% | Authority building |
+| Authority | KD > 60 | 5% | Brand credibility |
+
+### 8 long-tail generation methods
+
+1. Question variants (who/what/where/why/how/when)
+2. Modifier chains (best/cheap/organic/wholesale/near me)
+3. Language variants (English → Malayalam/Hindi/Tamil)
+4. Region variants (India → Kerala → Wayanad)
+5. Religion-context variants (Ayurveda/Halal/Unani)
+6. Comparison terms (vs/alternative/compare)
+7. Intent variants (buy/review/guide/recipe)
+8. Seasonal variants (Onam/Christmas/Ramadan)
+
+---
+
 ## The domain isolation system ⭐
 
 AnnaSEO is used by businesses in different industries. The same keyword means different things:

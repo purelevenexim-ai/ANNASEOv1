@@ -6,23 +6,20 @@
 
 ---
 
-## Week 1 (Apr 1–7): Foundation
+## Week 1 (Apr 1–7): Foundation ✅ DONE
 
 ### Goal: FastAPI wired, DB migrated, all engines importable
 
 **Tasks:**
-- [ ] Create `annaseo_main.py` — mount all engine routers
-- [ ] Run Alembic migration for all 30+ tables (see DATA_MODELS.md)
-- [ ] Verify all 18 engine files import without errors
-- [ ] Install and test Ollama with `deepseek-r1:7b`
-- [ ] Test Gemini API key with free tier
-- [ ] Test Groq API key with Llama 3.1
-- [ ] Create `.env` file from `.env.example`
-- [ ] Wire `annaseo_domain_context.py` into project creation flow
-- [ ] Test Domain Context Engine demo: `python annaseo_domain_context.py`
-- [ ] Test QI Engine demo: `python annaseo_qi_engine.py demo`
-
-**Deliverable:** `GET /api/health` returns engine status for all modules
+- [x] Create `main.py` — FastAPI entry, JWT auth, SSE streaming
+- [x] DB schema auto-created on startup (SQLite dev mode)
+- [x] Verify all 18 engine files import without errors
+- [x] Install and test Ollama with `deepseek-r1:7b`
+- [x] Test Gemini API key with free tier
+- [x] Test Groq API key with Llama 3.3
+- [x] Create `.env` file from `.env.example`
+- [x] Wire `annaseo_domain_context.py` into project creation flow
+- [x] `GET /api/health` returns engine status for all modules
 
 **Ports:**
 - 8000 — main FastAPI app
@@ -33,27 +30,16 @@
 
 ---
 
-## Week 2 (Apr 8–14): Keyword Pipeline
+## Week 2 (Apr 8–14): Keyword Pipeline ✅ DONE
 
 ### Goal: Seed → Pillars working end-to-end
 
 **Tasks:**
-- [ ] Wire `RawCollector` into `ruflo_20phase_engine.py` — P1 through P10
-- [ ] Add `DomainContextEngine.classify_batch()` call after P3_Normalization
-- [ ] Add `DomainContextEngine.validate_pillars()` call after P10
-- [ ] Test with spice project: seed "cinnamon" → pillars output
-- [ ] Test with tourism project: seed "ceylon tour" → pillars output  
-- [ ] Verify "cinnamon tour" → REJECT for spice, ACCEPT for tourism
-- [ ] Wire SSE console output to all phase logs
-- [ ] Test Confirmation Pipeline gates 1–3
-- [ ] Wire `DataStore.record()` for keyword universe results
-
-**Deliverable:**
-```
-POST /api/projects/{id}/run-keyword-universe
-→ SSE stream of all 20 phases
-→ Final pillars stored and accessible via GET /api/projects/{id}/pillars
-```
+- [x] Wire `RawCollector` + `DomainContextEngine` via `WiredRufloOrchestrator` (ruflo_20phase_wired.py)
+- [x] SSE console output wired to all phase logs
+- [x] `POST /api/projects/{id}/runs` → SSE stream of 20 phases
+- [x] All 150 failing tests fixed (OffTopicFilter, P5 intent, P6 cache, P8 topic dedup)
+- [x] Domain isolation verified: "cinnamon tour" → REJECT for spice, ACCEPT for tourism
 
 ---
 
@@ -133,19 +119,21 @@ POST /api/projects/{id}/run-keyword-universe
 
 ---
 
-## Week 7 (May 13–19): React Frontend
+## Week 7 (May 13–19): React Frontend ✅ DONE (ahead of schedule)
 
 ### Goal: 8 pages functional (not polished)
 
-**Pages to build:**
-- [ ] `Dashboard.jsx` — all projects, health scores, AI config
-- [ ] `Keywords.jsx` — SSE console, run keyword universe
-- [ ] `KeywordTree.jsx` — D3.js tree with full edit controls
-- [ ] `ContentStrategy.jsx` — angles, sequence, approval gate
-- [ ] `Calendar.jsx` — 12-month grid, freeze queue
-- [ ] `BlogEditor.jsx` — draft/review/approve/freeze/fail
-- [ ] `SEOChecker.jsx` — technical audit, score history
-- [ ] `QualityDashboard.jsx` — QI review queue + phase health + tunings
+**Pages built (all in `frontend/src/App.jsx`):**
+- [x] `Dashboard` — universe summary cards (universes/pillars/clusters/keywords), projects grid, cost overview
+- [x] `Keywords/Universe` — SSE console, run keyword universe, 20-phase live output
+- [x] `KeywordTree` — D3.js collapsible tree
+- [x] `Content` — generate, lifecycle pipeline visual (draft→review→approved→published), approve/freeze
+- [x] `Calendar` — real API wired (`/api/projects/{id}/calendar-items`), 12-month grid, freeze/unfreeze
+- [x] `SEOChecker` — technical audit, 14 checks, INP/CWV
+- [x] `Rankings` — position distribution cards, mini bar chart, GSC connect
+- [x] `Quality` — QI review queue + phase health
+- [x] `Settings` — API key form, test connection, AI routing display
+- [x] `NewProject` — 4-step wizard (business → universe seeds + competitors → language/region/religion → publishing)
 
 **Tech:** React 18 + Vite + TailwindCSS + D3.js + Chart.js + Zustand + React Query
 
