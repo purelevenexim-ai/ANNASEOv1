@@ -501,8 +501,99 @@ function DashboardPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PAGE: KEYWORDS / UNIVERSE (P2) — with SSE console
 // ─────────────────────────────────────────────────────────────────────────────
+// RUN CARDS — expandable cards for past/running runs
+// ─────────────────────────────────────────────────────────────────────────────
+function RunCards({ runs, activeProject, onResumeRun }) {
+  const qclient = useQueryClient()
+  const [expanded, setExpanded] = useState({})
+
+  const toggle = (id) => setExpanded(p => ({ ...p, [id]: !p[id] }))
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {runs.slice(0, 10).map(r => {
+        const isOpen = expanded[r.run_id]
+        const isRunning = r.status === "running" || r.status === "queued"
+        const isError = r.status === "error"
+        const isComplete = r.status === "complete"
+        let result = {}
+        try { result = r.result ? JSON.parse(r.result) : {} } catch {}
+
+        const statusColor = isComplete ? T.teal : isError ? T.red : T.amber
+        const borderColor = isOpen ? statusColor : T.border
+
+        return (
+          <div key={r.run_id} style={{ border: `1px solid ${borderColor}`, borderRadius: 8, overflow: "hidden", transition: "border-color 0.15s" }}>
+            {/* Header row */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", cursor: "pointer", background: isOpen ? "#fafafa" : "#fff" }}
+                 onClick={() => toggle(r.run_id)}>
+              <StatusDot status={isComplete ? "healthy" : isError ? "error" : "degraded"}/>
+              <span style={{ flex: 1, fontWeight: 600, fontSize: 13 }}>{r.seed}</span>
+              {isRunning && (
+                <button onClick={e => { e.stopPropagation(); onResumeRun(r) }}
+                  style={{ padding: "3px 10px", background: T.amber, color: "#fff", border: "none", borderRadius: 5, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  Resume view
+                </button>
+              )}
+              <Badge color={statusColor}>{r.status}</Badge>
+              <span style={{ color: T.gray, fontSize: 11 }}>{r.started_at?.slice(0,16)}</span>
+              <button onClick={e => { e.stopPropagation()
+                if (!window.confirm(`Delete run "${r.seed}"?`)) return
+                api.delete(`/api/runs/${r.run_id}`).then(() => qclient.invalidateQueries(["runs", activeProject]))
+              }} style={{ background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:13 }}>✕</button>
+              <span style={{ color: T.gray, fontSize: 11 }}>{isOpen ? "▲" : "▼"}</span>
+            </div>
+
+            {/* Expanded detail */}
+            {isOpen && (
+              <div style={{ padding: "12px 14px", borderTop: `1px solid ${T.border}`, background: "#fafafa" }}>
+                {isError && r.error && (
+                  <div style={{ background: "#fff0f0", border: "1px solid #fecaca", borderRadius: 6, padding: "8px 12px", fontSize: 12, color: T.red, fontFamily: "monospace", marginBottom: 10, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                    {r.error}
+                  </div>
+                )}
+                {isComplete && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 10 }}>
+                    {[
+                      { label: "Keywords", value: result.keyword_count || 0, color: T.purple },
+                      { label: "Pillars",  value: result.pillar_count  || 0, color: T.teal },
+                      { label: "Clusters", value: result.cluster_count || 0, color: T.amber },
+                      { label: "Articles", value: result.calendar_count|| 0, color: T.green },
+                    ].map(s => (
+                      <div key={s.label} style={{ background: "#fff", border: `1px solid ${T.border}`, borderRadius: 6, padding: "8px 10px", textAlign: "center" }}>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: s.color }}>{s.value}</div>
+                        <div style={{ fontSize: 10, color: T.textSoft }}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {isComplete && result.calendar_preview?.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>Scheduled articles (first 5)</div>
+                    {result.calendar_preview.map((a, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 0", borderBottom: `1px solid ${T.border}`, fontSize: 12 }}>
+                        <span style={{ width: 18, height: 18, background: T.purpleLight, color: T.purple, borderRadius: "50%",
+                          display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{i+1}</span>
+                        <span style={{ flex: 1, fontWeight: 500 }}>{a.keyword || a.title || a.article_id}</span>
+                        {a.intent && <Badge color={T.purple}>{a.intent}</Badge>}
+                        {a.scheduled_date && <span style={{ color: T.gray, fontSize: 10 }}>{a.scheduled_date?.slice(0,10)}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {isRunning && (
+                  <div style={{ fontSize: 12, color: T.amber }}>Run in progress — click "Resume view" to watch the SSE console.</div>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // PAGE: KEYWORD UNIVERSE — 20-phase runner with editable gates
 // ─────────────────────────────────────────────────────────────────────────────
 function KeywordsPage() {
@@ -520,14 +611,9 @@ function KeywordsPage() {
   const esRef = useRef(null)
   const { data: runs, refetch: refetchRuns } = useQuery({ queryKey: ["runs", activeProject], queryFn: () => api.get(`/api/projects/${activeProject}/runs`), enabled: !!activeProject })
 
-  const startRun = async () => {
-    if (!seed.trim() || !activeProject) return
-    setEvents([]); setRunStatus("running"); setGateData(null); setGateName(null)
-    const data = await api.post(`/api/projects/${activeProject}/runs`, { seed: seed.trim(), language: "english", region: "india" })
-    if (!data?.run_id) { setRunStatus("error"); return }
-    setRunId(data.run_id)
+  const startSSE = (rid) => {
     if (esRef.current) esRef.current.close()
-    const es = new EventSource(`${API}${data.stream_url}`)
+    const es = new EventSource(`${API}/api/runs/${rid}/stream`)
     esRef.current = es
     es.onmessage = (e) => {
       const ev = JSON.parse(e.data)
@@ -535,17 +621,22 @@ function KeywordsPage() {
       setEvents(prev => [...prev, ev])
       if (ev.type === "gate") {
         setGateData(ev.data); setGateName(ev.gate); setRunStatus("waiting_gate")
-        if (ev.gate === "universe_keywords") {
-          setEditedKeywords((ev.data?.keywords || []).join("\n"))
-        }
-        if (ev.gate === "pillars") {
-          setEditedClusters((ev.data?.clusters || []).map(c => ({ name: c, checked: true })))
-        }
+        if (ev.gate === "universe_keywords") setEditedKeywords((ev.data?.keywords || []).join("\n"))
+        if (ev.gate === "pillars") setEditedClusters((ev.data?.clusters || []).map(c => ({ name: c, checked: true })))
       }
       if (ev.type === "complete") { setRunStatus("complete"); es.close(); refetchRuns() }
       if (ev.type === "error") { setRunStatus("error"); es.close(); refetchRuns() }
     }
     es.onerror = () => { setRunStatus("error"); es.close() }
+  }
+
+  const startRun = async () => {
+    if (!seed.trim() || !activeProject) return
+    setEvents([]); setRunStatus("running"); setGateData(null); setGateName(null)
+    const data = await api.post(`/api/projects/${activeProject}/runs`, { seed: seed.trim(), language: "english", region: "india" })
+    if (!data?.run_id) { setRunStatus("error"); return }
+    setRunId(data.run_id)
+    startSSE(data.run_id)
   }
 
   const confirmGate = async (payload) => {
@@ -679,23 +770,17 @@ function KeywordsPage() {
         <SSEConsole events={events}/>
       </Card>
 
-      {/* Past runs */}
+      {/* Past runs — expandable cards */}
       {runs?.length > 0 && (
         <Card>
           <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Recent runs</div>
-          {runs.slice(0,8).map(r => (
-            <div key={r.run_id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
-              <StatusDot status={r.status === "complete" ? "healthy" : r.status === "error" ? "error" : "degraded"}/>
-              <span style={{ flex: 1, fontWeight: 500 }}>{r.seed}</span>
-              <Badge color={r.status === "complete" ? "teal" : r.status === "error" ? "red" : "amber"}>{r.status}</Badge>
-              <span style={{ color: T.gray, fontSize: 11 }}>{r.started_at?.slice(0,16)}</span>
-              <button onClick={async () => {
-                if (!window.confirm(`Delete run "${r.seed}"?`)) return
-                await api.delete(`/api/runs/${r.run_id}`)
-                qclient.invalidateQueries(["runs", activeProject])
-              }} style={{ background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:13 }} title="Delete run">✕</button>
-            </div>
-          ))}
+          <RunCards runs={runs} activeProject={activeProject} onResumeRun={(r) => {
+            setSeed(r.seed)
+            setRunId(r.run_id)
+            setRunStatus(r.status)
+            setEvents([{ type: "phase_log", payload: { msg: `Resumed view of run: ${r.seed}` } }])
+            startSSE(r.run_id)
+          }} />
         </Card>
       )}
     </div>
@@ -776,6 +861,44 @@ function KeywordTreePage() {
           renderNode(treeData)
         )}
       </Card>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIFIED KEYWORD PAGE — tabs: Universe Input | Run Pipeline | Keyword Tree
+// ─────────────────────────────────────────────────────────────────────────────
+function KeywordsUnifiedPage() {
+  const { activeProject } = useStore()
+  const [tab, setTab] = useState("run")
+
+  const TABS = [
+    { id: "input", label: "Universe Input",  desc: "Pillars + supporting keywords" },
+    { id: "run",   label: "Run Pipeline",    desc: "20-phase keyword universe" },
+    { id: "tree",  label: "Keyword Tree",    desc: "Explore universe visually" },
+  ]
+
+  return (
+    <div>
+      {/* Tab bar */}
+      <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${T.border}`, marginBottom: 24 }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: "10px 20px", border: "none", background: "none", cursor: "pointer",
+            fontSize: 13, fontWeight: tab === t.id ? 700 : 500,
+            color: tab === t.id ? T.purple : T.gray,
+            borderBottom: `3px solid ${tab === t.id ? T.purple : "transparent"}`,
+            marginBottom: -2,
+          }}>
+            {t.label}
+            {tab !== t.id && <div style={{ fontSize: 10, color: T.gray, fontWeight: 400, marginTop: 1 }}>{t.desc}</div>}
+          </button>
+        ))}
+      </div>
+
+      {tab === "input" && <KeywordInputPage projectId={activeProject}/>}
+      {tab === "run"   && <KeywordsPage/>}
+      {tab === "tree"  && <KeywordTreePage/>}
     </div>
   )
 }
@@ -1665,9 +1788,7 @@ function NewProjectPage() {
 
 const NAV = [
   { id: "dashboard",    label: "Dashboard",    icon: "⬛" },
-  { id: "kw-input",     label: "KW Input",     icon: "⬛" },
   { id: "keywords",     label: "Keywords",     icon: "⬛" },
-  { id: "keyword-tree", label: "Keyword tree", icon: "⬛" },
   { id: "content",      label: "Content",      icon: "⬛" },
   { id: "calendar",     label: "Calendar",     icon: "⬛" },
   { id: "seo-checker",  label: "SEO checker",  icon: "⬛" },
@@ -1680,7 +1801,7 @@ const NAV = [
 
 function Sidebar({ page, setPage }) {
   const { activeProject, logout } = useStore()
-  const dotColors = { dashboard:"purple",keywords:"teal","keyword-tree":"teal",content:"purple",calendar:"amber",
+  const dotColors = { dashboard:"purple",keywords:"teal",content:"purple",calendar:"amber",
     "seo-checker":"purple",rankings:"teal",quality:"amber",rsd:"teal" }
   return (
     <div style={{ width: 196, flexShrink: 0, borderRight: "0.5px solid rgba(0,0,0,0.1)",
@@ -2029,9 +2150,7 @@ function App() {
 
   const pages = {
     dashboard:    <DashboardPage/>,
-    "kw-input":   <KeywordInputPage projectId={activeProject}/>,
-    "keywords":   <KeywordsPage/>,
-    "keyword-tree":<KeywordTreePage/>,
+    "keywords":   <KeywordsUnifiedPage/>,
     content:      <ContentPage/>,
     calendar:     <CalendarPage/>,
     "seo-checker":<SEOCheckerPage/>,

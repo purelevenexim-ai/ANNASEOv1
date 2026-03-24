@@ -60,7 +60,7 @@ app.add_middleware(
 # ── Database ─────────────────────────────────────────────────────────────────
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    db = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
     db.row_factory = sqlite3.Row
     db.executescript("""
     PRAGMA journal_mode=WAL;
@@ -150,6 +150,7 @@ def me(user=Depends(current_user)):
 VALID_INDUSTRIES = {
     "food_spices","tourism","ecommerce","healthcare","agriculture",
     "education","real_estate","tech_saas","wellness","restaurant",
+    "fashion","general",
 }
 
 class ProjectBody(BaseModel):
@@ -366,7 +367,7 @@ async def _execute_run(run_id,project_id,body):
                     if st=="cancelled": conn.close(); return None
             conn.close(); return None
         result=await asyncio.get_event_loop().run_in_executor(None,lambda:ruflo.run_seed(keyword=body.seed,pace=pace,language=body.language,region=body.region,generate_articles=body.generate_articles,publish=body.publish,project_id=project_id,run_id=run_id,gate_callback=gate_cb))
-        db.execute("UPDATE runs SET status='complete',result=?,completed_at=?,current_phase='done' WHERE run_id=?",(json.dumps(result,default=str)[:100000],datetime.utcnow().isoformat(),run_id)); db.commit()
+        db.execute("UPDATE runs SET status='complete',result=?,completed_at=?,current_phase='done' WHERE run_id=?",(json.dumps(result,default=str),datetime.utcnow().isoformat(),run_id)); db.commit()
         _emit(run_id,"complete",{"keyword_count":result.get("keyword_count",0),"pillar_count":result.get("pillar_count",0),"calendar_count":result.get("calendar_count",0)})
     except Exception as e:
         import traceback; err=traceback.format_exc()[:500]

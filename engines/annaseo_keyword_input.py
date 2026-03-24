@@ -90,7 +90,7 @@ INFORMATIONAL_SIGNALS = [
 
 def _db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    con = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
     con.row_factory = sqlite3.Row
     con.executescript("""
     CREATE TABLE IF NOT EXISTS pillar_keywords (

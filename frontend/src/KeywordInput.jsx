@@ -83,7 +83,7 @@ function intentColor(intent) {
 function KeywordInputForm({ projectId, onSubmit }) {
   const [pillars, setPillars]         = useState([{ keyword: "", intent: "transactional", priority: 1 }])
   const [supporting, setSupporting]   = useState([""])
-  const [intentFocus, setIntentFocus] = useState("transactional")
+  const [intentFocus, setIntentFocus] = useState(["transactional"])
   const [customerUrl, setCustomerUrl] = useState("")
   const [competitors, setCompetitors] = useState([""])
   const [loading, setLoading]         = useState(false)
@@ -116,12 +116,14 @@ function KeywordInputForm({ projectId, onSubmit }) {
     const validSupporting = supporting.filter(s => s.trim())
     if (!validSupporting.length) { setError("Add at least one supporting keyword"); return }
 
+    if (!intentFocus.length) { setError("Select at least one intent focus"); return }
+
     setLoading(true); setError("")
     try {
       const result = await apiCall(`/api/ki/${projectId}/input`, "POST", {
         pillars: validPillars.map((p, i) => ({ ...p, priority: i + 1 })),
         supporting: validSupporting,
-        intent_focus: intentFocus,
+        intent_focus: intentFocus[0] || "transactional",
         customer_url: customerUrl.trim() || null,
         competitor_urls: competitors.filter(c => c.trim()),
       })
@@ -228,23 +230,32 @@ function KeywordInputForm({ projectId, onSubmit }) {
       <div style={cardStyle}>
         <div style={{ fontWeight: 700, fontSize: 14, color: T.text, marginBottom: 8 }}>Primary Intent Focus</div>
         <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 12 }}>
-          What's the main goal — selling products, providing information, or both?
+          Select all that apply — selling products, information, local, or comparisons?
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {INTENT_OPTIONS.map(o => (
-            <button
-              key={o.value}
-              onClick={() => setIntentFocus(o.value)}
-              style={{
-                padding: "6px 14px", borderRadius: 99, fontSize: 12, fontWeight: 600,
-                cursor: "pointer", border: "none",
-                background: intentFocus === o.value ? o.color : T.grayLight,
-                color: intentFocus === o.value ? "#fff" : T.textSoft,
-                transition: "all 0.15s",
-              }}
-            >{o.label}</button>
-          ))}
+          {INTENT_OPTIONS.map(o => {
+            const active = intentFocus.includes(o.value)
+            return (
+              <button
+                key={o.value}
+                onClick={() => setIntentFocus(prev =>
+                  prev.includes(o.value) ? prev.filter(x => x !== o.value) : [...prev, o.value]
+                )}
+                style={{
+                  padding: "6px 14px", borderRadius: 99, fontSize: 12, fontWeight: 600,
+                  cursor: "pointer",
+                  border: `2px solid ${active ? o.color : "transparent"}`,
+                  background: active ? o.color : T.grayLight,
+                  color: active ? "#fff" : T.textSoft,
+                  transition: "all 0.15s",
+                }}
+              >{active ? "✓ " : ""}{o.label}</button>
+            )
+          })}
         </div>
+        {intentFocus.length === 0 && (
+          <div style={{ fontSize: 11, color: T.red, marginTop: 6 }}>Select at least one intent</div>
+        )}
       </div>
 
       {/* Website URLs */}
