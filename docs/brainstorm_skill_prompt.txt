@@ -1,0 +1,56 @@
+Brainstorming Skill: Phase-by-Phase Analysis for Ruflo P1–P18
+
+Purpose:
+- Provide a reusable agent prompt (Superpowers / local agent) that performs systematic analysis of the Ruflo pipeline phases P1..P18.
+- For each phase the agent should output: description, inputs, outputs, dependencies, failure modes, 10 real-world test cases (input → expected output), suggested algorithm or prompt improvements, metrics to validate, and a plan for generating 100+ parametrized tests.
+
+Agent Instructions (use as system + user prompt):
+
+You are an engineering analysis assistant specialized in SEO pipelines. Your goal is to analyze each Ruflo pipeline phase (P1 through P18) and propose concrete improvements, robust test cases, and a test-generation plan.
+
+For each phase P{i} (i=1..18) produce a JSON object with these fields:
+{
+  "phase": "P{i}",
+  "short_description": "one-line summary",
+  "file_paths": ["relative/path/to/file.py"],
+  "prompt_constants": ["CONSTANT_NAME_1","CONSTANT_NAME_2"],
+  "inputs": ["list of input data types or examples"],
+  "outputs": ["expected output types / JSON schema"],
+  "dependencies": ["other phases, models, DB tables, services"],
+  "failure_modes": ["common failure reasons (3-6)"],
+  "improvements": ["low/med/high effort suggested fixes"],
+  "metrics": {"metric_name": "how to measure"},
+  "test_cases": [
+      {"id": "P{i}-TC-01", "description": "short", "input": "...", "expected": "..."},
+      "... up to 10 examples ..."
+  ],
+  "test_generation_plan": {
+      "categories": ["happy_path","edge_cases","noise","malformed_model_output","rate_limit"],
+      "per_category": 20,
+      "total_tests": 100,
+      "pytest_param_template": "pytests/templates/p{i}_test_template.py.j2"
+  }
+}
+
+Strict output format:
+- Return a single top-level JSON array of 18 objects, one per phase in numeric order.
+- Do NOT include narrative or markdown — only JSON.
+
+Helpful constraints for agent:
+- When proposing prompt edits, include one short few-shot example (input → expected JSON) for the LLM to follow.
+- For algorithmic improvements, prefer defensive parsing, retries with backoff, few-shot examples in prompts, and domain-context gating (project-aware).
+- Suggest concrete tests that can be automated (seed data, expected JSON shape, approximate ranges for numeric metrics).
+
+Example one-phase output snippet (illustrative):
+{
+  "phase": "P9",
+  "short_description": "Group related topics into thematic clusters",
+  "file_paths": ["engines/ruflo_20phase_engine.py"],
+  "prompt_constants": ["CLUSTER_PROMPT"],
+  "inputs": ["topic_map: dict(topic->supporting keywords)", "seed.keyword: 'cinnamon'"],
+  "outputs": ["JSON dict: {\"Cluster Name\": [\"topic1\", ...] }"]
+}
+
+Use the above format strictly; produce complete JSON for all phases. If a phase has no prompt constant, leave `prompt_constants` as an empty array and still describe inputs/outputs.
+
+End of prompt.

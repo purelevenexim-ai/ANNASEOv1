@@ -178,6 +178,7 @@ class P2_Enhanced:
         language: str = "english",
         region: str = "India",
         max_per_phrase: int = 20,
+        seed_keyword: Optional[str] = None,
     ) -> list[str]:
         """
         Returns a flat List[str] of expanded keywords ready for P3+.
@@ -193,26 +194,67 @@ class P2_Enhanced:
             # 1. Try confirmed universe items first (fastest path)
             universe = self._load_confirmed_universe(db, project_id, session_id)
             if universe:
-                log.info(f"[P2E] Loaded {len(universe)} confirmed universe items for {project_id}")
-                return universe
+                filtered = self._filter_by_seed(universe, seed_keyword)
+                if filtered:
+                    log.info(f"[P2E] Loaded {len(filtered)} confirmed universe items for {project_id} filtered by seed '{seed_keyword}'")
+                    return filtered
+                log.info(f"[P2E] Confirmed universe items exist but none match seed '{seed_keyword}', trying cross-products")
 
             # 2. Try cross-products from DB
             phrases = self._load_cross_products(db, project_id, session_id)
             if phrases:
-                log.info(f"[P2E] Expanding {len(phrases)} phrases for {project_id}")
-                return self._expand_phrases(phrases, max_per_phrase)
+                expanded = self._expand_phrases(phrases, max_per_phrase)
+                filtered = self._filter_by_seed(expanded, seed_keyword)
+                if filtered:
+                    log.info(f"[P2E] Expanded {len(phrases)} cross-product phrases for {project_id} filtered by seed '{seed_keyword}'")
+                    return filtered
+                log.info(f"[P2E] Cross-product expansions exist but none match seed '{seed_keyword}', trying pillars")
 
             # 3. Try pillars alone
             pillars = self._load_pillars(db, project_id)
             if pillars:
-                log.info(f"[P2E] Expanding {len(pillars)} pillars for {project_id}")
-                return self._expand_phrases(pillars, max_per_phrase)
+                expanded = self._expand_phrases(pillars, max_per_phrase)
+                filtered = self._filter_by_seed(expanded, seed_keyword)
+                if filtered:
+                    log.info(f"[P2E] Expanded {len(pillars)} pillars for {project_id} filtered by seed '{seed_keyword}'")
+                    return filtered
+                log.info(f"[P2E] Pillar expansions exist but none match seed '{seed_keyword}', falling back to empty")
 
-            log.warning(f"[P2E] No customer input found for project {project_id}")
+            log.warning(f"[P2E] No customer input found for project {project_id} or no seed-matching keywords for '{seed_keyword}'")
             return []
 
         finally:
             db.close()
+
+    def _filter_by_seed(self, keywords: list[str], seed_keyword: Optional[str]) -> list[str]:
+        if not seed_keyword:
+            return keywords
+
+        seed = seed_keyword.lower().strip()
+        seed_words = set(re.findall(r"\w+", seed))
+        if not seed_words:
+            return keywords
+
+        filtered = []
+        for kw in keywords:
+            kw_l = kw.lower().strip()
+            kw_words = set(re.findall(r"\w+", kw_l))
+
+            # exact literal match in phrase (token-level)
+            if any(word in kw_words for word in seed_words):
+                filtered.append(kw)
+                continue
+
+            # phrase contains seed as separate token (e.g. "green tea")
+            if re.search(rf"\b{re.escape(seed)}\b", kw_l):
+                filtered.append(kw)
+                continue
+
+            # multi-word seed overlap threshold (2+ tokens)
+            if len(seed_words) > 1 and len(seed_words & kw_words) >= 2:
+                filtered.append(kw)
+
+        return filtered
 
     def run_with_seed(
         self,
@@ -360,6 +402,7 @@ class KeywordExpansionEnhanced:
                 self.session_id or None,
                 language=language,
                 region=region,
+                seed_keyword=seed_kw,
             )
             if result:
                 return result

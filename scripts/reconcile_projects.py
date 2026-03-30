@@ -6,9 +6,16 @@ Usage:
 
 --apply will perform changes; without it the script runs in dry-run mode.
 """
-import sqlite3, json, sys
-apply_changes = '--apply' in sys.argv
-DB = 'annaseo.db'
+import sqlite3, json, sys, os, argparse
+
+parser = argparse.ArgumentParser(__doc__)
+parser.add_argument('--apply', action='store_true', help='Perform changes (default: dry-run)')
+parser.add_argument('--db', default=os.getenv('ANNASEO_DB', 'annaseo.db'),
+                    help='Path to the SQLite DB file (default: annaseo.db or $ANNASEO_DB)')
+args = parser.parse_args()
+apply_changes = args.apply
+DB = args.db
+
 conn = sqlite3.connect(DB)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()

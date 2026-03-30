@@ -34,10 +34,29 @@ from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
 
+from services.strategy_schema import load_strategy_schema
+from services.llm_parser import extract_json, parse_llm_json
+from services.strategy_validator import validate_strategy_output
+from engines.prompts.final_strategy_prompt import SYSTEM_PROMPT, FULL_PROMPT, build_final_strategy_prompt
+
 load_dotenv()
 log = logging.getLogger("ruflo.strategy")
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+
+class DefaultLLMClient:
+    """Minimal LLM client wrapper for `generate` calls."""
+
+    def generate(self, system_prompt: str, user_prompt: str, temperature: float = 0.2, top_p: float = 0.9, max_tokens: int = 4000):
+        text, tokens = AI.claude(
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        return text, tokens
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,6 +68,11 @@ class Cfg:
     CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")  # best for reasoning
     OLLAMA_URL        = os.getenv("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_MODEL      = os.getenv("OLLAMA_MODEL", "deepseek-r1:7b")
+    GROQ_API_KEY      = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL        = os.getenv("GROQ_MODEL", "llama-3.3-70b-instruct")
+    GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL      = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    GEMINI_RATE       = float(os.getenv("GEMINI_RATE", "4.0"))
 
     # Token budget for context (keep well under Claude's limit)
     MAX_KEYWORDS_PER_PILLAR = 20   # top N per pillar in context
@@ -79,11 +103,43 @@ class PillarContext:
 
 @dataclass
 class CompetitorSnapshot:
-    domain:           str
-    pillars_covered:  List[str]
-    pillars_missing:  List[str]
-    estimated_da:     int   # Domain Authority estimate
-    content_freshness: str  # "fresh" | "stale" | "mixed"
+    domain:            str
+    pillars_covered:   List[str]
+    pillars_missing:   List[str]
+    estimated_da:      Optional[int] = None   # Domain Authority estimate
+    da:                Optional[int] = None   # backwards compatibility alias
+    content_freshness: str = "mixed"  # "fresh" | "stale" | "mixed"
+
+    def __post_init__(self):
+        # Backwards compatibility: allow both da and estimated_da
+        if self.estimated_da is None and self.da is not None:
+            self.estimated_da = self.da
+        if self.estimated_da is None:
+            self.estimated_da = 0
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        norm = normalize_competitor_data(data.copy())
+        return cls(
+            domain=norm.get("domain", ""),
+            pillars_covered=norm.get("pillars_covered", []),
+            pillars_missing=norm.get("pillars_missing", []),
+            estimated_da=norm.get("domain_authority", norm.get("estimated_da", norm.get("da"))),
+            da=norm.get("da"),
+            content_freshness=norm.get("content_freshness", "mixed")
+        )
+
+
+def normalize_competitor_data(data: dict) -> dict:
+    if "da" in data and "domain_authority" not in data:
+        data["domain_authority"] = data.pop("da")
+    if "domain_authority" in data and "estimated_da" not in data:
+        data["estimated_da"] = data["domain_authority"]
+    # ensure canonical field names
+    if "domain_authority" in data:
+        data["estimated_da"] = data["domain_authority"]
+    return data
+
 
 @dataclass
 class UniverseContext:
@@ -210,6 +266,27 @@ class AI:
             return '{"error": "' + str(e) + '"}', 0
 
     @staticmethod
+    def _extract_ollama_text(data: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        if isinstance(data.get("response"), str) and data.get("response").strip():
+            return data["response"].strip()
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
+            return msg["content"].strip()
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
+                    return first["message"]["content"].strip()
+                if isinstance(first.get("text"), str):
+                    return first["text"].strip()
+        if isinstance(data.get("text"), str):
+            return data["text"].strip()
+        return ""
+
+    @staticmethod
     def deepseek(prompt: str, system: str = "You are an SEO validation expert.",
                   temperature: float = 0.1) -> str:
         """Local DeepSeek — validation and quick scoring tasks."""
@@ -221,11 +298,53 @@ class AI:
                              {"role":"user","content":prompt}]
             }, timeout=120)
             r.raise_for_status()
-            text = r.json()["message"]["content"].strip()
+            data = r.json()
+            text = AI._extract_ollama_text(data)
+            if not text:
+                text = (data.get("response") or data.get("text") or "").strip()
             return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"DeepSeek error: {e}")
             return ""
+
+    @staticmethod
+    def gemini(prompt: str, temperature: float = 0.3) -> str:
+        if not Cfg.GEMINI_API_KEY:
+            return AI.deepseek(prompt, system="You are a content strategy expert.", temperature=temperature)
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=Cfg.GEMINI_API_KEY)
+            model = genai.GenerativeModel(Cfg.GEMINI_MODEL)
+            resp = model.generate_content(prompt, generation_config=genai.GenerationConfig(temperature=temperature))
+            return resp.text.strip()
+        except Exception as e:
+            log.warning(f"Gemini error: {e}")
+            return AI.deepseek(prompt, system="You are a content strategy expert.", temperature=temperature)
+
+    @staticmethod
+    def groq(prompt: str, temperature: float = 0.25) -> str:
+        if not Cfg.GROQ_API_KEY:
+            return AI.gemini(prompt, temperature=temperature)
+        try:
+            r = _req.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {Cfg.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": Cfg.GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "max_tokens": 3000,
+                },
+                timeout=120
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            log.warning(f"Groq error: {e}")
+            return AI.gemini(prompt, temperature=temperature)
 
     @staticmethod
     def parse_json(text: str) -> Any:
@@ -328,28 +447,105 @@ class ContextBuilder:
 
     def _build_competitor_snapshots(self, tree: dict) -> List[CompetitorSnapshot]:
         """Build competitor snapshots from SERP data in tree."""
-        pillar_names = [p["name"] for p in tree.get("pillars",[])]
-        # Default well-known competitors for tourism
-        return [
-            CompetitorSnapshot(
-                domain="tripadvisor.com", da=90,
-                pillars_covered=["Munnar hotels","Munnar tourism"],
-                pillars_missing=["Munnar homestays","Munnar food","Munnar shopping"],
-                content_freshness="mixed"
-            ),
-            CompetitorSnapshot(
-                domain="holidify.com", da=52,
-                pillars_covered=["Munnar tourism","Munnar activities","Munnar weather"],
-                pillars_missing=["Munnar homestays","Munnar shopping"],
-                content_freshness="stale"
-            ),
-            CompetitorSnapshot(
-                domain="thrillophilia.com", da=55,
-                pillars_covered=["Munnar tours","Munnar activities"],
-                pillars_missing=["Munnar food","Munnar weather","Munnar shopping"],
-                content_freshness="fresh"
-            ),
-        ]
+        from engines.serp_utils import extract_competitors
+        serp_source = tree.get("serp_intelligence") or tree.get("serp") or tree.get("serp_data") or {}
+        raw_competitors = []
+
+        # Back-compat with old pipeline shapes
+        if isinstance(serp_source, dict) and serp_source.get("organic_results"):
+            raw_competitors = extract_competitors(serp_source, limit=Cfg.MAX_COMPETITORS)
+        elif isinstance(serp_source, dict) and serp_source.get("results"):
+            raw_competitors = extract_competitors(serp_source, limit=Cfg.MAX_COMPETITORS)
+        elif isinstance(serp_source, list):
+            raw_competitors = extract_competitors({"organic_results": serp_source}, limit=Cfg.MAX_COMPETITORS)
+
+        # Always attempt to enrich/augment SERP data using SERPEngine
+        try:
+            from engines.serp import SERPEngine
+            serp_engine = SERPEngine()
+
+            # Build a short list of candidate queries from the tree
+            queries = []
+            top_kws = tree.get("top_100") or tree.get("top_20") or []
+            if isinstance(top_kws, list) and top_kws:
+                for k in top_kws[:3]:
+                    if isinstance(k, dict):
+                        q = k.get("term") or k.get("keyword") or k.get("query")
+                        if q:
+                            queries.append(q)
+                    elif isinstance(k, str):
+                        queries.append(k)
+
+            # Fallback: inspect pillars for keywords
+            if not queries:
+                for p in tree.get("pillars", []):
+                    kws = p.get("supporting_keyword_engine", {}).get("top_50") or p.get("top_keywords") or []
+                    if isinstance(kws, list) and kws:
+                        for kw in kws[:2]:
+                            if isinstance(kw, dict):
+                                q = kw.get("term") or kw.get("keyword")
+                                if q:
+                                    queries.append(q)
+                            elif isinstance(kw, str):
+                                queries.append(kw)
+                    if queries:
+                        break
+
+            if not queries:
+                # last resort: use universe name
+                cand = tree.get("universe") or tree.get("name") or "example"
+                queries = [cand]
+
+            # Aggregate provider responses
+            aggregated = []
+            for q in queries[:3]:
+                try:
+                    resp = serp_engine.get_serp(q)
+                    if isinstance(resp, dict):
+                        results = resp.get("organic_results") or resp.get("results") or []
+                        if isinstance(results, list):
+                            aggregated.extend(results)
+                except Exception as e:
+                    log.warning("SERPEngine provider call failed for query %s: %s", q, e)
+                    continue
+
+            # Also include any existing SERP results from the pipeline
+            existing_results = []
+            if isinstance(serp_source, dict):
+                existing_results = serp_source.get("organic_results") or serp_source.get("results") or []
+            elif isinstance(serp_source, list):
+                existing_results = serp_source
+
+            # Combine and deduplicate by URL/title
+            combined = []
+            seen = set()
+            for item in (aggregated + existing_results):
+                if not isinstance(item, dict):
+                    key = str(item)
+                else:
+                    url = item.get("link") or item.get("url") or item.get("link_raw") or ""
+                    title = item.get("title") or item.get("name") or ""
+                    key = url or title or json.dumps(item, sort_keys=True)
+                if not key:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined.append(item)
+
+            if combined:
+                serp_data = {"organic_results": combined[:50]}
+                # store back into tree for downstream consumers
+                try:
+                    tree["serp"] = serp_data
+                    tree["serp_data"] = serp_data
+                except Exception:
+                    pass
+                raw_competitors = extract_competitors(serp_data, limit=Cfg.MAX_COMPETITORS)
+        except Exception as e:
+            log.warning("SERP enrichment via SERPEngine failed: %s", e)
+
+        return [CompetitorSnapshot.from_dict(c) for c in raw_competitors]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,684 +808,158 @@ Return ONLY valid JSON:
 # SECTION 7 — FINAL STRATEGY ENGINE (MAIN ORCHESTRATOR)
 # ─────────────────────────────────────────────────────────────────────────────
 
+CLAUDE_COST_PER_TOKEN = float(os.getenv("CLAUDE_COST_PER_TOKEN", "0.000003"))
+
+
 class FinalStrategyEngine:
     """
-    Main engine. Feeds complete keyword data to Claude for #1 ranking strategy.
+    FinalStrategyEngine does one-shot strategy generation via LLM, strict schema validation,
+    and retry logic.
 
-    Usage:
-        engine = FinalStrategyEngine()
-        strategy = engine.run(universe_result, project)
-        # strategy is frozen in DB and populates content calendar automatically
+    Input payload MUST include:
+      project, keyword_universe, gsc_data, serp_data, competitors, strategy_meta
     """
 
-    def __init__(self):
-        self.context_builder = ContextBuilder()
-        self.validator       = StrategyValidator()
-        self.prompts         = StrategyPrompts()
-
-    def run(self, universe_result: dict, project: dict,
-             gsc_data: List[dict] = None) -> StrategyOutput:
-        """
-        Full strategy analysis pipeline.
-        One Claude call with complete keyword intelligence context.
-        """
-        t0 = time.time()
-        log.info(f"[Strategy] Starting final strategy analysis for: {universe_result.get('universe','')}")
-
-        # ── Step 1: Build context ─────────────────────────────────────────────
-        ctx = self.context_builder.build(universe_result, project, gsc_data)
-        ctx_json = ctx.to_compressed_json()
-        log.info(f"[Strategy] Context built: {len(ctx_json)} chars, ~{len(ctx_json)//4} tokens")
-
-        total_tokens = 0
-        strategy = {}
-
-        # ── Step 2: Claude CoT — Landscape Analysis ───────────────────────────
-        log.info("[Strategy] Step 1: Landscape analysis...")
-        prompt1 = self.prompts.STEP1_LANDSCAPE.format(
-            universe=ctx.universe,
-            context_json=ctx_json,
-            age=ctx.domain_age_months,
-            pages=ctx.existing_pages
-        )
-        text1, t1 = AI.claude(self.prompts.SYSTEM,
-                               [{"role":"user","content":prompt1}],
-                               max_tokens=1500)
-        total_tokens += t1
-        try:
-            landscape = AI.parse_json(text1).get("landscape_analysis", {})
-        except Exception as e:
-            log.warning(f"Landscape parse failed: {e}")
-            landscape = {}
-        strategy["landscape"] = landscape
-
-        # ── Step 3: Claude CoT — Priority Queue ───────────────────────────────
-        log.info("[Strategy] Step 2: Priority queue...")
-        prompt2 = self.prompts.STEP2_QUEUE.format(
-            landscape=json.dumps(landscape)[:800],
-            context_json=ctx_json[:4000]   # shorter for subsequent calls
-        )
-        text2, t2 = AI.claude(self.prompts.SYSTEM,
-                               [{"role":"user","content":prompt2}],
-                               max_tokens=3000)
-        total_tokens += t2
-        try:
-            pq = AI.parse_json(text2).get("priority_queue", [])
-        except Exception as e:
-            log.warning(f"Priority queue parse failed: {e}")
-            pq = []
-        strategy["priority_queue"] = pq
-
-        # ── Step 4: Claude CoT — Content Briefs ──────────────────────────────
-        log.info("[Strategy] Step 3: Content briefs...")
-        top5 = []
-        for week_data in pq[:3]:
-            top5.extend(week_data.get("articles", [])[:2])
-        top5 = top5[:5]
-
-        prompt3 = self.prompts.STEP3_BRIEFS.format(
-            top_5_from_queue=json.dumps(top5, indent=2)[:1500],
-            context_json=ctx_json[:3000]
-        )
-        text3, t3 = AI.claude(self.prompts.SYSTEM,
-                               [{"role":"user","content":prompt3}],
-                               max_tokens=3500)
-        total_tokens += t3
-        try:
-            briefs = AI.parse_json(text3).get("content_briefs", [])
-        except Exception as e:
-            log.warning(f"Content briefs parse failed: {e}")
-            briefs = []
-        strategy["content_briefs"] = briefs
-
-        # ── Step 5: Claude CoT — Internal Link Architecture ───────────────────
-        log.info("[Strategy] Step 4: Internal link map...")
-        top20_articles = [a for w in pq[:8] for a in w.get("articles",[])]
-        prompt4 = self.prompts.STEP4_LINKS.format(
-            pillar_names=", ".join(p.name for p in ctx.pillars),
-            top_20_articles=json.dumps([a.get("title","") for a in top20_articles[:20]])
-        )
-        text4, t4 = AI.claude(self.prompts.SYSTEM,
-                               [{"role":"user","content":prompt4}],
-                               max_tokens=2000)
-        total_tokens += t4
-        try:
-            link_map = AI.parse_json(text4).get("internal_link_map", {})
-            link_rules = AI.parse_json(text4).get("linking_rules", [])
-        except Exception as e:
-            log.warning(f"Link map parse failed: {e}")
-            link_map, link_rules = {}, []
-        strategy["link_map"] = link_map
-        strategy["linking_rules"] = link_rules
-
-        # ── Step 6: Claude CoT — Risks + Predictions ─────────────────────────
-        log.info("[Strategy] Step 5: Risks and predictions...")
-        prompt5 = self.prompts.STEP5_RISKS_PREDICTIONS.format(
-            business=ctx.business_context,
-            landscape_summary=json.dumps(landscape)[:500]
-        )
-        text5, t5 = AI.claude(self.prompts.SYSTEM,
-                               [{"role":"user","content":prompt5}],
-                               max_tokens=2000)
-        total_tokens += t5
-        try:
-            parsed5 = AI.parse_json(text5)
-            risks   = parsed5.get("risks", [])
-            preds   = parsed5.get("predictions", [])
-        except Exception as e:
-            log.warning(f"Risks/predictions parse failed: {e}")
-            risks, preds = [], []
-        strategy["risks"]       = risks
-        strategy["predictions"] = preds
-
-        # ── Step 7: DeepSeek Validation ───────────────────────────────────────
-        log.info("[Strategy] Step 6: Validation...")
-        validation = self.validator.validate(strategy, ctx.universe)
-        confidence = float(validation.get("confidence_score", 0.7))
-
-        # ── Step 8: Assemble final output ─────────────────────────────────────
-        output = StrategyOutput(
-            landscape=strategy.get("landscape", {}),
-            priority_queue=strategy.get("priority_queue", []),
-            content_briefs=strategy.get("content_briefs", []),
-            link_map=strategy.get("link_map", {}),
-            risks=strategy.get("risks", []),
-            predictions=strategy.get("predictions", []),
-            confidence=confidence,
-            generated_at=datetime.utcnow().isoformat(),
-            tokens_used=total_tokens
-        )
-
-        elapsed = int((time.time()-t0)*1000)
-        log.info(f"[Strategy] Complete. Tokens: {total_tokens}, "
-                 f"Confidence: {confidence:.2f}, Duration: {elapsed}ms, "
-                 f"Cost: ~${total_tokens/1000000*15:.4f}")
-
-        return output
-
-    def generate_content_calendar(self, strategy: StrategyOutput,
-                                   start_date: datetime = None) -> List[dict]:
-        """
-        Convert priority queue into a concrete daily content calendar.
-        10-20 blogs per pillar distributed across the year.
-        """
-        if not start_date:
-            start_date = datetime.utcnow()
-
-        calendar = []
-        article_num = 0
-
-        for week_data in strategy.priority_queue:
-            week_num  = week_data.get("week", 1)
-            articles  = week_data.get("articles", [])
-            week_start= start_date + timedelta(weeks=week_num-1)
-
-            for i, article in enumerate(articles):
-                pub_date = week_start + timedelta(days=i*2)   # every 2 days within week
-                calendar.append({
-                    "id":               f"blog_{article_num:04d}",
-                    "title":            article.get("title",""),
-                    "target_keyword":   article.get("target_keyword",""),
-                    "pillar":           article.get("pillar",""),
-                    "scheduled_date":   pub_date.isoformat(),
-                    "week":             week_num,
-                    "kd_estimate":      article.get("kd_estimate",20),
-                    "schema_type":      article.get("schema_type","Article"),
-                    "language":         article.get("language","english"),
-                    "internal_links_to":article.get("internal_links_to",[]),
-                    "status":           "scheduled",
-                    "frozen":           False,
-                    "content_body":     None,
-                    "published_url":    None,
-                    "ranking":          None,
-                })
-                article_num += 1
-
-        return calendar
-
-    def format_strategy_report(self, strategy: StrategyOutput) -> str:
-        """
-        Human-readable strategy report for user review.
-        Shown in app dashboard before final approval.
-        """
-        lines = [
-            "═" * 60,
-            "  FINAL STRATEGY REPORT — AI ANALYSIS COMPLETE",
-            "═" * 60,
-            "",
-            f"  Confidence Score: {strategy.confidence:.0%}",
-            f"  Generated: {strategy.generated_at[:10]}",
-            f"  API tokens used: {strategy.tokens_used:,}",
-            "",
-            "─" * 60,
-            "  LANDSCAPE ANALYSIS",
-            "─" * 60,
-        ]
-
-        la = strategy.landscape
-        if la:
-            lines.append(f"\n  Critical insight: {la.get('critical_insight','')}")
-            lines.append(f"\n  Biggest opportunity: {la.get('biggest_single_opportunity','')}")
-            lines.append(f"\n  12-month ceiling: {la.get('realistic_12_month_ceiling','')}")
-
-            easy = la.get("easy_win_pillars", [])
-            if easy:
-                lines.append("\n  Easy win pillars:")
-                for p in easy[:3]:
-                    lines.append(f"    • {p.get('pillar','')} — {p.get('why','')} "
-                                 f"(top 3 in {p.get('expected_time_to_top3','')})")
-
-            avoid = la.get("avoid_pillars", [])
-            if avoid:
-                lines.append("\n  Avoid (too competitive):")
-                for p in avoid[:3]:
-                    lines.append(f"    ✗ {p.get('pillar','')} — dominated by {p.get('who_dominates','')}")
-
-            gaps = la.get("guaranteed_#1_opportunities", [])
-            if gaps:
-                lines.append("\n  Guaranteed #1 opportunities:")
-                for g in gaps[:5]:
-                    lines.append(f"    ★ {g.get('keyword','')} (KD {g.get('kd',0)}, "
-                                 f"{g.get('est_volume',0)} searches/mo)")
-
-        lines += ["", "─" * 60, "  WEEK 1 ARTICLES (publish immediately)", "─" * 60]
-        if strategy.priority_queue:
-            w1 = strategy.priority_queue[0]
-            for a in w1.get("articles", []):
-                lines.append(f"\n  [{a.get('kd_estimate',0)} KD] {a.get('title','')}")
-                lines.append(f"         → {a.get('why_this_week','')}")
-
-        lines += ["", "─" * 60, "  12-MONTH RANKING PREDICTIONS", "─" * 60]
-        for pred in strategy.predictions[:6]:
-            lines.append(f"\n  Month {pred.get('month',0):2d}: "
-                         f"top-20: {pred.get('keywords_in_top_20',0)}, "
-                         f"top-10: {pred.get('keywords_in_top_10',0)}, "
-                         f"top-3: {pred.get('keywords_in_top_3',0)}")
-            if pred.get("milestone"):
-                lines.append(f"          {pred['milestone']}")
-
-        lines += ["", "─" * 60, "  TOP RISKS", "─" * 60]
-        for r in strategy.risks[:3]:
-            lines.append(f"\n  ⚠ [{r.get('probability','?')} probability] {r.get('risk','')}")
-            lines.append(f"    → Mitigation: {r.get('mitigation','')}")
-
-        lines += ["", "═" * 60, "  Approve this strategy to begin execution.", "═" * 60]
-        return "\n".join(lines)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 8 — RANKING DROP MONITOR + RE-TRIGGER
-# ─────────────────────────────────────────────────────────────────────────────
-
-class RankingMonitor:
-    """
-    Continuously monitors rankings via GSC API.
-    Auto-triggers Claude diagnosis when keyword drops below threshold.
-    Auto-triggers strategy re-run monthly.
-    """
-
-    DIAGNOSIS_PROMPT = """A page has dropped in Google rankings.
-
-Universe: {universe}
-Keyword: "{keyword}"
-Previous rank: #{prev_rank}
-Current rank:  #{curr_rank}
-Days since drop: {days}
-Page title: {page_title}
-Current content summary: {content_summary}
-
-This competitor page recently appeared or improved: {competitor_page}
-
-DIAGNOSE the drop and prescribe SPECIFIC fixes. Return ONLY valid JSON:
-{{
-  "root_cause": "primary reason for drop",
-  "contributing_factors": ["factor 1", "factor 2"],
-  "competitor_advantage": "what the overtaking page has that ours doesn't",
-  "fixes": [
-    {{
-      "action": "add_faq|update_entities|add_data_point|rewrite_intro|add_schema|internal_link",
-      "specific_instruction": "exact text or action",
-      "priority": "do_now|do_this_week|do_this_month",
-      "expected_impact": "weeks to recover rank"
-    }}
-  ],
-  "new_h2_to_add": "...",
-  "new_intro_sentence": "direct answer sentence to put at top of article",
-  "entities_to_add": ["...", "..."],
-  "information_gain_addition": "unique data point to add to beat competitor",
-  "estimated_recovery_weeks": 0
-}}"""
-
-    def diagnose_drop(self, keyword: str, prev_rank: int, curr_rank: int,
-                       page_title: str, content_summary: str,
-                       competitor_page: str, universe: str) -> dict:
-        """Claude diagnoses why a keyword dropped and what to fix."""
-        log.info(f"[Monitor] Diagnosing drop: '{keyword}' #{prev_rank} → #{curr_rank}")
-        prompt = self.DIAGNOSIS_PROMPT.format(
-            universe=universe, keyword=keyword,
-            prev_rank=prev_rank, curr_rank=curr_rank,
-            days=14, page_title=page_title,
-            content_summary=content_summary[:500],
-            competitor_page=competitor_page[:300]
-        )
-        text, tokens = AI.claude(StrategyPrompts.SYSTEM,
-                                  [{"role":"user","content":prompt}],
-                                  max_tokens=1500)
-        log.info(f"[Monitor] Diagnosis complete. Tokens: {tokens}")
-        try:
-            return AI.parse_json(text)
-        except Exception:
-            return {"root_cause": "parse_failed", "fixes": [], "estimated_recovery_weeks": 4}
-
-    def check_gsc_alerts(self, gsc_data: List[dict],
-                          threshold: int = None) -> List[dict]:
-        """Find keywords that have dropped below threshold — trigger diagnosis."""
-        threshold = threshold or Cfg.RANK_ALERT_THRESHOLD
-        alerts = []
-        for row in gsc_data:
-            curr = row.get("rank", 99)
-            prev = row.get("prev_rank", curr)
-            if curr > threshold and prev <= threshold:
-                alerts.append({
-                    "keyword": row.get("keyword",""),
-                    "current_rank": curr,
-                    "previous_rank": prev,
-                    "impressions": row.get("impressions",0),
-                    "severity": "critical" if curr > 10 else "high"
-                })
-        return sorted(alerts, key=lambda x: x["impressions"], reverse=True)
-
-    def should_refresh_strategy(self, last_refresh: datetime) -> bool:
-        """Check if monthly strategy refresh is due."""
-        days_since = (datetime.utcnow() - last_refresh).days
-        return days_since >= 30
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 9 — TEST SUITE
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Tests:
-    """
-    Test the strategy engine with Munnar tourism example.
-
-    Run:
-      python ruflo_final_strategy_engine.py test context   # context builder
-      python ruflo_final_strategy_engine.py test validate  # DeepSeek validator
-      python ruflo_final_strategy_engine.py test calendar  # content calendar
-      python ruflo_final_strategy_engine.py test diagnose  # ranking drop
-      python ruflo_final_strategy_engine.py test full      # full Claude strategy
-    """
-
-    MOCK_PROJECT = {
-        "name": "Munnar Experiences",
-        "industry": "Tourism & Travel",
-        "business_type": "B2C",
-        "usp": "local Kerala family-run homestays and curated experiences",
-        "target_audience": ["couples","families","solo travellers","honeymooners"],
-        "target_languages": ["english","malayalam","hindi"],
-        "target_regions": ["munnar","kerala","india"],
-        "domain_age_months": 4,
-        "existing_pages": 8,
-    }
-
-    MOCK_UNIVERSE = {
-        "universe_tree": {
-            "universe": "munnar tourism",
-            "pillars": [
-                {"name":"Munnar tourism","competitor_count":15,
-                 "clusters":[{"name":"Places","keyword_items":[
-                     {"term":"best places Munnar","kd_estimate":42,"volume_estimate":18000,"final_score":5.9,"is_info_gap":False,"intent":"informational"},
-                     {"term":"Munnar 2 day itinerary","kd_estimate":6,"volume_estimate":2200,"final_score":8.6,"is_info_gap":False,"intent":"informational"},
-                 ]}],
-                 "supporting_keyword_engine":{"info_gaps":[
-                     {"term":"is Munnar safe in monsoon","kd_estimate":4,"volume_estimate":2400,"is_info_gap":True,"why_unique":"no competitor gives week-by-week breakdown"}
-                 ], "competitor_entities":["Eravikulam","Anamudi","IMD","NH85","KSRTC"]}},
-                {"name":"Munnar homestays","competitor_count":10,
-                 "clusters":[{"name":"Budget stays","keyword_items":[
-                     {"term":"budget homestay Munnar","kd_estimate":7,"volume_estimate":1800,"final_score":8.4,"is_info_gap":False,"intent":"transactional"},
-                 ]}],
-                 "supporting_keyword_engine":{"info_gaps":[
-                     {"term":"Munnar homestay vs resort","kd_estimate":5,"volume_estimate":1800,"is_info_gap":True,"why_unique":"no comparison article exists"}
-                 ], "competitor_entities":["Devikulam","Top Station","Eravikulam"]}},
-                {"name":"Munnar tours","competitor_count":12,
-                 "clusters":[{"name":"Packages","keyword_items":[
-                     {"term":"Munnar honeymoon package","kd_estimate":18,"volume_estimate":4500,"final_score":7.0,"is_info_gap":False,"intent":"transactional"},
-                 ]}],
-                 "supporting_keyword_engine":{"info_gaps":[], "competitor_entities":["Kundala Lake","Mattupetty"]}},
-            ],
-            "top_100": [
-                {"term":"is Munnar safe in monsoon","kd_estimate":4,"volume_estimate":2400,"final_score":9.3,"is_info_gap":True,"intent":"informational"},
-                {"term":"how much does Munnar trip cost","kd_estimate":6,"volume_estimate":3200,"final_score":9.5,"is_info_gap":True,"intent":"informational"},
-                {"term":"Munnar homestay vs resort","kd_estimate":5,"volume_estimate":1800,"final_score":9.0,"is_info_gap":True,"intent":"commercial"},
-                {"term":"Munnar 2 day itinerary","kd_estimate":6,"volume_estimate":2200,"final_score":8.6,"is_info_gap":False,"intent":"informational"},
-                {"term":"budget homestay Munnar","kd_estimate":7,"volume_estimate":1800,"final_score":8.4,"is_info_gap":False,"intent":"transactional"},
-            ]
-        }
-    }
-
-    MOCK_GSC = [
-        {"keyword":"Munnar travel guide","rank":13,"prev_rank":8,"impressions":8200,"clicks":310},
-        {"keyword":"Munnar homestay","rank":6,"prev_rank":3,"impressions":5600,"clicks":190},
-        {"keyword":"things to do Munnar","rank":4,"prev_rank":4,"impressions":6700,"clicks":280},
+    REQUIRED_PAYLOAD_KEYS = [
+        "project", "keyword_universe", "gsc_data", "serp_data", "competitors", "strategy_meta"
     ]
 
-    def _h(self, n): print(f"\n{'─'*55}\n  TEST: {n}\n{'─'*55}")
-    def _ok(self, m): print(f"  ✓ {m}")
+    def __init__(self, llm_client):
+        self.llm = llm_client
+        self.max_retries = 2
 
-    def test_context(self):
-        self._h("Context Builder")
-        builder = ContextBuilder()
-        ctx = builder.build(self.MOCK_UNIVERSE, self.MOCK_PROJECT, self.MOCK_GSC)
-        compressed = ctx.to_compressed_json()
-        self._ok(f"Universe: {ctx.universe}")
-        self._ok(f"Pillars: {len(ctx.pillars)}")
-        self._ok(f"Top keywords: {len(ctx.top_20_keywords)}")
-        self._ok(f"Info gaps: {len(ctx.info_gaps)}")
-        self._ok(f"Competitors: {len(ctx.competitors)}")
-        self._ok(f"Entities: {len(ctx.entities)}")
-        self._ok(f"Compressed size: {len(compressed)} chars, ~{len(compressed)//4} tokens")
-        self._ok(f"Cost estimate: ~${len(compressed)//4/1000000*15:.6f}")
+    def _validate_input_payload(self, payload: dict) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return "input_payload must be a dict"
+        missing = [k for k in self.REQUIRED_PAYLOAD_KEYS if k not in payload]
+        if missing:
+            return f"missing required payload keys: {', '.join(missing)}"
+        return None
 
-    def test_validate(self):
-        self._h("DeepSeek Strategy Validator")
-        validator = StrategyValidator()
-        mock_strategy = {
-            "priority_queue": [
-                {"week":1,"articles":[
-                    {"title":"Is Munnar Safe in Monsoon","target_keyword":"munnar monsoon safe",
-                     "kd_estimate":4,"why_this_week":"info gap, zero competition",
-                     "information_gain_angle":"IMD week-by-week data",
-                     "schema_type":"FAQPage","internal_links_to":[],"internal_links_from":[]},
-                ]}
-            ],
-            "content_briefs": [{"article_title":"test","information_gain_angle":"unique angle"}],
-            "link_map": {"pillar_to_pillar":[],"cluster_to_pillar":[]},
-            "predictions": [{"month":1,"keywords_in_top_20":5,"keywords_in_top_10":0,"keywords_in_top_3":0}]
-        }
-        result = validator.validate(mock_strategy, "munnar tourism")
-        self._ok(f"Confidence: {result.get('confidence_score',0):.2f}")
-        self._ok(f"Recommendation: {result.get('recommendation','?')}")
-        self._ok(f"Issues: {len(result.get('issues_found',[]))}")
+    def run(self, input_payload: dict, memory_patterns: str = ""):
+        input_error = self._validate_input_payload(input_payload)
+        if input_error:
+            return {
+                "success": False,
+                "error": input_error,
+                "error_type": "input_validation",
+                "raw": "",
+                "data": {},
+                "tokens_used": 0,
+                "cost_usd": 0.0,
+                "validation_status": "invalid",
+            }
 
-    def test_calendar(self):
-        self._h("Content Calendar Generator")
-        engine = FinalStrategyEngine()
-        mock_strategy = StrategyOutput(
-            landscape={}, confidence=0.85, generated_at=datetime.utcnow().isoformat(),
-            tokens_used=5000, risks=[], predictions=[],
-            link_map={}, content_briefs=[],
-            priority_queue=[
-                {"week":1,"articles":[
-                    {"title":"Is Munnar Safe in Monsoon?","target_keyword":"munnar monsoon safe",
-                     "pillar":"Munnar tourism","kd_estimate":4,"schema_type":"FAQPage","language":"english",
-                     "internal_links_to":["Munnar travel guide"],"why_this_week":"info gap"},
-                    {"title":"Munnar Homestay vs Resort — Honest Guide","target_keyword":"munnar homestay vs resort",
-                     "pillar":"Munnar homestays","kd_estimate":5,"schema_type":"Article","language":"english",
-                     "internal_links_to":["budget homestay Munnar"],"why_this_week":"high intent info gap"},
-                ]},
-                {"week":2,"articles":[
-                    {"title":"How Much Does a Munnar Trip Actually Cost?","target_keyword":"munnar trip cost",
-                     "pillar":"Munnar tourism","kd_estimate":6,"schema_type":"Article","language":"english",
-                     "internal_links_to":[],"why_this_week":"highest volume info gap"},
-                ]},
-            ]
-        )
-        calendar = engine.generate_content_calendar(mock_strategy, datetime.utcnow())
-        self._ok(f"Calendar entries: {len(calendar)}")
-        for c in calendar[:3]:
-            self._ok(f"  [{c['scheduled_date'][:10]}] {c['title']} | {c['status']}")
+        schema = load_strategy_schema()
+        last_error = None
+        raw_response = None
 
-    def test_diagnose(self):
-        self._h("Ranking Drop Diagnosis")
-        monitor = RankingMonitor()
-        alerts = monitor.check_gsc_alerts(self.MOCK_GSC, threshold=5)
-        self._ok(f"Alerts detected: {len(alerts)}")
-        for a in alerts:
-            self._ok(f"  '{a['keyword']}' #{a['previous_rank']} → #{a['current_rank']} [{a['severity']}]")
-
-        if alerts:
-            self._ok("Running Claude diagnosis on first alert...")
-            a = alerts[0]
-            diagnosis = monitor.diagnose_drop(
-                keyword=a["keyword"], prev_rank=a["previous_rank"],
-                curr_rank=a["current_rank"],
-                page_title="Munnar Homestay Guide",
-                content_summary="A guide to finding homestays in Munnar covering budget to luxury options.",
-                competitor_page="New page on booking.com with photos and instant booking",
-                universe="munnar tourism"
+        for attempt in range(self.max_retries + 1):
+            prompt = build_final_strategy_prompt(
+                input_payload=input_payload,
+                schema=schema,
+                attempt=attempt,
+                memory_patterns=memory_patterns,
             )
-            self._ok(f"Root cause: {diagnosis.get('root_cause','?')}")
-            self._ok(f"Fixes: {len(diagnosis.get('fixes',[]))} actions")
-            for fix in diagnosis.get("fixes",[])[:3]:
-                self._ok(f"  [{fix.get('priority','?')}] {fix.get('action','?')}: {fix.get('specific_instruction','')[:60]}")
+            # One-shot single-call variant hint; strict JSON output expected:
+            prompt = f"{prompt}\n\n{FULL_PROMPT.format(context_json=json.dumps(input_payload, indent=2))}" if attempt == 0 else prompt
 
-    def test_full(self):
-        self._h("FULL STRATEGY ENGINE — Munnar Tourism")
-        self._ok("Building context...")
-        engine = FinalStrategyEngine()
-        strategy = engine.run(self.MOCK_UNIVERSE, self.MOCK_PROJECT, self.MOCK_GSC)
+            response = self._call_strategy_model(prompt, max_tokens=4000)
+            # response will be a (text, tokens) tuple or a plain string
+            if isinstance(response, tuple) and len(response) == 2:
+                response_text, tokens_used = response
+            else:
+                response_text = response
+                tokens_used = 0
+            raw_response = response_text
 
-        print(engine.format_strategy_report(strategy))
+            cleaned = extract_json(response_text)
+            parsed, parse_error = parse_llm_json(cleaned)
 
-        calendar = engine.generate_content_calendar(strategy)
-        self._ok(f"\nContent calendar: {len(calendar)} articles scheduled")
-        self._ok(f"Confidence: {strategy.confidence:.0%}")
-        self._ok(f"Tokens used: {strategy.tokens_used:,}")
-        self._ok(f"Priority queue weeks: {len(strategy.priority_queue)}")
-        self._ok(f"Content briefs: {len(strategy.content_briefs)}")
-        self._ok(f"Risks identified: {len(strategy.risks)}")
-        self._ok(f"Monthly predictions: {len(strategy.predictions)}")
-        return strategy
+            if parse_error:
+                last_error = f"parse_error: {parse_error}"
+                if attempt >= self.max_retries:
+                    return {
+                        'success': False,
+                        'error': last_error,
+                        'error_type': 'parse_error',
+                        'raw': raw_response,
+                        'data': {},
+                        'validation_status': 'invalid',
+                        'tokens_used': tokens_used,
+                        'cost_usd': tokens_used * CLAUDE_COST_PER_TOKEN,
+                    }
+                time.sleep(min(2 ** attempt, 30))
+                continue
 
-    def run_all(self):
-        tests = [
-            ("context",  self.test_context),
-            ("validate", self.test_validate),
-            ("calendar", self.test_calendar),
-            ("diagnose", self.test_diagnose),
-        ]
-        print("\n" + "═"*55)
-        print("  FINAL STRATEGY ENGINE — STAGE TESTS")
-        print("═"*55)
-        p = f = 0
-        for name, fn in tests:
-            try:
-                fn()
-                p += 1
-            except Exception as e:
-                print(f"  ✗ {name}: {e}")
-                f += 1
-        print(f"\n  {p} passed / {f} failed")
-        print("═"*55)
+            valid, schema_error = validate_strategy_output(parsed, schema)
+            if not valid:
+                last_error = f"schema_error: {schema_error}"
+                if attempt >= self.max_retries:
+                    return {
+                        'success': False,
+                        'error': last_error,
+                        'error_type': 'schema_error',
+                        'raw': raw_response,
+                        'data': {},
+                        'validation_status': 'invalid',
+                        'tokens_used': tokens_used,
+                        'cost_usd': tokens_used * CLAUDE_COST_PER_TOKEN,
+                    }
+                time.sleep(min(2 ** attempt, 30))
+                continue
 
+            return {
+                'success': True,
+                'data': parsed,
+                'raw': raw_response,
+                'validation_status': 'valid',
+                'tokens_used': tokens_used,
+                'cost_usd': tokens_used * CLAUDE_COST_PER_TOKEN,
+            }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 10 — FASTAPI ENDPOINTS
-# ─────────────────────────────────────────────────────────────────────────────
+        return {
+            'success': False,
+            'error': last_error or 'unknown',
+            'error_type': 'provider_error',
+            'raw': raw_response,
+            'tokens_used': tokens_used if 'tokens_used' in locals() else 0,
+            'cost_usd': (tokens_used if 'tokens_used' in locals() else 0) * CLAUDE_COST_PER_TOKEN,
+        }
 
-try:
-    from fastapi import FastAPI, BackgroundTasks, HTTPException
-    from pydantic import BaseModel
+    def _classify_error(self, msg: str) -> str:
+        if 'parse_error' in msg:
+            return 'parse_error'
+        if 'schema_error' in msg:
+            return 'schema_error'
+        if 'timeout' in msg.lower():
+            return 'timeout'
+        return 'provider_error'
 
-    app = FastAPI(title="Ruflo — Final Strategy Engine",
-                  description="Feeds complete keyword data to Claude for #1 ranking strategy",
-                  version="1.0.0")
-
-    strategy_engine = FinalStrategyEngine()
-    monitor_engine  = RankingMonitor()
-    _jobs: dict = {}
-
-    class StrategyRequest(BaseModel):
-        universe_result:   dict
-        project:           dict
-        gsc_data:          list = []
-
-    class DiagnosisRequest(BaseModel):
-        keyword:          str
-        prev_rank:        int
-        curr_rank:        int
-        page_title:       str
-        content_summary:  str
-        competitor_page:  str
-        universe:         str
-
-    @app.post("/api/strategy/run", tags=["Strategy"])
-    def run_strategy(req: StrategyRequest, background_tasks: BackgroundTasks):
-        """Run final Claude strategy analysis on complete keyword universe data."""
-        job_id = __import__('uuid').uuid4().hex
-        _jobs[job_id] = {"status":"running"}
-        def _run():
-            try:
-                strategy = strategy_engine.run(req.universe_result, req.project, req.gsc_data)
-                calendar = strategy_engine.generate_content_calendar(strategy)
-                _jobs[job_id] = {
-                    "status": "done",
-                    "strategy": {
-                        "landscape":      strategy.landscape,
-                        "priority_queue": strategy.priority_queue,
-                        "content_briefs": strategy.content_briefs,
-                        "link_map":       strategy.link_map,
-                        "risks":          strategy.risks,
-                        "predictions":    strategy.predictions,
-                        "confidence":     strategy.confidence,
-                        "tokens_used":    strategy.tokens_used,
-                        "generated_at":   strategy.generated_at,
-                    },
-                    "content_calendar": calendar,
-                    "report": strategy_engine.format_strategy_report(strategy),
-                }
-            except Exception as e:
-                _jobs[job_id] = {"status":"failed","error":str(e)}
-        background_tasks.add_task(_run)
-        return {"job_id": job_id, "message": "Strategy analysis started"}
-
-    @app.post("/api/strategy/diagnose", tags=["Strategy"])
-    def diagnose_drop(req: DiagnosisRequest):
-        """Claude diagnoses why a keyword dropped and what to fix."""
-        return monitor_engine.diagnose_drop(
-            req.keyword, req.prev_rank, req.curr_rank,
-            req.page_title, req.content_summary,
-            req.competitor_page, req.universe
-        )
-
-    @app.post("/api/strategy/alerts", tags=["Strategy"])
-    def check_alerts(gsc_data: list, threshold: int = 5):
-        """Check GSC data for keywords that dropped below threshold."""
-        return monitor_engine.check_gsc_alerts(gsc_data, threshold)
-
-    @app.get("/api/jobs/{job_id}", tags=["Jobs"])
-    def get_job(job_id: str):
-        if job_id not in _jobs:
-            raise HTTPException(404, "Job not found")
-        return _jobs[job_id]
-
-except ImportError:
-    pass
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SECTION 11 — CLI
-# ─────────────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import sys
-
-    HELP = """
-Ruflo — Final AI Strategy Engine
-──────────────────────────────────────────────────────
-Feeds complete keyword universe data to Claude Sonnet for definitive
-#1 ranking strategy. Chain-of-thought reasoning across 5 steps.
-
-Usage:
-  python ruflo_final_strategy_engine.py test           # all tests
-  python ruflo_final_strategy_engine.py test <stage>   # one test
-  python ruflo_final_strategy_engine.py full           # full Claude strategy
-  python ruflo_final_strategy_engine.py api            # start FastAPI server
-
-Stages: context, validate, calendar, diagnose
-Requires: ANTHROPIC_API_KEY in .env for full strategy test
-"""
-    if len(sys.argv) < 2:
-        print(HELP); sys.exit(0)
-    cmd = sys.argv[1]
-    if cmd == "test":
-        t = Tests()
-        if len(sys.argv) == 3:
-            fn = getattr(t, f"test_{sys.argv[2]}", None)
-            if fn: fn()
-            else:  print(f"Unknown: {sys.argv[2]}")
-        else:
-            t.run_all()
-    elif cmd == "full":
-        Tests().test_full()
-    elif cmd == "api":
+    def _call_strategy_model(self, prompt: str, max_tokens: int = 4000):
+        """
+        Centralized wrapper for calling the LLM client. Returns (text, tokens)
+        or a plain string if the client does not return token usage.
+        """
         try:
-            import uvicorn
-            print("Ruflo Strategy API — http://localhost:8001")
-            uvicorn.run("ruflo_final_strategy_engine:app",
-                        host="0.0.0.0", port=8001, reload=True)
-        except ImportError:
-            print("pip install uvicorn")
-    else:
-        print(f"Unknown: {cmd}\n{HELP}")
+            resp = self.llm.generate(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                temperature=0.2,
+                top_p=0.9,
+                max_tokens=max_tokens,
+            )
+            if isinstance(resp, tuple) and len(resp) == 2:
+                return resp
+            return resp
+        except Exception as e:
+            log.error(f"_call_strategy_model error: {e}")
+            return ('{"error":"llm_call_failed","message":"%s"}' % str(e), 0)
+
+
+from services.ranking_monitor import RankingMonitor as ServiceRankingMonitor
+
+
+class RankingMonitor(ServiceRankingMonitor):
+    """Wrapper to keep backward compatibility with engine import path."""
+    pass

@@ -1,0 +1,69 @@
+name: DB Migration Validation
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  migrate-and-validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keyword_app_test
+        ports:
+          - 5432:5432
+        options: >
+          --health-cmd "pg_isready -U postgres" \
+          --health-interval 10s \
+          --health-timeout 5s \
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keyword_app_test
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install alembic psycopg2-binary
+
+      - name: Run Alembic migrations
+        run: |
+          .venv/bin/alembic -c alembic.ini upgrade head
+
+      - name: Validate tables existence (psql)
+        run: |
+          .venv/bin/psql "$DATABASE_URL" -c "\dt"
+          .venv/bin/psql "$DATABASE_URL" -c "\d strategy_jobs"
+          .venv/bin/psql "$DATABASE_URL" -c "\d serp_cache"
+
+      - name: Validate enum and jsonb
+        run: |
+          .venv/bin/psql "$DATABASE_URL" -c "SELECT typname FROM pg_type WHERE typname = 'jobstatus';"
+          .venv/bin/psql "$DATABASE_URL" -c "SELECT column_name,data_type FROM information_schema.columns WHERE table_name='serp_cache';"
+
+      - name: Insert test row
+        run: |
+          .venv/bin/psql "$DATABASE_URL" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          .venv/bin/psql "$DATABASE_URL" -c "INSERT INTO strategy_jobs (id, project_id, status, progress) VALUES (gen_random_uuid()::text, gen_random_uuid()::text, 'pending', 0);"
+          .venv/bin/psql "$DATABASE_URL" -c "SELECT id,status,progress FROM strategy_jobs LIMIT 1;"
+
+      - name: Run test suite
+        run: |
+          .venv/bin/pytest -q pytests/test_migrations.py pytests/test_migrations_pg.py

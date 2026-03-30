@@ -1,0 +1,128 @@
+{
+  "P1": {
+    "name": "Keyword Input / Seed",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": [],
+    "description": "Seed ingestion, initial keyword normalization and deduping",
+    "outputs": ["Seed object: {keyword, region, id, metadata}"]
+  },
+  "P2": {
+    "name": "Keyword Expansion",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["EXPAND_PILLAR","EXPAND_CLUSTER"],
+    "description": "Generate long-tail variations and related terms",
+    "outputs": ["list of related keywords / topic_map"]
+  },
+  "P3": {
+    "name": "Search Volume / Scoring",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["SCORE","SCORE_KW"],
+    "description": "Score keywords for business relevance and volume estimates",
+    "outputs": ["score JSON {score, content_type}"]
+  },
+  "P4": {
+    "name": "Off-topic / Global Kill Filters",
+    "file": "modules/annaseo_addons.py",
+    "prompt_constants": [],
+    "description": "Apply global blocklists and project-level reject overrides",
+    "outputs": ["filtered keyword set"]
+  },
+  "P5": {
+    "name": "Intent Classification",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["INTENT"],
+    "description": "Classify informational/transactional/etc and detect noise",
+    "outputs": ["intent label string or 'noise'"]
+  },
+  "P6": {
+    "name": "Entity Extraction & Context",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["ENTITY_EXTRACT"],
+    "description": "Extract named entities, products, places for brief generation",
+    "outputs": ["entity list JSON"]
+  },
+  "P7": {
+    "name": "Topic Detection / Clustering Prep",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": [],
+    "description": "Prepare topic vectors and detect topic groups (SBERT/HDBSCAN)",
+    "outputs": ["topic_map: topic -> supporting keywords"]
+  },
+  "P8": {
+    "name": "Topic Refinement / Canonical",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["CANONICAL","CLUSTER_NAME"],
+    "description": "Select canonical keyword forms and name clusters",
+    "outputs": ["canonical keyword, cluster name JSON"]
+  },
+  "P9": {
+    "name": "Cluster Formation",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["CLUSTER_PROMPT"],
+    "description": "Group related topics into thematic clusters (LLM → JSON)",
+    "outputs": ["JSON dict of clusters {name: [topics]}"]
+  },
+  "P10": {
+    "name": "Pillar Identification",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["PILLAR_PROMPT"],
+    "description": "Generate pillar page title for each cluster",
+    "outputs": ["one-line pillar title (string) or SKIP"]
+  },
+  "P11": {
+    "name": "Supporting Keyword Assignment",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": [],
+    "description": "Assign cluster/pillar supporting keywords and internal link map",
+    "outputs": ["supporting_keywords list, link_map"]
+  },
+  "P12": {
+    "name": "Competitor / SERP Research",
+    "file": "engines/ruflo_strategy_dev_engine.py",
+    "prompt_constants": ["EXTRACT_PILLARS","PILLAR_RESEARCH"],
+    "description": "Extract competitor headings and SERP signals to validate pillars",
+    "outputs": ["competitor headigs, wiki_topics JSON"]
+  },
+  "P13": {
+    "name": "Pillar Briefing",
+    "file": "engines/ruflo_strategy_dev_engine.py",
+    "prompt_constants": ["PILLAR_BRIEF","MACHINE_PILLARS"],
+    "description": "Create high-level pillar brief and angles",
+    "outputs": ["pillar brief JSON"]
+  },
+  "P14": {
+    "name": "Article Selection & Planning",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": [],
+    "description": "Decide article candidates per cluster and publishing plan",
+    "outputs": ["planned article list with priorities"]
+  },
+  "P15": {
+    "name": "Content Brief (Article)",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["BRIEF_PROMPT"],
+    "description": "Generate structured JSON brief for each article",
+    "outputs": ["detailed JSON brief: title, meta, H2s, FAQs, entities"]
+  },
+  "P16": {
+    "name": "Article Generation / Writer",
+    "file": "engines/ruflo_20phase_engine.py",
+    "prompt_constants": ["ARTICLE_PROMPT"],
+    "description": "Generate article body from brief using Claude/Gemini",
+    "outputs": ["article body text (string)"]
+  },
+  "P17": {
+    "name": "Quality Intelligence (EEAT/GEO/Scoring)",
+    "file": "quality/annaseo_quality_engine.py",
+    "prompt_constants": [],
+    "description": "Score article for E-E-A-T, geography, direct-answer suitability",
+    "outputs": ["quality scores JSON"]
+  },
+  "P18": {
+    "name": "Publish / Queue / Ranking Feedback",
+    "file": "engines/ruflo_publisher.py",
+    "prompt_constants": [],
+    "description": "Queue articles for publishing and collect ranking feedback",
+    "outputs": ["publish job entries, ranking feedback jobs"]
+  }
+}

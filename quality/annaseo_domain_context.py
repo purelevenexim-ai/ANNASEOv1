@@ -66,7 +66,7 @@ Where this engine sits in the pipeline
 from __future__ import annotations
 
 import os, json, hashlib, sqlite3, logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -222,8 +222,8 @@ class ProjectDomainProfile:
     cross_domain_rules: Dict[str,str] # word → "accept"|"reject" for this project
     content_angles:     List[str]     # what content should focus on
     avoid_angles:       List[str]     # what content should NOT cover
-    created_at:         str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at:         str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at:         str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at:         str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 # Pre-built profiles that auto-apply based on Industry selection
@@ -364,7 +364,7 @@ class DomainContextDB:
               json.dumps(p.accept_overrides), json.dumps(p.reject_overrides),
               json.dumps(p.cross_domain_rules),
               json.dumps(p.content_angles), json.dumps(p.avoid_angles),
-              datetime.utcnow().isoformat()))
+              datetime.now(timezone.utc).isoformat()))
         self._db.commit()
 
     def get_profile(self, project_id: str) -> Optional[dict]:

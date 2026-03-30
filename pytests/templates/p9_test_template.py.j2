@@ -1,0 +1,32 @@
+"""Pytest template for P9 cluster tests
+
+This template is intended to be rendered programmatically to generate many
+parametrized tests covering happy path, edge cases, noise, and malformed AI output.
+
+Variables expected by renderer:
+- test_id
+- seed_keyword
+- topic_map_json
+- ai_clusters_json
+- expect_dropped (bool)
+"""
+import json
+from tools.phase_test_harness import make_sample_seed
+import engines.ruflo_20phase_engine as ruflo
+
+
+def test_{{ test_id }}(monkeypatch):
+    seed = make_sample_seed("{{ seed_keyword }}")
+    topic_map = json.loads(r'''{{ topic_map_json }}''')
+    ai_clusters = json.loads(r'''{{ ai_clusters_json }}''')
+
+    monkeypatch.setattr(ruflo.AI, "gemini", lambda prompt, temperature=0.2: "<json>")
+    monkeypatch.setattr(ruflo.AI, "parse_json", lambda text: ai_clusters)
+
+    clusters = ruflo.P9_ClusterFormation().run(seed, topic_map, project_id=None)
+    assert isinstance(clusters, dict)
+    if {{ expect_dropped|lower }}:
+        # Expect some filtering or re-assignment
+        assert len(clusters) <= len(topic_map)
+    else:
+        assert len(clusters) >= 1

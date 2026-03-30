@@ -608,10 +608,11 @@ def list_projects(user=Depends(current_user)):
         db.commit()
 
     if not pids:
-        return []
+        return {"projects": []}
 
     placeholders = ",".join("?" for _ in pids)
-    return [dict(r) for r in db.execute(f"SELECT * FROM projects WHERE project_id IN ({placeholders}) AND status!='deleted'", pids).fetchall()]
+    projects = [dict(r) for r in db.execute(f"SELECT * FROM projects WHERE project_id IN ({placeholders}) AND status!='deleted'", pids).fetchall()]
+    return {"projects": projects}
 
 @app.get("/api/projects/{project_id}",tags=["Projects"])
 def get_project(project_id: str,user=Depends(current_user)):
@@ -2640,6 +2641,13 @@ try:
             (session_id, project_id)
         ).fetchone()
         if not row:
+            # fallback to main DB for historical records if KI DB not synced yet
+            main_db = get_db()
+            row = main_db.execute(
+                "SELECT * FROM keyword_input_sessions WHERE session_id=? AND project_id=?",
+                (session_id, project_id)
+            ).fetchone()
+        if not row:
             raise HTTPException(404, "Session not found")
         return dict(row)
 
@@ -2658,7 +2666,7 @@ try:
     def ki_get_latest_session(project_id: str, user=Depends(current_user)):
         """Return the latest keyword input session for project, including pillar-support mapping."""
         _validate_project_exists(project_id)
-        db = get_db()
+        db = _ki_db()
         row = db.execute(
             "SELECT * FROM keyword_input_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
             (project_id,)
@@ -3689,6 +3697,9 @@ def _run_research_job(job_id: str, project_id: str, session_id: str,
             except Exception as e:
                 log.warning(f"[research] CompetitorCrawler failed: {e}")
 
+        elif competitor_urls and not _cge_available:
+            log.warning("[research] CompetitorGapEngine unavailable, skipping competitor gap source")
+
         # Source 3: Site crawl (WebsiteKeywordExtractor.crawl)
         if customer_url:
             try:
@@ -3716,6 +3727,33 @@ def _run_research_job(job_id: str, project_id: str, session_id: str,
                 log.info(f"[research] SiteCrawl: {len(site_kws or [])} keywords from {customer_url}")
             except Exception as e:
                 log.warning(f"[research] SiteCrawl failed: {e}", exc_info=True)
+
+        # Fallback: If no results from research sources, seed from existing KI session universe
+        fallback_count = 0
+        if not found_keywords and session_id and ki_db is not None:
+            try:
+                existing_rows = ki_db.execute(
+                    "SELECT keyword, pillar_keyword, intent, volume_estimate, difficulty, opportunity_score FROM keyword_universe_items WHERE session_id=?",
+                    (session_id,)
+                ).fetchall()
+                for row in existing_rows:
+                    found_keywords.append({
+                        "keyword": row["keyword"],
+                        "source": "existing_universe",
+                        "pillar": row["pillar_keyword"] if "pillar_keyword" in row.keys() else "",
+                        "intent": row["intent"] if "intent" in row.keys() and row["intent"] else "informational",
+                        "volume_estimate": row["volume_estimate"] if "volume_estimate" in row.keys() and row["volume_estimate"] is not None else 0,
+                        "difficulty": row["difficulty"] if "difficulty" in row.keys() and row["difficulty"] is not None else 50,
+                        "opportunity_score": row["opportunity_score"] if "opportunity_score" in row.keys() and row["opportunity_score"] is not None else 0.5,
+                        "status": "pending"
+                    })
+                fallback_count = len(existing_rows)
+                if fallback_count:
+                    sources_done.append("fallback_existing_universe")
+                    _update(sources_done, len(found_keywords))
+                    log.info(f"[research] Fallback existing universe: {fallback_count} keywords from session {session_id}")
+            except Exception as e:
+                log.warning(f"[research] Fallback to existing universe failed: {e}")
 
         # Deduplicate
         seen = set()
@@ -3746,21 +3784,35 @@ def _run_research_job(job_id: str, project_id: str, session_id: str,
                     pass
             save_db.commit()
         # Add counts and friendly reasons when no keywords were produced
-        counts = {"autosuggest": autosuggest_count, "competitor_gap": competitor_count, "site_crawl": site_crawl_count}
+        counts = {
+            "autosuggest": autosuggest_count,
+            "competitor_gap": competitor_count,
+            "site_crawl": site_crawl_count,
+            "fallback_existing_universe": fallback_count,
+        }
         reasons = []
         if not deduped:
-            if autosuggest_count == 0:
+            if not _p2e_available:
+                reasons.append("autosuggest_engine_unavailable")
+            elif autosuggest_count == 0:
                 reasons.append("autosuggest_empty_or_no_pillars")
-            if competitor_count == 0:
+
+            if competitor_urls and not _cge_available:
+                reasons.append("competitor_gap_engine_unavailable")
+            elif competitor_count == 0:
                 if competitor_urls:
                     reasons.append("competitor_crawl_empty_or_blocked")
                 else:
                     reasons.append("no_competitor_urls_provided")
+
             if site_crawl_count == 0:
                 if customer_url:
                     reasons.append("site_crawl_empty_or_blocked")
                 else:
                     reasons.append("no_customer_url_provided")
+
+            if fallback_count:
+                reasons.append("fallback_from_existing_universe")
 
         _update(sources_done, len(deduped), "completed", counts=counts, reasons=reasons)
 

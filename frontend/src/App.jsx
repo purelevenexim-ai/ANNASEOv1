@@ -12,6 +12,9 @@ import { useState, useEffect, useRef, useCallback, createContext, useContext } f
 import { create } from "zustand"
 import { useQuery, useMutation, useQueryClient, QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import KeywordInputPage from "./KeywordInput"
+import KeywordWorkflow from "./KeywordWorkflow"
+import StrategyPage from "./StrategyPage"
+import Notification from "./components/Notification"
 
 const API = import.meta.env.VITE_API_URL || ""
 const qc  = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } })
@@ -228,18 +231,28 @@ function LoadingSpinner() {
 // MODAL — Edit Project
 // ─────────────────────────────────────────────────────────────────────────────
 function EditProjectModal({ project, onClose, onSaved }) {
+  const _tryParse = (v, fallback) => { try { return JSON.parse(v || "[]") } catch { return fallback } }
   const [form, setForm] = useState({
-    name: project.name || "",
-    description: project.description || "",
-    seed_keywords: JSON.parse(project.seed_keywords || "[]").join(", "),
-    language: project.language || "english",
-    region: project.region || "india",
-    religion: project.religion || "general",
-    wp_url: project.wp_url || "",
-    wp_user: project.wp_user || "",
-    wp_password: "",
+    name:             project.name || "",
+    description:      project.description || "",
+    seed_keywords:    _tryParse(project.seed_keywords, []).join(", "),
+    language:         project.language || "english",
+    region:           project.region || "india",
+    religion:         project.religion || "general",
+    wp_url:           project.wp_url || "",
+    wp_user:          project.wp_user || "",
+    wp_password:      "",
+    business_type:    project.business_type || "B2C",
+    usp:              project.usp || "",
+    target_locations: _tryParse(project.target_locations, []),
+    target_languages: _tryParse(project.target_languages, []),
+    audience_personas:_tryParse(project.audience_personas, []),
   })
   const [saving, setSaving] = useState(false)
+
+  const toggleArr = (key, val) => setForm(f => ({
+    ...f, [key]: f[key].includes(val) ? f[key].filter(x => x !== val) : [...f[key], val]
+  }))
 
   const save = async () => {
     setSaving(true)
@@ -247,44 +260,75 @@ function EditProjectModal({ project, onClose, onSaved }) {
       ...form,
       seed_keywords: form.seed_keywords.split(",").map(s => s.trim()).filter(Boolean),
     })
-    setSaving(false)
-    onSaved()
-    onClose()
+    setSaving(false); onSaved(); onClose()
   }
+
+  const FS = { width: "100%", padding: "7px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12, boxSizing: "border-box" }
+  const Lbl = ({ children }) => <label style={{ fontSize: 11, color: T.gray, display: "block", marginBottom: 3 }}>{children}</label>
+  const ChipGroup = ({ label, fieldKey, opts }) => (
+    <div style={{ marginBottom: 12 }}>
+      <label style={{ fontSize: 11, color: T.gray, display: "block", marginBottom: 4 }}>{label}</label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+        {opts.map(o => {
+          const active = (form[fieldKey] || []).includes(o)
+          return (
+            <button key={o} onClick={() => toggleArr(fieldKey, o)} style={{
+              padding: "3px 9px", borderRadius: 99, fontSize: 11, cursor: "pointer", border: "none",
+              background: active ? T.purple : T.grayLight, color: active ? "#fff" : T.gray,
+            }}>{o}</button>
+          )
+        })}
+      </div>
+    </div>
+  )
+
+  const basicFields = [
+    ["Project name","name","text"],["Description","description","text"],
+    ["Seed keywords (comma-separated)","seed_keywords","text"],
+    ["WordPress URL","wp_url","text"],["WordPress user","wp_user","text"],
+    ["WordPress password","wp_password","password"],
+  ]
+  const selectFields = [
+    ["Language","language",["english","malayalam","hindi","tamil","arabic","kannada","telugu"]],
+    ["Region","region",["india","kerala","wayanad","global","south_india","malabar"]],
+    ["Religion context","religion",["general","ayurveda","halal","unani","hindu","christian","muslim"]],
+    ["Business type","business_type",["B2C","B2B","D2C","Service","Marketplace"]],
+  ]
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1000,
       display: "flex", alignItems: "center", justifyContent: "center" }}
       onClick={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div style={{ background: "#fff", borderRadius: 14, padding: 24, width: 440, maxHeight: "80vh", overflowY: "auto" }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 24, width: 480, maxHeight: "85vh", overflowY: "auto" }}>
         <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 16 }}>Edit project</div>
-        {[
-          ["Project name", "name", "text"],
-          ["Description", "description", "text"],
-          ["Seed keywords (comma-separated)", "seed_keywords", "text"],
-          ["WordPress URL", "wp_url", "text"],
-          ["WordPress user", "wp_user", "text"],
-          ["WordPress password", "wp_password", "password"],
-        ].map(([label, key, type]) => (
-          <div key={key} style={{ marginBottom: 10 }}>
-            <label style={{ fontSize: 11, color: T.gray, display: "block", marginBottom: 3 }}>{label}</label>
-            <input type={type} value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })}
-              style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12, boxSizing: "border-box" }}/>
+
+        {basicFields.map(([label, fkey, type]) => (
+          <div key={fkey} style={{ marginBottom: 10 }}>
+            <Lbl>{label}</Lbl>
+            <input type={type} value={form[fkey]} onChange={e => setForm({...form,[fkey]:e.target.value})} style={FS}/>
           </div>
         ))}
-        {[
-          ["Language", "language", ["english","malayalam","hindi","tamil","arabic"]],
-          ["Region", "region", ["india","kerala","wayanad","global","south_india"]],
-          ["Religion context", "religion", ["general","ayurveda","halal","unani","hindu","christian"]],
-        ].map(([label, key, opts]) => (
-          <div key={key} style={{ marginBottom: 10 }}>
-            <label style={{ fontSize: 11, color: T.gray, display: "block", marginBottom: 3 }}>{label}</label>
-            <select value={form[key]} onChange={e => setForm({ ...form, [key]: e.target.value })}
-              style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12, boxSizing: "border-box" }}>
+
+        {selectFields.map(([label, fkey, opts]) => (
+          <div key={fkey} style={{ marginBottom: 10 }}>
+            <Lbl>{label}</Lbl>
+            <select value={form[fkey]} onChange={e => setForm({...form,[fkey]:e.target.value})} style={FS}>
               {opts.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
           </div>
         ))}
+
+        <div style={{ marginBottom: 10 }}>
+          <Lbl>USP (Unique Selling Proposition)</Lbl>
+          <textarea value={form.usp} onChange={e => setForm({...form, usp: e.target.value})} rows={2}
+            placeholder="What makes you unique?" style={{...FS, resize: "vertical"}}/>
+        </div>
+
+        <ChipGroup label="Target Locations" fieldKey="target_locations"
+          opts={["global","india","south_india","kerala","malabar","kochi","kozhikode","wayanad","national"]} />
+        <ChipGroup label="Target Languages" fieldKey="target_languages"
+          opts={["english","malayalam","hindi","tamil","kannada","telugu","arabic"]} />
+
         <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
           <Btn onClick={onClose}>Cancel</Btn>
           <Btn onClick={save} variant="primary" disabled={saving} style={{ flex: 1 }}>
@@ -866,23 +910,48 @@ function KeywordTreePage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// UNIFIED KEYWORD PAGE — tabs: Universe Input | Run Pipeline | Keyword Tree
+// UNIFIED KEYWORD PAGE — tabs: Workflow | Keyword Tree | Rankings
 // ─────────────────────────────────────────────────────────────────────────────
 function KeywordsUnifiedPage() {
-  const { activeProject } = useStore()
-  const [tab, setTab] = useState("run")
+  const { activeProject, setPage } = useStore()
+  const [tab, setTab] = useState("workflow")
+  const [strategySummary, setStrategySummary] = useState(null)
+
+  useEffect(() => {
+    let active = true
+    if (!activeProject) return
+    api.get(`/api/strategy/${activeProject}/latest`).then(r => {
+      if (!active) return
+      setStrategySummary(r)
+    }).catch(() => {})
+    return () => { active = false }
+  }, [activeProject])
 
   const TABS = [
-    { id: "input",    label: "Universe Input", desc: "Pillars + supporting keywords" },
-    { id: "run",      label: "Run Pipeline",   desc: "20-phase keyword universe" },
-    { id: "tree",     label: "Keyword Tree",   desc: "Explore universe visually" },
-    { id: "rankings", label: "Rankings",       desc: "GSC keyword positions" },
+    { id: "workflow", label: "Workflow",     desc: "7-step keyword wizard" },
+    { id: "tree",     label: "Keyword Tree", desc: "Explore universe visually" },
+    { id: "rankings", label: "Rankings",     desc: "GSC keyword positions" },
   ]
 
   return (
     <div>
       <div style={{ fontSize: 18, fontWeight: 700, color: T.text, marginBottom: 16 }}>Keywords</div>
 
+      {strategySummary && strategySummary.result_json && (
+        <div style={{ marginBottom: 14 }}>
+          <Card>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>Strategy: {strategySummary.result_json.strategy?.strategy_summary?.headline || '—'}</div>
+                <div style={{ fontSize: 12, color: T.gray }}>{(strategySummary.result_json.strategy?.priority_personas || []).slice(0,3).map(p => p.persona || p).join(', ')}</div>
+              </div>
+              <div>
+                <Btn small onClick={() => setPage('strategy')}>Edit Strategy</Btn>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
       {/* Tab bar */}
       <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${T.border}`, marginBottom: 24 }}>
         {TABS.map(t => (
@@ -899,10 +968,345 @@ function KeywordsUnifiedPage() {
         ))}
       </div>
 
-      {tab === "input"    && <KeywordInputPage projectId={activeProject}/>}
-      {tab === "run"      && <KeywordsPage/>}
+      {tab === "workflow" && <KeywordWorkflow projectId={activeProject} onGoToCalendar={() => setPage("blogs")} setPage={setPage}/>}
       {tab === "tree"     && <KeywordTreePage/>}
       {tab === "rankings" && <RankingsPage/>}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTENT PIPELINE TAB — P13, P15, P16, P17, P19, P20
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CONTENT_PHASES = [
+  { key: "P13", name: "Content Calendar",  group: "planning", color: "#2563eb" },
+  { key: "P15", name: "Blog Suggestions",  group: "content",  color: "#7c3aed" },
+  { key: "P16", name: "Content Generation",group: "content",  color: "#7c3aed" },
+  { key: "P17", name: "SEO Optimisation",  group: "content",  color: "#7c3aed" },
+  { key: "P19", name: "Publishing",        group: "publish",  color: "#dc2626" },
+  { key: "P20", name: "Feedback Loop",     group: "publish",  color: "#dc2626" },
+]
+
+const CONTENT_PHASE_ETA = {
+  P13: 2000, P15: 3000, P16: 8000, P17: 3000, P19: 2000, P20: 1000,
+}
+
+function ContentPipelineTab({ projectId }) {
+  const [pillarStatus, setPillarStatus]   = useState([])
+  const [selectedPillars, setSelectedPillars] = useState([])
+  const [runs, setRuns]                   = useState([])
+  const [phaseProgress, setPhaseProgress] = useState({}) // runId → [events]
+  const [running, setRunning]             = useState(false)
+  const [error, setError]                 = useState("")
+  const [expandedRun, setExpandedRun]     = useState(null)
+  const [tick, setTick]                   = useState(0)
+  const sseRef                            = useRef({})
+  const phaseStartRef                     = useRef({}) // runId+phase → start timestamp
+
+  // Live tick for elapsed timers
+  useEffect(() => {
+    const t = setInterval(() => setTick(v => v + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  // Cleanup SSE on unmount
+  useEffect(() => () => Object.values(sseRef.current).forEach(es => es?.close()), [])
+
+  // Load pillar status
+  const { data: psData, isLoading: psLoading } = useQuery({
+    queryKey: ["pillar-status-content", projectId],
+    queryFn: () => projectId ? api.get(`/api/ki/${projectId}/pillar-status`) : null,
+    enabled: !!projectId,
+    refetchInterval: running ? 5000 : false,
+  })
+
+  useEffect(() => {
+    if (psData?.pillars) setPillarStatus(psData.pillars)
+  }, [psData])
+
+  const startSSE = (runId) => {
+    if (sseRef.current[runId]) return
+    const es = new EventSource(`${API}/api/runs/${runId}/stream`)
+    es.addEventListener("message", (e) => {
+      try {
+        const payload = JSON.parse(e.data)
+        if (payload.type === "phase_log") {
+          if (payload.status === "starting") {
+            const key = `${runId}:${payload.phase}`
+            if (!phaseStartRef.current[key]) phaseStartRef.current[key] = Date.now()
+          }
+          setPhaseProgress(prev => ({
+            ...prev,
+            [runId]: [...(prev[runId] || []), payload]
+          }))
+          if (payload.status === "complete" && payload.phase === "P20") {
+            es.close()
+            setRunning(false)
+          }
+        }
+        if (payload.type === "run_complete" || payload.type === "error") {
+          es.close()
+          setRunning(false)
+        }
+      } catch {}
+    })
+    es.addEventListener("error", () => { es.close() })
+    sseRef.current[runId] = es
+  }
+
+  const runContentPipeline = async () => {
+    if (!selectedPillars.length) { setError("Select at least one pillar"); return }
+    setError(""); setRunning(true)
+    try {
+      const r = await api.post(`/api/ki/${projectId}/run-pipeline`, { selected_pillars: selectedPillars })
+      if (r?.runs) {
+        setRuns(r.runs.map(run => ({ ...run, status: "queued" })))
+        const exp = {}
+        r.runs.forEach(run => { exp[run.run_id] = true; startSSE(run.run_id) })
+        setExpandedRun(r.runs[0]?.run_id || null)
+      } else {
+        setError(r?.detail || "Failed to start pipeline")
+        setRunning(false)
+      }
+    } catch (e) { setError(String(e)); setRunning(false) }
+  }
+
+  const togglePillar = (kw) => setSelectedPillars(prev =>
+    prev.includes(kw) ? prev.filter(k => k !== kw) : [...prev, kw]
+  )
+  const selectAll = () => setSelectedPillars(pillarStatus.map(p => p.keyword))
+  const clearAll  = () => setSelectedPillars([])
+
+  // Phase summary per run
+  const phaseSummary = (runId) => {
+    const events = phaseProgress[runId] || []
+    const map = {}
+    events.forEach(ev => {
+      if (!map[ev.phase]) map[ev.phase] = {}
+      map[ev.phase][ev.status] = ev
+    })
+    return map
+  }
+
+  const phaseIcon = (summary) => {
+    if (summary?.complete) return { icon: "✓", color: "#16a34a" }
+    if (summary?.error)    return { icon: "✕", color: "#dc2626" }
+    if (summary?.starting) return { icon: "●", color: "#7c3aed" }
+    return { icon: "○", color: "#d1d5db" }
+  }
+
+  if (!projectId) return <div style={{ color: T.gray, padding: 20 }}>Select a project first.</div>
+
+  const allDone = runs.length > 0 && !running
+
+  return (
+    <div>
+      {/* Phase strip */}
+      <Card style={{ marginBottom: 12, padding: "14px 16px" }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: T.gray, textTransform: "uppercase",
+                      letterSpacing: ".06em", marginBottom: 10 }}>Content Pipeline Phases</div>
+        <div style={{ display: "flex", gap: 0, alignItems: "center", overflowX: "auto" }}>
+          {CONTENT_PHASES.map((ph, i) => (
+            <div key={ph.key} style={{ display: "flex", alignItems: "center" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center",
+                            padding: "6px 12px", borderRadius: 8, background: ph.color + "12",
+                            border: `1px solid ${ph.color}33`, minWidth: 90 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: ph.color }}>{ph.key}</span>
+                <span style={{ fontSize: 10, color: "#374151", textAlign: "center", marginTop: 2 }}>{ph.name}</span>
+              </div>
+              {i < CONTENT_PHASES.length - 1 && (
+                <div style={{ width: 20, height: 1, background: "#e5e7eb", flexShrink: 0 }}/>
+              )}
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Pillar selection */}
+      {!running && runs.length === 0 && (
+        <Card style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>Select Pillars to Run</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Btn small onClick={selectAll}>Select All</Btn>
+              <Btn small onClick={clearAll}>Clear</Btn>
+            </div>
+          </div>
+
+          {psLoading ? (
+            <div style={{ color: T.gray, fontSize: 12 }}>Loading pillars…</div>
+          ) : pillarStatus.length === 0 ? (
+            <div style={{ color: T.gray, fontSize: 12, padding: "10px 0" }}>
+              No confirmed pillars found. Complete Steps 1–5 in the Keyword Workflow first.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {pillarStatus.map(p => (
+                <label key={p.keyword} style={{ display: "flex", alignItems: "center", gap: 10,
+                                                padding: "8px 10px", borderRadius: 8, cursor: "pointer",
+                                                background: selectedPillars.includes(p.keyword) ? "#f5f3ff" : T.grayLight,
+                                                border: `1px solid ${selectedPillars.includes(p.keyword) ? "#7c3aed33" : "transparent"}` }}>
+                  <input type="checkbox" checked={selectedPillars.includes(p.keyword)}
+                    onChange={() => togglePillar(p.keyword)} style={{ accentColor: "#7c3aed" }}/>
+                  <span style={{ fontSize: 13, fontWeight: 500, flex: 1 }}>{p.keyword}</span>
+                  {p.status && (
+                    <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 99,
+                                   background: p.status === "complete" ? "#f0fdf4" : "#fffbeb",
+                                   color: p.status === "complete" ? "#16a34a" : "#d97706", fontWeight: 600 }}>
+                      {p.status === "complete" ? "✓ Step 5 done" : p.status}
+                    </span>
+                  )}
+                  {p.cluster_count > 0 && (
+                    <span style={{ fontSize: 10, color: T.gray }}>{p.cluster_count} clusters</span>
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+
+          {error && (
+            <div style={{ color: "#dc2626", fontSize: 12, marginTop: 10, padding: "8px 12px",
+                          background: "#fef2f2", borderRadius: 8 }}>⚠ {error}</div>
+          )}
+
+          <div style={{ marginTop: 12 }}>
+            <Btn variant="primary" onClick={runContentPipeline}
+                 disabled={!selectedPillars.length || psLoading}
+                 style={{ background: "#7c3aed" }}>
+              ▶ Run Content Generation ({selectedPillars.length} pillar{selectedPillars.length !== 1 ? "s" : ""})
+            </Btn>
+          </div>
+        </Card>
+      )}
+
+      {/* Run progress cards */}
+      {runs.map(run => {
+        const summary = phaseSummary(run.run_id)
+        const isExpanded = expandedRun === run.run_id
+        const completedCount = CONTENT_PHASES.filter(ph => summary[ph.key]?.complete).length
+        const currentPhase = CONTENT_PHASES.find(ph => summary[ph.key]?.starting && !summary[ph.key]?.complete)
+
+        return (
+          <Card key={run.run_id} style={{ marginBottom: 10 }}>
+            {/* Card header */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: isExpanded ? 12 : 0,
+                          cursor: "pointer" }}
+                 onClick={() => setExpandedRun(isExpanded ? null : run.run_id)}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{run.seed || run.run_id}</div>
+                <div style={{ fontSize: 11, color: T.gray, marginTop: 1 }}>
+                  {currentPhase
+                    ? `Running: ${currentPhase.name}…`
+                    : completedCount === CONTENT_PHASES.length
+                    ? "All content phases complete"
+                    : `${completedCount}/${CONTENT_PHASES.length} phases`}
+                </div>
+              </div>
+              {/* Mini phase dots */}
+              <div style={{ display: "flex", gap: 4 }}>
+                {CONTENT_PHASES.map(ph => {
+                  const { icon, color } = phaseIcon(summary[ph.key])
+                  return (
+                    <span key={ph.key} title={ph.name}
+                          style={{ fontSize: 10, color, fontWeight: 700 }}>{icon}</span>
+                  )
+                })}
+              </div>
+              <span style={{ fontSize: 10, color: T.gray }}>{isExpanded ? "▲" : "▼"}</span>
+            </div>
+
+            {/* Expanded phase list */}
+            {isExpanded && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {CONTENT_PHASES.map(ph => {
+                  const s = summary[ph.key]
+                  const isRunningNow = s?.starting && !s?.complete && !s?.error
+                  const startKey = `${run.run_id}:${ph.key}`
+                  const startTs = phaseStartRef.current[startKey]
+                  const liveElapsed = startTs && isRunningNow
+                    ? Math.floor((Date.now() - startTs) / 1000)
+                    : (s?.complete?.elapsed_ms ? Math.round(s.complete.elapsed_ms / 1000) : 0)
+                  const etaMs = CONTENT_PHASE_ETA[ph.key] || 3000
+                  const fillPct = isRunningNow
+                    ? Math.min(liveElapsed * 1000 / etaMs * 100, 95)
+                    : s?.complete ? 100 : 0
+
+                  return (
+                    <div key={ph.key} style={{ borderRadius: 8, border: "1px solid #e5e7eb",
+                                               overflow: "hidden" }}>
+                      {/* Phase header row */}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8,
+                                    padding: "8px 12px", background: isRunningNow ? ph.color + "08" : "transparent" }}>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: ph.color, width: 28 }}>{ph.key}</span>
+                        <span style={{ fontSize: 12, fontWeight: 500, flex: 1 }}>{ph.name}</span>
+                        {isRunningNow && (
+                          <span style={{ fontSize: 10, color: ph.color, animation: "pulse 1.5s infinite" }}>● running</span>
+                        )}
+                        {s?.complete && (
+                          <span style={{ fontSize: 10, color: "#16a34a" }}>✓ done</span>
+                        )}
+                        {s?.error && (
+                          <span style={{ fontSize: 10, color: "#dc2626" }}>✕ error</span>
+                        )}
+                        {!s && (
+                          <span style={{ fontSize: 10, color: "#9ca3af" }}>pending</span>
+                        )}
+                        {liveElapsed > 0 && (
+                          <span style={{ fontSize: 10, color: T.gray }}>{liveElapsed}s</span>
+                        )}
+                        {s?.complete?.output_count > 0 && (
+                          <span style={{ fontSize: 10, color: "#7c3aed", fontWeight: 600 }}>
+                            {s.complete.output_count} items
+                          </span>
+                        )}
+                      </div>
+                      {/* Progress bar */}
+                      {(isRunningNow || s?.complete) && (
+                        <div style={{ height: 3, background: "#f3f4f6" }}>
+                          <div style={{ height: "100%", width: `${fillPct}%`,
+                                        background: s?.complete ? "#16a34a" : ph.color,
+                                        transition: isRunningNow ? "none" : "width 0.3s" }}/>
+                        </div>
+                      )}
+                      {/* Message */}
+                      {(s?.complete?.msg || s?.starting?.msg) && (
+                        <div style={{ padding: "4px 12px 6px", fontSize: 10, color: T.gray }}>
+                          {s?.complete?.msg || s?.starting?.msg}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {/* "Run more" button after done */}
+                {completedCount === CONTENT_PHASES.length && (
+                  <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
+                    <Btn small onClick={() => { setRuns([]); setPhaseProgress({}); setSelectedPillars([]) }}>
+                      ← Run Another Pillar
+                    </Btn>
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+        )
+      })}
+
+      {/* Running spinner */}
+      {running && (
+        <div style={{ textAlign: "center", padding: 16, color: "#7c3aed", fontSize: 12 }}>
+          <span style={{ marginRight: 8 }}>⏳</span>
+          Content pipeline running — P13 → P15 → P16 → P17 → P19 → P20
+        </div>
+      )}
+
+      {allDone && (
+        <div style={{ padding: "12px 16px", background: "#f0fdf4", borderRadius: 8,
+                      border: "1px solid #bbf7d0", fontSize: 12, color: "#15803d" }}>
+          ✓ Content pipeline complete. Check the Articles tab for generated content.
+        </div>
+      )}
     </div>
   )
 }
@@ -913,6 +1317,7 @@ function KeywordsUnifiedPage() {
 function ContentPage() {
   const { activeProject } = useStore()
   const qclient = useQueryClient()
+  const [tab, setTab] = useState("articles")
   const [kw, setKw] = useState("")
   const [selected, setSelected] = useState(null)
   const [editingArticle, setEditingArticle] = useState(null) // {article_id, title, meta_title, meta_desc}
@@ -941,10 +1346,25 @@ function ContentPage() {
     acc[s] = (articles || []).filter(a => a.status === s).length; return acc
   }, {})
 
+  const tabStyle = (t) => ({
+    padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: "pointer",
+    border: "none", background: tab === t ? T.purple : "transparent",
+    color: tab === t ? "#fff" : T.gray,
+  })
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: selected ? "1fr 1fr" : "1fr", gap: 16 }}>
+    <div>
+      {/* Tab bar */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+        <div style={{ fontSize: 20, fontWeight: 600, marginRight: 12 }}>Content</div>
+        <button style={tabStyle("articles")} onClick={() => setTab("articles")}>Articles</button>
+        <button style={tabStyle("pipeline")} onClick={() => setTab("pipeline")}>Content Pipeline</button>
+      </div>
+
+      {tab === "pipeline" && <ContentPipelineTab projectId={activeProject} />}
+
+      {tab === "articles" && <div style={{ display: "grid", gridTemplateColumns: selected ? "1fr 1fr" : "1fr", gap: 16 }}>
       <div>
-        <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 12 }}>Content</div>
         {/* Lifecycle pipeline */}
         <Card style={{ marginBottom: 12, padding: "10px 14px" }}>
           <div style={{ fontSize: 11, color: T.gray, marginBottom: 8, fontWeight: 500 }}>Content lifecycle</div>
@@ -1065,6 +1485,7 @@ function ContentPage() {
           </Card>
         </div>
       )}
+    </div>}
     </div>
   )
 }
@@ -1259,28 +1680,93 @@ function SEOCheckerPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 function RankingsPage() {
   const { activeProject } = useStore()
+  const qclient = useQueryClient()
+  const [tab, setTab] = useState("overview")
+  const [severityFilter, setSeverityFilter] = useState("all")
+  const [statusFilter, setStatusFilter] = useState("all")
+  const [diagnosing, setDiagnosing] = useState({})
+  const [diagnoses, setDiagnoses] = useState({})
+
   const { data: rankings } = useQuery({
     queryKey: ["rankings", activeProject],
     queryFn: () => activeProject ? api.get(`/api/rankings/${activeProject}`) : [],
-    enabled: !!activeProject
+    enabled: !!activeProject,
+  })
+  const { data: dashboard } = useQuery({
+    queryKey: ["rankings-dashboard", activeProject],
+    queryFn: () => activeProject ? api.get(`/api/rankings/${activeProject}/dashboard`) : null,
+    enabled: !!activeProject, refetchInterval: 300000,
+  })
+  const { data: alerts } = useQuery({
+    queryKey: ["ranking-alerts", activeProject, severityFilter, statusFilter],
+    queryFn: () => {
+      let path = `/api/rankings/${activeProject}/alerts?`
+      if (severityFilter !== "all") path += `severity=${severityFilter}&`
+      if (statusFilter !== "all") path += `status=${statusFilter}`
+      return api.get(path)
+    },
+    enabled: !!activeProject && tab === "alerts", refetchInterval: 60000,
+  })
+  const { data: predictions } = useQuery({
+    queryKey: ["ranking-predictions", activeProject],
+    queryFn: () => api.get(`/api/rankings/${activeProject}/predictions`),
+    enabled: !!activeProject && tab === "predictions",
+  })
+  const { data: topMovers } = useQuery({
+    queryKey: ["top-movers", activeProject],
+    queryFn: () => api.get(`/api/rankings/${activeProject}/top-movers`),
+    enabled: !!activeProject && tab === "overview",
   })
   const { data: gscStatus } = useQuery({
     queryKey: ["gsc-status", activeProject],
     queryFn: () => activeProject ? api.get(`/api/gsc/${activeProject}/status`) : null,
-    enabled: !!activeProject
+    enabled: !!activeProject,
   })
 
-  const syncGSC = async () => { await api.post(`/api/gsc/${activeProject}/sync`, {}) }
+  const syncGSC = async () => {
+    await api.post(`/api/gsc/${activeProject}/sync`, {})
+    qclient.invalidateQueries(["rankings", activeProject])
+    qclient.invalidateQueries(["rankings-dashboard", activeProject])
+  }
+  const checkAlerts = async () => {
+    await api.post(`/api/rankings/${activeProject}/check-alerts`, {})
+    qclient.invalidateQueries(["ranking-alerts", activeProject])
+    qclient.invalidateQueries(["rankings-dashboard", activeProject])
+  }
+  const acknowledge = async (alertId) => {
+    await api.post(`/api/rankings/${activeProject}/alerts/${alertId}/acknowledge`, {})
+    qclient.invalidateQueries(["ranking-alerts", activeProject])
+    qclient.invalidateQueries(["rankings-dashboard", activeProject])
+  }
+  const diagnose = async (alert) => {
+    setDiagnosing(d => ({...d, [alert.id]: true}))
+    const r = await api.post(`/api/rankings/${activeProject}/alerts/${alert.id}/diagnose`, {})
+    setDiagnosing(d => ({...d, [alert.id]: false}))
+    setDiagnoses(d => ({...d, [alert.id]: r}))
+    qclient.invalidateQueries(["ranking-alerts", activeProject])
+  }
+
+  const currentRankings = dashboard?.current_rankings || rankings || []
+  const activeAlerts = dashboard?.active_alerts || []
+  const activeAlertCount = dashboard?.alert_count || 0
+
+  const posColor = (p) => p <= 3 ? T.teal : p <= 10 ? T.purple : p <= 20 ? T.amber : T.red
+  const SevColor = { critical: "red", high: "amber", warning: "purple" }
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-        <div style={{ fontSize: 20, fontWeight: 600 }}>Rankings</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>
+          Rankings Intelligence
+          {activeAlertCount > 0 && (
+            <Badge color="red" style={{ marginLeft: 8 }}>{activeAlertCount} alerts</Badge>
+          )}
+        </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {gscStatus?.connected ? (
             <>
               <Badge color="teal">GSC connected</Badge>
-              <Btn small onClick={syncGSC}>Sync now</Btn>
+              <Btn small onClick={syncGSC}>Sync GSC</Btn>
             </>
           ) : (
             <Btn small variant="primary" onClick={async () => {
@@ -1288,51 +1774,207 @@ function RankingsPage() {
               if (data?.auth_url) window.open(data.auth_url, "_blank")
             }}>Connect GSC</Btn>
           )}
+          <Btn small onClick={checkAlerts}>Check Alerts</Btn>
         </div>
       </div>
 
-      {rankings?.length > 0 ? (
-        <>
-          {/* Position distribution summary */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
-            {[
-              { label: "Top 3", count: rankings.filter(r=>r.position<=3).length, color: T.teal },
-              { label: "Top 10", count: rankings.filter(r=>r.position<=10).length, color: T.purple },
-              { label: "Top 30", count: rankings.filter(r=>r.position<=30).length, color: T.gray },
-            ].map(b => (
-              <Card key={b.label} style={{ padding: 12, textAlign: "center" }}>
-                <div style={{ fontSize: 22, fontWeight: 700, color: b.color }}>{b.count}</div>
-                <div style={{ fontSize: 11, color: T.gray }}>{b.label}</div>
-              </Card>
-            ))}
-          </div>
-          <Card>
-            <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Keyword positions ({rankings.length})</div>
-            {rankings.slice(0, 30).map((r, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
-                <div style={{
-                  width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 11, fontWeight: 600,
-                  background: r.position <= 3 ? T.tealLight : r.position <= 10 ? T.purpleLight : T.grayLight,
-                  color: r.position <= 3 ? T.teal : r.position <= 10 ? T.purple : T.gray,
-                }}>{Math.round(r.position)}</div>
-                <span style={{ flex: 1 }}>{r.keyword}</span>
-                {/* Mini position bar */}
-                <div style={{ width: 60, height: 4, background: "rgba(0,0,0,0.06)", borderRadius: 2, overflow:"hidden" }}>
-                  <div style={{ width: `${Math.max(0,100-r.position*3)}%`, height: "100%",
-                    background: r.position<=3?T.teal:r.position<=10?T.purple:T.gray }}/>
-                </div>
-                <span style={{ fontSize: 11, color: T.gray, minWidth: 50, textAlign:"right" }}>{r.clicks} clicks</span>
-                <span style={{ fontSize: 11, color: T.gray, minWidth: 55, textAlign:"right" }}>{(r.ctr * 100).toFixed(1)}% CTR</span>
-              </div>
-            ))}
+      {/* Stat cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 14 }}>
+        {[
+          { label: "Top 3",      count: currentRankings.filter(r=>r.position<=3).length,  color: T.teal },
+          { label: "Top 10",     count: currentRankings.filter(r=>r.position<=10).length, color: T.purple },
+          { label: "Top 20",     count: currentRankings.filter(r=>r.position<=20).length, color: T.amber },
+          { label: "Alerts",     count: activeAlertCount,                                  color: T.red },
+        ].map(s => (
+          <Card key={s.label} style={{ textAlign: "center", padding: 10 }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: s.color }}>{s.count}</div>
+            <div style={{ fontSize: 11, color: T.gray }}>{s.label}</div>
           </Card>
-        </>
-      ) : (
-        <Card style={{ textAlign: "center", padding: 40 }}>
-          <div style={{ fontSize: 13, color: T.gray }}>No ranking data yet.</div>
-          <div style={{ fontSize: 12, color: T.gray, marginTop: 6 }}>Connect Google Search Console to import positions.</div>
-        </Card>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 0, borderBottom: "0.5px solid rgba(0,0,0,0.1)", marginBottom: 14 }}>
+        {[["overview","Overview"],["alerts",`Alerts${activeAlertCount>0?" ("+activeAlertCount+")":""}`],["predictions","Predictions"]].map(([id,label]) => (
+          <button key={id} onClick={() => setTab(id)} style={{
+            padding: "7px 16px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500,
+            background: "transparent", color: tab === id ? T.purple : T.gray,
+            borderBottom: tab === id ? `2px solid ${T.purple}` : "2px solid transparent", marginBottom: -1,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* Overview */}
+      {tab === "overview" && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 14 }}>
+            {/* Keyword list */}
+            <Card>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10 }}>Current Positions ({currentRankings.length})</div>
+              {currentRankings.length === 0 ? (
+                <div style={{ fontSize: 12, color: T.gray, padding: "8px 0" }}>
+                  No ranking data. Connect GSC or import manually.
+                </div>
+              ) : currentRankings.slice(0, 40).map((r, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8,
+                  padding: "5px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center",
+                    justifyContent: "center", fontSize: 11, fontWeight: 600, flexShrink: 0,
+                    background: r.position <= 3 ? "#E1F5EE" : r.position <= 10 ? "#EEEDFE" : "#F1EFE8",
+                    color: posColor(r.position),
+                  }}>{Math.round(r.position)}</div>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.keyword}</span>
+                  <div style={{ width: 60, height: 3, background: "rgba(0,0,0,0.06)", borderRadius: 2, overflow: "hidden" }}>
+                    <div style={{ width: `${Math.max(0, 100-r.position*3)}%`, height: "100%", background: posColor(r.position) }}/>
+                  </div>
+                  <span style={{ fontSize: 10, color: T.gray, minWidth: 46, textAlign: "right" }}>{r.clicks} clicks</span>
+                  <span style={{ fontSize: 10, color: T.gray, minWidth: 40, textAlign: "right" }}>{(r.ctr*100).toFixed(1)}%</span>
+                </div>
+              ))}
+            </Card>
+
+            {/* Top movers */}
+            <div>
+              {activeAlertCount > 0 && (
+                <Card style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Active Alerts</div>
+                  {activeAlerts.slice(0, 5).map(a => (
+                    <div key={a.id} style={{ padding: "5px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 11 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ fontWeight: 500 }}>{a.keyword}</span>
+                        <Badge color={SevColor[a.severity] || "gray"}>{a.severity}</Badge>
+                      </div>
+                      <div style={{ color: T.red, marginTop: 2 }}>
+                        #{Math.round(a.old_position)} → #{Math.round(a.new_position)}
+                        <span style={{ marginLeft: 4 }}>(▼{Math.round(a.change)})</span>
+                      </div>
+                    </div>
+                  ))}
+                  <Btn small style={{ marginTop: 8 }} onClick={() => setTab("alerts")}>View all alerts</Btn>
+                </Card>
+              )}
+              <Card>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Top Movers (7d)</div>
+                {!topMovers?.length ? (
+                  <div style={{ fontSize: 11, color: T.gray }}>No movement data yet.</div>
+                ) : topMovers.slice(0, 10).map((m, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0",
+                    borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 11 }}>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.keyword}</span>
+                    <span style={{ color: T.amber, flexShrink: 0 }}>±{Math.round(m.swing)}</span>
+                  </div>
+                ))}
+              </Card>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Alerts */}
+      {tab === "alerts" && (
+        <div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <select value={severityFilter} onChange={e => setSeverityFilter(e.target.value)}
+              style={{ padding: "5px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12 }}>
+              <option value="all">All severity</option>
+              {["critical","high","warning"].map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
+              style={{ padding: "5px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12 }}>
+              <option value="all">All status</option>
+              {["new","acknowledged","diagnosed"].map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+
+          {!alerts?.length ? (
+            <Card style={{ textAlign: "center", padding: 30 }}>
+              <div style={{ fontSize: 12, color: T.gray }}>No alerts. Rankings are stable.</div>
+            </Card>
+          ) : alerts.map(a => (
+            <Card key={a.id} style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                <div>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{a.keyword}</span>
+                  <span style={{ fontSize: 11, color: T.red, marginLeft: 8 }}>
+                    #{Math.round(a.old_position)} → #{Math.round(a.new_position)} (▼{Math.round(a.change)})
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Badge color={SevColor[a.severity] || "gray"}>{a.severity}</Badge>
+                  <Badge color={a.status === "new" ? "red" : a.status === "diagnosed" ? "teal" : "gray"}>{a.status}</Badge>
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: T.gray, marginBottom: 8 }}>{a.created_at?.slice(0,10)}</div>
+
+              {/* Diagnosis result */}
+              {(diagnoses[a.id] || a.diagnosis_json?.root_cause) && (() => {
+                const diag = diagnoses[a.id] || a.diagnosis_json
+                return (
+                  <div style={{ background: "#fafafa", borderRadius: 8, padding: "10px 12px", marginBottom: 8, fontSize: 11 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>Root cause: {diag.root_cause}</div>
+                    {diag.fixes?.slice(0, 3).map((f, i) => (
+                      <div key={i} style={{ display: "flex", gap: 8, padding: "4px 0",
+                        borderTop: i > 0 ? "0.5px solid rgba(0,0,0,0.06)" : "none" }}>
+                        <Badge color={f.priority === "do_now" ? "red" : f.priority === "do_this_week" ? "amber" : "gray"}>
+                          {f.priority}
+                        </Badge>
+                        <div>
+                          <div style={{ fontWeight: 500 }}>{f.action}</div>
+                          <div style={{ color: T.gray }}>{f.specific_instruction}</div>
+                        </div>
+                      </div>
+                    ))}
+                    {diag.estimated_recovery_weeks > 0 && (
+                      <div style={{ marginTop: 6, color: T.gray }}>Estimated recovery: {diag.estimated_recovery_weeks} weeks</div>
+                    )}
+                  </div>
+                )
+              })()}
+
+              <div style={{ display: "flex", gap: 6 }}>
+                {a.status === "new" && (
+                  <Btn small onClick={() => acknowledge(a.id)}>Acknowledge</Btn>
+                )}
+                <Btn small variant="primary" onClick={() => diagnose(a)} loading={diagnosing[a.id]}>
+                  Diagnose with Claude
+                </Btn>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Predictions */}
+      {tab === "predictions" && (
+        <div>
+          {!predictions?.length ? (
+            <Card style={{ textAlign: "center", padding: 30 }}>
+              <div style={{ fontSize: 12, color: T.gray }}>
+                No predictions yet. Run a Final Claude Strategy to generate 12-month predictions.
+              </div>
+            </Card>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px,1fr))", gap: 10 }}>
+              {predictions.map((p, i) => (
+                <Card key={i}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: T.gray, marginBottom: 4 }}>{p.predicted_month}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{p.keyword}</div>
+                  <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
+                    Pillar: {p.pillar || "—"}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, alignItems: "center" }}>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: posColor(p.predicted_rank) }}>
+                      #{Math.round(p.predicted_rank)}
+                    </div>
+                    <Badge color={p.confidence > 0.7 ? "teal" : p.confidence > 0.4 ? "amber" : "gray"}>
+                      {p.confidence > 0 ? `${(p.confidence*100).toFixed(0)}% conf` : "low conf"}
+                    </Badge>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
@@ -1654,29 +2296,31 @@ function NewProjectPage() {
   const [step, setStep] = useState(0)
   const [form, setForm] = useState({
     name: "", industry: "food_spices", description: "",
-    seed_keywords: "", competitor_urls: "", language: "english",
-    region: "india", religion: "general",
+    language: "english", region: "india", religion: "general",
+    business_type: "B2C", usp: "",
+    target_locations: [], target_languages: [],
     wp_url: "", wp_user: "", wp_password: "",
   })
+
+  const toggleArr = (field, val) => {
+    const arr = form[field] || []
+    setForm({ ...form, [field]: arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val] })
+  }
   const industries = ["food_spices","tourism","healthcare","ecommerce","agriculture","education","real_estate","tech_saas","wellness","restaurant","fashion","general"]
 
   const create = useMutation({
-    mutationFn: () => api.post("/api/projects", {
-      ...form,
-      seed_keywords: form.seed_keywords.split(",").map(s=>s.trim()).filter(Boolean),
-    }),
+    mutationFn: () => api.post("/api/projects", { ...form }),
     onSuccess: (data) => {
       qclient.invalidateQueries(["projects"])
       setProject(data.project_id)
-      setPage("keywords")
+      setPage("strategy")
     }
   })
 
   const steps = [
     { label: "Business", icon: "①" },
-    { label: "Universe", icon: "②" },
-    { label: "Context", icon: "③" },
-    { label: "Publishing", icon: "④" },
+    { label: "Context", icon: "②" },
+    { label: "Publishing", icon: "③" },
   ]
 
   return (
@@ -1711,31 +2355,18 @@ function NewProjectPage() {
           <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Description</label>
           <textarea value={form.description} onChange={e=>setForm({...form,description:e.target.value})} rows={3}
             style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,resize:"vertical",boxSizing:"border-box" }}/>
+          <div style={{ marginTop: 10, padding: "8px 12px", background: T.purpleLight,
+                        borderRadius: 8, fontSize: 11, color: T.purple }}>
+            Pillar keywords, supporting keywords, and competitor URLs are collected in the Keywords workflow after project creation.
+          </div>
           <Btn onClick={() => setStep(1)} variant="primary" style={{ marginTop: 16, width: "100%" }} disabled={!form.name}>Continue →</Btn>
         </Card>
       )}
 
       {step === 1 && (
         <Card style={{ padding: 20 }}>
-          <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Universe seeds — one keyword per line or comma-separated *</label>
-          <textarea value={form.seed_keywords} onChange={e=>setForm({...form,seed_keywords:e.target.value})} rows={4}
-            placeholder="black pepper&#10;cinnamon&#10;cardamom"
-            style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,resize:"vertical",marginBottom:12,boxSizing:"border-box" }}/>
-          <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Competitor URLs (one per line — used for pillar extraction)</label>
-          <textarea value={form.competitor_urls} onChange={e=>setForm({...form,competitor_urls:e.target.value})} rows={3}
-            placeholder="https://competitor1.com&#10;https://competitor2.com"
-            style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,resize:"vertical",marginBottom:12,boxSizing:"border-box" }}/>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={() => setStep(0)}>← Back</Btn>
-            <Btn onClick={() => setStep(2)} variant="primary" style={{ flex: 1 }} disabled={!form.seed_keywords}>Continue →</Btn>
-          </div>
-        </Card>
-      )}
-
-      {step === 2 && (
-        <Card style={{ padding: 20 }}>
-          <div style={{ fontSize: 12, color: T.gray, marginBottom: 12 }}>Language, region and religion — used for content variants and keyword expansion.</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: T.gray, marginBottom: 12 }}>Audience context — drives keyword expansion, content variants, and strategy targeting.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 12 }}>
             <div>
               <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Language</label>
               <select value={form.language} onChange={e=>setForm({...form,language:e.target.value})}
@@ -1758,14 +2389,53 @@ function NewProjectPage() {
               </select>
             </div>
           </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 10, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Business type</label>
+              <select value={form.business_type} onChange={e=>setForm({...form,business_type:e.target.value})}
+                style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,boxSizing:"border-box" }}>
+                {["B2C","B2B","D2C","Service","Marketplace"].map(b=><option key={b}>{b}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 4 }}>Unique selling proposition</label>
+              <input value={form.usp} onChange={e=>setForm({...form,usp:e.target.value})} maxLength={200}
+                placeholder="What makes you unique?"
+                style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,boxSizing:"border-box" }}/>
+            </div>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 6 }}>Target locations</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {["global","india","south_india","kerala","malabar","kochi","kozhikode","wayanad","national"].map(o => {
+                const active = (form.target_locations || []).includes(o)
+                return <button key={o} onClick={() => toggleArr("target_locations", o)} style={{
+                  padding:"3px 9px",borderRadius:99,fontSize:11,cursor:"pointer",border:"none",
+                  background: active ? T.purple : "rgba(0,0,0,0.07)", color: active ? "#fff" : T.gray,
+                }}>{o}</button>
+              })}
+            </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 12, color: T.gray, display: "block", marginBottom: 6 }}>Target languages (multi)</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {["english","malayalam","hindi","tamil","kannada","telugu","arabic"].map(o => {
+                const active = (form.target_languages || []).includes(o)
+                return <button key={o} onClick={() => toggleArr("target_languages", o)} style={{
+                  padding:"3px 9px",borderRadius:99,fontSize:11,cursor:"pointer",border:"none",
+                  background: active ? T.teal : "rgba(0,0,0,0.07)", color: active ? "#fff" : T.gray,
+                }}>{o}</button>
+              })}
+            </div>
+          </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={() => setStep(1)}>← Back</Btn>
-            <Btn onClick={() => setStep(3)} variant="primary" style={{ flex: 1 }}>Continue →</Btn>
+            <Btn onClick={() => setStep(0)}>← Back</Btn>
+            <Btn onClick={() => setStep(2)} variant="primary" style={{ flex: 1 }}>Continue →</Btn>
           </div>
         </Card>
       )}
 
-      {step === 3 && (
+      {step === 2 && (
         <Card style={{ padding: 20 }}>
           <div style={{ fontSize: 12, color: T.gray, marginBottom: 12 }}>WordPress publishing (optional — can add later)</div>
           <input value={form.wp_url} onChange={e=>setForm({...form,wp_url:e.target.value})} placeholder="https://yoursite.com"
@@ -1775,7 +2445,7 @@ function NewProjectPage() {
           <input value={form.wp_password} onChange={e=>setForm({...form,wp_password:e.target.value})} placeholder="Application password" type="password"
             style={{ width:"100%",padding:"8px 10px",borderRadius:8,border:"0.5px solid rgba(0,0,0,0.15)",fontSize:13,marginBottom:16,boxSizing:"border-box" }}/>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn onClick={() => setStep(2)}>← Back</Btn>
+            <Btn onClick={() => setStep(1)}>← Back</Btn>
             <Btn onClick={() => create.mutate()} variant="primary" style={{ flex: 1 }} disabled={create.isPending}>
               {create.isPending ? "Creating..." : "Create project"}
             </Btn>
@@ -1790,28 +2460,562 @@ function NewProjectPage() {
 // SIDEBAR + LAYOUT
 // ─────────────────────────────────────────────────────────────────────────────
 
-const NAV = [
-  { id: "dashboard",    label: "Dashboard",    icon: "⬛" },
-  { id: "keywords",     label: "Keywords",     icon: "⬛" },
-  { id: "content",      label: "Content",      icon: "⬛" },
-  { id: "calendar",     label: "Calendar",     icon: "⬛" },
-  { id: "seo-checker",  label: "SEO checker",  icon: "⬛" },
-  { id: "quality",      label: "Quality",      icon: "⬛" },
-  { id: "rsd",          label: "Research & Dev", icon: "⬛" },
-  { id: "bug-fixer",    label: "Bug Fixer",    icon: "⬛" },
-  { id: "settings",     label: "Settings",     icon: "⬛" },
-]
+// ─────────────────────────────────────────────────────────────────────────────
+// PAGE: BLOG CONTENT CALENDAR (content_blogs freeze system)
+// ─────────────────────────────────────────────────────────────────────────────
+function BlogCalendarPage() {
+  const { activeProject } = useStore()
+  const qclient = useQueryClient()
+  const [tab, setTab] = useState("calendar")
+  const [selectedYM, setSelectedYM] = useState(null)
+  const [selectedPillar, setSelectedPillar] = useState("all")
+  const [editBlog, setEditBlog] = useState(null)
+  const [editBody, setEditBody] = useState({})
+  const [batchPillar, setBatchPillar] = useState("")
+  const [batchCount, setBatchCount] = useState(10)
+  const [generating, setGenerating] = useState(false)
+  const [populating, setPopulating] = useState(false)
+  const [msg, setMsg] = useState("")
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+  const year = new Date().getFullYear()
 
-function Sidebar({ page, setPage }) {
-  const { activeProject, logout } = useStore()
-  const dotColors = { dashboard:"purple",keywords:"teal",content:"purple",calendar:"amber",
-    "seo-checker":"purple",quality:"amber",rsd:"teal" }
+  const { data: stats } = useQuery({
+    queryKey: ["blog-stats", activeProject],
+    queryFn: () => api.get(`/api/blogs/${activeProject}/stats`),
+    enabled: !!activeProject, refetchInterval: 10000,
+  })
+  const { data: calendar } = useQuery({
+    queryKey: ["blog-calendar", activeProject],
+    queryFn: () => api.get(`/api/blogs/${activeProject}/calendar`),
+    enabled: !!activeProject, refetchInterval: 10000,
+  })
+  const { data: queue } = useQuery({
+    queryKey: ["freeze-queue", activeProject],
+    queryFn: () => api.get(`/api/blogs/${activeProject}/freeze-queue?days=14`),
+    enabled: !!activeProject && tab === "queue", refetchInterval: 30000,
+  })
+  const { data: dueToday } = useQuery({
+    queryKey: ["due-today", activeProject],
+    queryFn: () => api.get(`/api/blogs/${activeProject}/due-today`),
+    enabled: !!activeProject,
+  })
+
+  const monthData = months.map((m, i) => {
+    const ym = `${year}-${String(i+1).padStart(2,"0")}`
+    const items = (calendar || {})[ym] || []
+    const filtered = selectedPillar === "all" ? items : items.filter(b => b.pillar === selectedPillar)
+    const published = filtered.filter(b => b.status === "published").length
+    const frozen    = filtered.filter(b => b.status === "frozen").length
+    const draft     = filtered.filter(b => b.status === "draft" || b.status === "generating").length
+    return { m, ym, items: filtered, published, frozen, draft, total: filtered.length }
+  })
+
+  const pillars = Object.keys(stats?.by_pillar || {})
+
+  const openEdit = (b) => { setEditBlog(b); setEditBody({ title: b.title, meta_desc: b.meta_desc }) }
+
+  const saveBlog = async () => {
+    if (!editBlog) return
+    await api.put(`/api/blogs/${activeProject}/${editBlog.blog_id}`, editBody)
+    qclient.invalidateQueries(["blog-calendar", activeProject])
+    qclient.invalidateQueries(["blog-stats", activeProject])
+    setEditBlog(null)
+  }
+
+  const freezeBlog = async (blogId, scheduledDate) => {
+    await api.post(`/api/blogs/${activeProject}/${blogId}/freeze`, { scheduled_date: scheduledDate || "" })
+    qclient.invalidateQueries(["blog-calendar", activeProject])
+    qclient.invalidateQueries(["freeze-queue", activeProject])
+    qclient.invalidateQueries(["blog-stats", activeProject])
+  }
+
+  const publishBlog = async (blogId) => {
+    setMsg("Publishing...")
+    const r = await api.post(`/api/blogs/${activeProject}/${blogId}/publish`, {})
+    setMsg(r?.published ? `Published! ${r.url || ""}` : "Publish failed")
+    qclient.invalidateQueries(["blog-calendar", activeProject])
+    qclient.invalidateQueries(["due-today", activeProject])
+  }
+
+  const generateBatch = async () => {
+    if (!batchPillar) { setMsg("Enter a pillar name first."); return }
+    setGenerating(true); setMsg("")
+    const r = await api.post(`/api/blogs/${activeProject}/generate-batch`, {
+      pillar: batchPillar, count: batchCount, language: "english",
+    })
+    setGenerating(false)
+    setMsg(r?.created ? `${r.created} blogs queued for generation.` : "Error")
+    qclient.invalidateQueries(["blog-stats", activeProject])
+  }
+
+  const populateFromStrategy = async () => {
+    setPopulating(true); setMsg("")
+    const r = await api.post(`/api/blogs/${activeProject}/populate-calendar`, { weeks: 12, blogs_per_week: 15 })
+    setPopulating(false)
+    setMsg(r?.created ? `Created ${r.created} blog stubs from strategy.` : (r?.detail || "Error — run strategy first"))
+    qclient.invalidateQueries(["blog-calendar", activeProject])
+  }
+
+  const StatusColor = { published: "teal", frozen: "purple", draft: "gray", generating: "amber", approved: "green", error: "red" }
+
+  if (!activeProject) return <div style={{ color: T.gray, padding: 20 }}>Select a project first.</div>
+
   return (
-    <div style={{ width: 196, flexShrink: 0, borderRight: "0.5px solid rgba(0,0,0,0.1)",
-      height: "100vh", display: "flex", flexDirection: "column", padding: "16px 0", position: "sticky", top: 0 }}>
-      <div style={{ padding: "0 16px 16px", borderBottom: "0.5px solid rgba(0,0,0,0.08)", marginBottom: 8 }}>
-        <div style={{ fontSize: 16, fontWeight: 700, color: T.purple, letterSpacing: -0.5 }}>AnnaSEO</div>
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>Content Calendar</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {msg && <span style={{ fontSize: 11, color: T.teal, alignSelf: "center" }}>{msg}</span>}
+          <Btn small variant="primary" onClick={populateFromStrategy} disabled={populating}>
+            {populating ? "..." : "Populate from Strategy"}
+          </Btn>
+        </div>
       </div>
+
+      {/* Stats bar */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
+        {[
+          { label: "Total Blogs",    value: stats?.total || 0,     color: T.purple },
+          { label: "Frozen",         value: stats?.frozen || 0,    color: T.purpleDark },
+          { label: "Published",      value: stats?.published || 0, color: T.teal },
+          { label: "Due Today",      value: dueToday?.length || 0, color: T.amber },
+        ].map(s => (
+          <Card key={s.label} style={{ textAlign: "center", padding: 10 }}>
+            <div style={{ fontSize: 24, fontWeight: 700, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: T.gray }}>{s.label}</div>
+          </Card>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 0, borderBottom: "0.5px solid rgba(0,0,0,0.1)", marginBottom: 16 }}>
+        {[["calendar","Calendar"],["queue","Upcoming Queue"],["generate","Generate"],["due","Due Today"]].map(([id,label]) => (
+          <button key={id} onClick={() => setTab(id)} style={{
+            padding: "7px 16px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500,
+            background: "transparent", color: tab === id ? T.purple : T.gray,
+            borderBottom: tab === id ? `2px solid ${T.purple}` : "2px solid transparent", marginBottom: -1,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* Tab: Calendar grid */}
+      {tab === "calendar" && (
+        <div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <select value={selectedPillar} onChange={e => setSelectedPillar(e.target.value)}
+              style={{ padding: "5px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12 }}>
+              <option value="all">All pillars</option>
+              {pillars.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
+            {monthData.map(({ m, ym, total, published, frozen, draft }) => (
+              <Card key={ym} onClick={() => setSelectedYM(selectedYM === ym ? null : ym)}
+                style={{ cursor: "pointer", borderColor: selectedYM === ym ? T.purple : "rgba(0,0,0,0.1)", borderWidth: selectedYM === ym ? 1.5 : 0.5 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 6 }}>{m} {year}</div>
+                {total > 0 ? (
+                  <>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: T.purple }}>{total}</div>
+                    <div style={{ height: 4, borderRadius: 99, overflow: "hidden", background: T.grayLight, margin: "6px 0" }}>
+                      <div style={{ width: `${total ? (published/total)*100 : 0}%`, height: "100%", background: T.teal }}/>
+                    </div>
+                    <div style={{ fontSize: 10, color: T.gray }}>
+                      <span style={{ color: T.teal }}>{published} pub</span> ·{" "}
+                      <span style={{ color: T.purpleDark }}>{frozen} frozen</span> ·{" "}
+                      <span>{draft} draft</span>
+                    </div>
+                  </>
+                ) : <div style={{ fontSize: 11, color: T.gray }}>Empty</div>}
+              </Card>
+            ))}
+          </div>
+
+          {selectedYM && (
+            <Card>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10 }}>
+                {selectedYM} — {(calendar || {})[selectedYM]?.length || 0} articles
+                <Btn small onClick={() => setSelectedYM(null)} style={{ marginLeft: 8 }}>Clear</Btn>
+              </div>
+              {((calendar || {})[selectedYM] || []).map((b, i) => (
+                <div key={b.blog_id} style={{ display: "flex", alignItems: "center", gap: 8,
+                  padding: "7px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+                  <span style={{ fontSize: 10, color: T.gray, minWidth: 85 }}>{b.scheduled_date}</span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {b.title || b.keyword}
+                  </span>
+                  {b.pillar && <Badge color="purple">{b.pillar}</Badge>}
+                  <Badge color={StatusColor[b.status] || "gray"}>{b.status}</Badge>
+                  <Btn small onClick={() => openEdit(b)}>Edit</Btn>
+                  {b.status !== "frozen" && b.status !== "published" &&
+                    <Btn small variant="primary" onClick={() => freezeBlog(b.blog_id, "")}>Freeze</Btn>}
+                  {b.status === "frozen" &&
+                    <Btn small variant="success" onClick={() => publishBlog(b.blog_id)}>Publish</Btn>}
+                </div>
+              ))}
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* Tab: Upcoming queue */}
+      {tab === "queue" && (
+        <Card>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10 }}>Next 14 Days — Frozen & Scheduled</div>
+          {!queue?.length ? (
+            <div style={{ fontSize: 12, color: T.gray }}>Nothing scheduled yet. Freeze blogs to add them here.</div>
+          ) : queue.map((b, i) => (
+            <div key={b.blog_id} style={{ display: "flex", alignItems: "center", gap: 8,
+              padding: "7px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+              <span style={{ fontSize: 11, color: T.gray, minWidth: 85 }}>{b.scheduled_date}</span>
+              <span style={{ flex: 1 }}>{b.title || b.keyword}</span>
+              {b.pillar && <Badge color="purple">{b.pillar}</Badge>}
+              <Btn small variant="success" onClick={() => publishBlog(b.blog_id)}>Publish now</Btn>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* Tab: Generate batch */}
+      {tab === "generate" && (
+        <Card style={{ maxWidth: 480 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Generate Blog Batch</div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 11, fontWeight: 500, color: T.gray, display: "block", marginBottom: 4 }}>Pillar</label>
+            <input value={batchPillar} onChange={e => setBatchPillar(e.target.value)} placeholder="e.g. turmeric"
+              style={{ width: "100%", padding: "7px 10px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 8, fontSize: 12 }} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ fontSize: 11, fontWeight: 500, color: T.gray, display: "block", marginBottom: 4 }}>Count (max 20)</label>
+            <input type="number" value={batchCount} min={1} max={20} onChange={e => setBatchCount(parseInt(e.target.value) || 10)}
+              style={{ width: "100%", padding: "7px 10px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 8, fontSize: 12 }} />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Btn variant="primary" onClick={generateBatch} disabled={generating}>{generating ? "Generating..." : "Generate Batch"}</Btn>
+            {msg && <span style={{ fontSize: 11, color: T.teal }}>{msg}</span>}
+          </div>
+          <div style={{ marginTop: 16, fontSize: 11, color: T.gray }}>
+            Blogs will be generated in the background using your keyword list. Check the Calendar tab for progress.
+          </div>
+
+          {/* By-pillar stats */}
+          {pillars.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Pillar Status</div>
+              {pillars.map(p => {
+                const counts = stats?.by_pillar?.[p] || {}
+                return (
+                  <div key={p} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0",
+                    borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 11 }}>
+                    <span style={{ fontWeight: 500 }}>{p}</span>
+                    <span style={{ color: T.gray }}>
+                      <span style={{ color: T.teal }}>{counts.published || 0} pub</span>
+                      {" · "}{counts.frozen || 0} frozen
+                      {" · "}{(counts.draft || 0) + (counts.generating || 0)} draft
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Tab: Due today */}
+      {tab === "due" && (
+        <Card>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>Due Today</div>
+          {!dueToday?.length ? (
+            <div style={{ fontSize: 12, color: T.gray }}>No blogs due today.</div>
+          ) : dueToday.map(b => (
+            <div key={b.blog_id} style={{ display: "flex", alignItems: "center", gap: 8,
+              padding: "7px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+              <span style={{ flex: 1 }}>{b.title || b.keyword}</span>
+              {b.pillar && <Badge color="purple">{b.pillar}</Badge>}
+              <Btn small variant="success" onClick={() => publishBlog(b.blog_id)}>Publish now</Btn>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* Edit modal */}
+      {editBlog && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1000,
+          display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ background: "#fff", borderRadius: 12, padding: 24, width: "min(600px,95vw)", maxHeight: "85vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Edit Blog</div>
+              <Btn small onClick={() => setEditBlog(null)}>Close</Btn>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ fontSize: 11, fontWeight: 500, color: T.gray, display: "block", marginBottom: 4 }}>Title</label>
+              <input value={editBody.title || ""} onChange={e => setEditBody(b => ({...b, title: e.target.value}))}
+                style={{ width: "100%", padding: "7px 10px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 8, fontSize: 12 }} />
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, fontWeight: 500, color: T.gray, display: "block", marginBottom: 4 }}>Meta Description</label>
+              <textarea value={editBody.meta_desc || ""} onChange={e => setEditBody(b => ({...b, meta_desc: e.target.value}))} rows={2}
+                style={{ width: "100%", padding: "7px 10px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 8, fontSize: 12, resize: "vertical" }} />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn variant="primary" onClick={saveBlog}>Save</Btn>
+              <Btn onClick={() => setEditBlog(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAGE: SYSTEM GRAPH (D3 force-directed universe → pillar → cluster → keyword)
+// ─────────────────────────────────────────────────────────────────────────────
+import * as d3 from "d3"
+
+function SystemGraphPage() {
+  const { activeProject } = useStore()
+  const svgRef = useRef(null)
+  const [selected, setSelected] = useState(null)
+  const [filter, setFilter] = useState({ universe: true, pillar: true, cluster: true, keyword: true })
+  const [search, setSearch] = useState("")
+  const [pillarFilter, setPillarFilter] = useState("all")
+
+  const { data: graph, isLoading, refetch } = useQuery({
+    queryKey: ["graph", activeProject],
+    queryFn: () => api.get(`/api/graph/${activeProject}`),
+    enabled: !!activeProject,
+  })
+
+  const { data: graphStats } = useQuery({
+    queryKey: ["graph-stats", activeProject],
+    queryFn: () => api.get(`/api/graph/${activeProject}/stats`),
+    enabled: !!activeProject,
+  })
+
+  const invalidate = async () => {
+    await api.post(`/api/graph/${activeProject}/invalidate`, {})
+    refetch()
+  }
+
+  const NodeColor = {
+    universe: "#7F77DD", pillar: "#1D9E75", cluster: "#BA7517",
+    keyword: "#4A90D9", info_gap: "#E07070", product: "#E24B4A",
+  }
+  const EdgeColor = {
+    universe_pillar: "#1D9E75", pillar_cluster: "#BA7517",
+    cluster_keyword: "#4A90D9", pillar_keyword: "#4A90D9",
+    universe_keyword: "#7F77DD",
+  }
+  const StatusFill = {
+    published: "#639922", frozen: "#7F77DD", draft: "#aaa",
+    generating: "#BA7517", approved: "#1D9E75",
+  }
+
+  useEffect(() => {
+    if (!graph || !svgRef.current) return
+
+    const nodes = graph.nodes.filter(n => filter[n.type] !== false)
+    const nodeIds = new Set(nodes.map(n => n.id))
+    const links = graph.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
+
+    const pillarSet = new Set(nodes.filter(n => n.type === "pillar").map(n => n.label))
+
+    const filteredNodes = pillarFilter === "all"
+      ? nodes
+      : nodes.filter(n => {
+          if (n.type === "universe") return true
+          if (n.type === "pillar") return n.label === pillarFilter
+          // For clusters/keywords find their pillar via links
+          const parentEdge = links.find(e => e.target === n.id)
+          if (!parentEdge) return false
+          const parentNode = nodes.find(nd => nd.id === parentEdge.source)
+          if (!parentNode) return false
+          if (parentNode.type === "pillar") return parentNode.label === pillarFilter
+          const grandparentEdge = links.find(e => e.target === parentEdge.source)
+          const grandparent = grandparentEdge && nodes.find(nd => nd.id === grandparentEdge.source)
+          return grandparent?.label === pillarFilter
+        })
+
+    const filteredIds = new Set(filteredNodes.map(n => n.id))
+    const filteredLinks = links.filter(e => filteredIds.has(e.source) && filteredIds.has(e.target))
+
+    const svg = d3.select(svgRef.current)
+    svg.selectAll("*").remove()
+
+    const width = svgRef.current.clientWidth || 800
+    const height = 550
+
+    const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", e => g.attr("transform", e.transform))
+    svg.call(zoom)
+
+    const g = svg.append("g")
+
+    const simulation = d3.forceSimulation(filteredNodes)
+      .force("link", d3.forceLink(filteredLinks).id(d => d.id).distance(d => {
+        if (d.type === "universe_pillar") return 120
+        if (d.type === "pillar_cluster") return 80
+        return 50
+      }))
+      .force("charge", d3.forceManyBody().strength(-80))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collision", d3.forceCollide().radius(d => d.type === "universe" ? 30 : d.type === "pillar" ? 18 : 10))
+
+    const link = g.append("g").selectAll("line").data(filteredLinks).join("line")
+      .attr("stroke", d => EdgeColor[d.type] || "#ccc")
+      .attr("stroke-width", d => d.type === "universe_pillar" ? 2 : 1)
+      .attr("stroke-opacity", 0.5)
+
+    const node = g.append("g").selectAll("circle").data(filteredNodes).join("circle")
+      .attr("r", d => d.type === "universe" ? 22 : d.type === "pillar" ? 14 : d.type === "cluster" ? 10 : 6)
+      .attr("fill", d => {
+        if (d.type === "keyword" && d.status) return StatusFill[d.status] || NodeColor.keyword
+        return NodeColor[d.type] || "#999"
+      })
+      .attr("stroke", d => search && d.label.toLowerCase().includes(search.toLowerCase()) ? "#FF6B35" : "none")
+      .attr("stroke-width", 3)
+      .attr("opacity", d => search && !d.label.toLowerCase().includes(search.toLowerCase()) ? 0.3 : 1)
+      .style("cursor", "pointer")
+      .call(d3.drag()
+        .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y })
+        .on("drag", (e, d) => { d.fx=e.x; d.fy=e.y })
+        .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx=null; d.fy=null })
+      )
+      .on("click", (e, d) => setSelected(d))
+
+    const label = g.append("g").selectAll("text").data(filteredNodes.filter(n => n.type !== "keyword")).join("text")
+      .text(d => d.label.length > 16 ? d.label.slice(0,16)+"…" : d.label)
+      .attr("font-size", d => d.type === "universe" ? 11 : d.type === "pillar" ? 10 : 9)
+      .attr("fill", "#333")
+      .attr("text-anchor", "middle")
+      .attr("dy", d => -(d.type === "universe" ? 26 : d.type === "pillar" ? 18 : 14))
+      .style("pointer-events", "none")
+
+    simulation.on("tick", () => {
+      link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
+          .attr("x2", d => d.target.x).attr("y2", d => d.target.y)
+      node.attr("cx", d => d.x).attr("cy", d => d.y)
+      label.attr("x", d => d.x).attr("y", d => d.y)
+    })
+
+    return () => simulation.stop()
+  }, [graph, filter, search, pillarFilter])
+
+  const pillars = graph?.nodes.filter(n => n.type === "pillar").map(n => n.label) || []
+
+  if (!activeProject) return <div style={{ color: T.gray, padding: 20 }}>Select a project first.</div>
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>System Graph</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {graphStats && (
+            <span style={{ fontSize: 11, color: T.gray }}>
+              {graphStats.node_count} nodes · {graphStats.edge_count} edges
+            </span>
+          )}
+          <Btn small onClick={invalidate}>Refresh</Btn>
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search keyword..."
+          style={{ padding: "5px 10px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 8, fontSize: 12, width: 180 }} />
+        <select value={pillarFilter} onChange={e => setPillarFilter(e.target.value)}
+          style={{ padding: "5px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12 }}>
+          <option value="all">All pillars</option>
+          {pillars.map(p => <option key={p} value={p}>{p}</option>)}
+        </select>
+        {Object.entries(NodeColor).map(([type, color]) => (
+          <label key={type} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, cursor: "pointer" }}>
+            <input type="checkbox" checked={filter[type] !== false}
+              onChange={e => setFilter(f => ({...f, [type]: e.target.checked}))} />
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" }}/>
+            {type}
+          </label>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 12 }}>
+        {/* Graph canvas */}
+        <div style={{ flex: 1, border: "0.5px solid rgba(0,0,0,0.1)", borderRadius: 12, overflow: "hidden", background: "#fafafa" }}>
+          {isLoading ? (
+            <div style={{ height: 550, display: "flex", alignItems: "center", justifyContent: "center", color: T.gray }}>
+              Loading graph...
+            </div>
+          ) : !graph?.nodes?.length ? (
+            <div style={{ height: 550, display: "flex", alignItems: "center", justifyContent: "center", color: T.gray, textAlign: "center" }}>
+              No graph data yet.<br/>
+              <span style={{ fontSize: 11 }}>Run a keyword pipeline to build the graph.</span>
+            </div>
+          ) : (
+            <svg ref={svgRef} width="100%" height="550" />
+          )}
+        </div>
+
+        {/* Selected node panel */}
+        {selected && (
+          <div style={{ width: 220, flexShrink: 0 }}>
+            <Card>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <Badge color={selected.type === "keyword" ? "purple" : selected.type === "pillar" ? "teal" : "amber"}>
+                  {selected.type}
+                </Badge>
+                <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", cursor: "pointer", color: T.gray }}>×</button>
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, wordBreak: "break-word" }}>{selected.label}</div>
+              {selected.status && <div style={{ fontSize: 11, color: T.gray, marginBottom: 4 }}>Status: {selected.status}</div>}
+              {selected.rank != null && <div style={{ fontSize: 11, color: T.gray, marginBottom: 4 }}>Rank: #{selected.rank}</div>}
+              {selected.word_count > 0 && <div style={{ fontSize: 11, color: T.gray, marginBottom: 4 }}>Words: {selected.word_count}</div>}
+              {selected.seo_score > 0 && <div style={{ fontSize: 11, color: T.gray }}>SEO: {selected.seo_score?.toFixed(1)}</div>}
+              {selected.blog_count != null && <div style={{ fontSize: 11, color: T.teal }}>Blogs: {selected.blog_count}</div>}
+            </Card>
+
+            {/* Legend */}
+            <Card style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8 }}>Legend</div>
+              {Object.entries(NodeColor).map(([t, c]) => (
+                <div key={t} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: c, flexShrink: 0 }}/>
+                  <span style={{ fontSize: 10 }}>{t}</span>
+                </div>
+              ))}
+              <div style={{ borderTop: "0.5px solid rgba(0,0,0,0.08)", marginTop: 8, paddingTop: 8, fontSize: 10, color: T.gray }}>
+                Node color by status:<br/>
+                {Object.entries(StatusFill).map(([s, c]) => (
+                  <div key={s} style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: c }}/>
+                    {s}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENHANCED RANKINGS PAGE — trend chart + alerts + predictions
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NAV = [
+  { id: "dashboard",    label: "Dashboard" },
+  { id: "strategy",     label: "Strategy" },
+  { id: "keywords",     label: "Keywords" },
+  { id: "content",      label: "Content" },
+  { id: "blogs",        label: "Content Calendar" },
+  { id: "graph",        label: "System Graph" },
+  { id: "calendar",     label: "Calendar" },
+  { id: "seo-checker",  label: "SEO Checker" },
+  { id: "quality",      label: "Quality" },
+  { id: "rsd",          label: "Research & Dev" },
+  { id: "bug-fixer",    label: "Bug Fixer" },
+  { id: "queue",        label: "Queue" },
+  { id: "errors",       label: "Errors" },
       <div style={{ flex: 1, overflow: "auto" }}>
         {NAV.map(n => (
           <button key={n.id} onClick={() => setPage(n.id)} style={{
@@ -2117,6 +3321,153 @@ function BugFixerPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUEUE DASHBOARD PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+
+function QueueDashboard() {
+  const [metrics, setMetrics] = useState(null)
+  const [jobs, setJobs] = useState([])
+  const [loading, setLoading] = useState(true)
+  const { token } = useStore()
+
+  const apiBase = API || ""
+
+  const fetchData = async () => {
+    setLoading(true)
+    try {
+      const m = await (await fetch(`${apiBase}/api/queue/metrics`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).json()
+      const j = await (await fetch(`${apiBase}/api/queue/jobs`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).json()
+      setMetrics(m)
+      setJobs(j)
+    } catch (e) {
+      console.error("QueueDashboard fetch error", e)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchData()
+    const interval = setInterval(fetchData, 3000)
+    return () => clearInterval(interval)
+  }, [token])
+
+  const action = async (jobId, type) => {
+    await fetch(`${apiBase}/api/jobs/${jobId}/${type}`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    fetchData()
+  }
+
+  return (
+    <div className="p-6 space-y-6">
+      <h1 className="text-2xl font-bold">Queue Dashboard</h1>
+      {loading && <p>Loading...</p>}
+
+      {metrics && (
+        <div className="grid grid-cols-6 gap-4">
+          {Object.entries(metrics).map(([k, v]) => (
+            <div key={k} className="p-4 rounded-2xl shadow bg-white">
+              <div className="text-sm text-gray-500">{k}</div>
+              <div className="text-xl font-bold">{v}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full border">
+          <thead>
+            <tr className="bg-gray-100">
+              <th className="p-2">ID</th>
+              <th>Status</th>
+              <th>Control</th>
+              <th>Step</th>
+              <th>Retries</th>
+              <th>Updated</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {jobs.map((job) => (
+              <tr key={job.id} className="border-t">
+                <td className="p-2">{job.id}</td>
+                <td>{job.status}</td>
+                <td>{job.control_state}</td>
+                <td>{job.last_completed_step}</td>
+                <td>{job.retry_count}/{job.max_retries}</td>
+                <td>{job.updated_at}</td>
+                <td className="space-x-2">
+                  <button onClick={() => action(job.id, "pause")} className="px-2 py-1 bg-yellow-200 rounded">Pause</button>
+                  <button onClick={() => action(job.id, "resume")} className="px-2 py-1 bg-green-200 rounded">Resume</button>
+                  <button onClick={() => action(job.id, "cancel")} className="px-2 py-1 bg-red-200 rounded">Cancel</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+
+
+function ErrorsDashboard() {
+  const [errors, setErrors] = useState([])
+  const [loading, setLoading] = useState(true)
+  const { token } = useStore()
+  const apiBase = API || ""
+
+  const fetchErrors = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch(`${apiBase}/api/errors/realtime?limit=200`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      const json = await res.json()
+      setErrors(json.errors || [])
+    } catch (err) {
+      console.error('fetchErrors', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchErrors()
+    const interval = setInterval(fetchErrors, 5000)
+    return () => clearInterval(interval)
+  }, [token])
+
+  return (
+    <div className="p-6 space-y-4">
+      <h1 className="text-2xl font-bold">Error Log</h1>
+      {loading && <p>Loading...</p>}
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr>
+            <th className="p-2 border">Time</th>
+            <th className="p-2 border">Path</th>
+            <th className="p-2 border">Type</th>
+            <th className="p-2 border">Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          {errors.map((e, idx) => (
+            <tr key={idx} className="border-t">
+              <td className="p-2 border">{new Date(e.timestamp).toLocaleString()}</td>
+              <td className="p-2 border">{e.path}</td>
+              <td className="p-2 border">{e.type}</td>
+              <td className="p-2 border" style={{ color: '#c53030' }}>{e.error}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ROOT APP
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2154,13 +3505,18 @@ function App() {
   const pages = {
     dashboard:    <DashboardPage/>,
     "keywords":   <KeywordsUnifiedPage/>,
+    strategy:     <StrategyPage projectId={activeProject} setPage={setPage}/>,
     content:      <ContentPage/>,
+    blogs:        <BlogCalendarPage/>,
+    graph:        <SystemGraphPage/>,
     calendar:     <CalendarPage/>,
     "seo-checker":<SEOCheckerPage/>,
     quality:      <QualityDashboard/>,
     "rsd":        <RSDPage/>,
     "bug-fixer":  <BugFixerPage/>,
     "new-project":<NewProjectPage/>,
+    queue:        <QueueDashboard/>,
+    errors:       <ErrorsDashboard/>,
     settings:     <SettingsPage/>,
   }
 
@@ -2189,6 +3545,7 @@ function App() {
 export default function Root() {
   return (
     <QueryClientProvider client={qc}>
+      <Notification />
       <App/>
     </QueryClientProvider>
   )

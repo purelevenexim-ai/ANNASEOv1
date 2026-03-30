@@ -42,7 +42,7 @@ ADD NEW UNIVERSE LATER:
 """
 
 import os, json, re, time, hashlib, logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -90,7 +90,7 @@ class Universe:
     blog_suggestions:List[dict] = field(default_factory=list)
     strategy:        dict = field(default_factory=dict)
     confirmed_at:    Optional[str] = None
-    added_at:        str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    added_at:        str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass
@@ -116,12 +116,12 @@ class PipelineJob:
     console_logs:    List[dict] = field(default_factory=list)
     final_strategy:  dict = field(default_factory=dict)
     content_duration_years: Optional[float] = None
-    created_at:      str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at:      str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def log(self, engine: str, level: str, message: str, data: dict = None):
         """Add a console log entry. Streamed to frontend via SSE."""
         entry = {
-            "ts":      datetime.utcnow().strftime("%H:%M:%S"),
+            "ts":      datetime.now(timezone.utc).strftime("%H:%M:%S"),
             "engine":  engine,
             "level":   level,    # success|info|warning|error|data|handoff|critical
             "message": message,
@@ -158,6 +158,27 @@ class AI:
     _last_gemini = 0.0
 
     @staticmethod
+    def _extract_ollama_text(data: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        if isinstance(data.get("response"), str) and data.get("response").strip():
+            return data["response"].strip()
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
+            return msg["content"].strip()
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
+                    return first["message"]["content"].strip()
+                if isinstance(first.get("text"), str):
+                    return first["text"].strip()
+        if isinstance(data.get("text"), str):
+            return data["text"].strip()
+        return ""
+
+    @staticmethod
     def deepseek(prompt: str, system: str = "You are an SEO expert.",
                   temperature: float = 0.1) -> str:
         try:
@@ -168,7 +189,10 @@ class AI:
                              {"role":"user","content":prompt}]
             }, timeout=120)
             r.raise_for_status()
-            t = r.json()["message"]["content"].strip()
+            data = r.json()
+            t = AI._extract_ollama_text(data)
+            if not t:
+                t = (data.get("response") or data.get("text") or "").strip()
             return re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"DeepSeek error: {e}")

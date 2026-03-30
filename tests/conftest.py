@@ -53,6 +53,17 @@ def disable_ai_calls(monkeypatch):
 
     monkeypatch.setattr(AI, "deepseek", staticmethod(fake_deepseek))
     monkeypatch.setattr(AI, "gemini",   staticmethod(fake_gemini))
+    # Stub Claude to return an empty JSON string and zero tokens by default.
+    def fake_claude(prompt: str, system: str, max_tokens: int = 4096):
+        return ('{}', 0)
+    monkeypatch.setattr(AI, "claude", staticmethod(fake_claude))
+
+    # Embed batch deterministic stub: zero-vectors (384-dim) to keep downstream
+    # numeric code deterministic and fast in tests.
+    def fake_embed_batch(texts):
+        dim = 384
+        return [[0.0] * dim for _ in texts]
+    monkeypatch.setattr(AI, "embed_batch", classmethod(lambda cls, texts: fake_embed_batch(texts)))
 
 
 @pytest.fixture(autouse=True)

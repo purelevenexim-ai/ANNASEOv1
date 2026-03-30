@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Step 3 Design</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f6f5f0;color:#1a1917;font-size:13px}
+  .page{max-width:960px;margin:0 auto;padding:16px}
+  .card{background:#fff;border:1px solid #e0ddd8;border-radius:10px;overflow:hidden}
+  .badge{display:inline-flex;align-items:center;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600;white-space:nowrap}
+  .btn{display:inline-flex;align-items:center;gap:4px;padding:5px 11px;border-radius:6px;border:1px solid #e0ddd8;background:#fff;font-size:11px;color:#3d3d3a;cursor:pointer;white-space:nowrap}
+  .btn-teal{background:#1D9E75;border-color:#1D9E75;color:#fff}
+  .btn-ghost{background:transparent;border-color:#e0ddd8;color:#6b6a66}
+  .btn-danger{background:#fef2f2;border-color:#fca5a5;color:#dc2626}
+  .btn-sm{padding:3px 8px;font-size:10px;border-radius:5px}
+  select,input{font-family:inherit;font-size:12px;border:1px solid #e0ddd8;border-radius:6px;padding:4px 8px;background:#fff;color:#1a1917;outline:none}
+  input[type=checkbox]{width:13px;height:13px;cursor:pointer}
+  th{font-size:11px;font-weight:600;color:#6b6a66;text-align:left;padding:8px 10px;white-space:nowrap}
+  td{padding:7px 10px;border-bottom:1px solid #f0ede8;vertical-align:middle}
+  tr:hover td{background:#fafaf9}
+  tr.selected td{background:#f0faf7}
+  .score-bar{height:6px;border-radius:3px;background:#e5e7eb;overflow:hidden}
+  .score-fill{height:100%;border-radius:3px}
+  .kd-easy{color:#16a34a;font-weight:700}
+  .kd-med{color:#d97706;font-weight:700}
+  .kd-hard{color:#dc2626;font-weight:700}
+  .pill{display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:500}
+  .floating-toolbar{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1a1917;border-radius:10px;padding:8px 16px;display:flex;align-items:center;gap:10px;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:100}
+  .ft-btn{padding:5px 12px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;border:none}
+  .tooltip{position:relative}
+  .tooltip:hover::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);background:#1a1917;color:#fff;font-size:10px;padding:3px 7px;border-radius:4px;white-space:nowrap;pointer-events:none}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <div>
+      <div style="font-size:16px;font-weight:700;margin-bottom:2px">Step 3 — Unified Review</div>
+      <div style="font-size:12px;color:#6b6a66">Session: kis_proj_530829637b_… · 200 keywords from Method 1 + 2 merged</div>
+    </div>
+    <button class="btn btn-teal" onclick="scoreRow()">⚡ Score Keywords</button>
+  </div>
+
+  <!-- Score summary cards -->
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:12px">
+    <div class="card" style="padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#1a1917">200</div>
+      <div style="font-size:10px;color:#6b6a66">Total</div>
+    </div>
+    <div class="card" style="padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#d97706">200</div>
+      <div style="font-size:10px;color:#6b6a66">Pending</div>
+    </div>
+    <div class="card" style="padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#16a34a">0</div>
+      <div style="font-size:10px;color:#6b6a66">Accepted</div>
+    </div>
+    <div class="card" style="padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#dc2626">0</div>
+      <div style="font-size:10px;color:#6b6a66">Rejected</div>
+    </div>
+    <div class="card" style="padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#1D9E75">42</div>
+      <div style="font-size:10px;color:#6b6a66">Quick Wins</div>
+      <div style="font-size:9px;color:#1D9E75">KD &lt;20 · Vol&gt;100</div>
+    </div>
+    <div class="card" style="padding:10px;text-align:center">
+      <div style="font-size:22px;font-weight:800;color:#7F77DD">34</div>
+      <div style="font-size:10px;color:#6b6a66">Avg KD</div>
+      <div style="font-size:9px;color:#16a34a">Easy territory</div>
+    </div>
+  </div>
+
+  <!-- Main layout: sidebar + table -->
+  <div style="display:flex;gap:10px">
+
+    <!-- LEFT: Pillar sidebar -->
+    <div class="card" style="width:160px;flex-shrink:0;align-self:start">
+      <div style="padding:8px 10px;border-bottom:1px solid #f0ede8;font-size:10px;font-weight:700;color:#6b6a66;text-transform:uppercase;letter-spacing:.05em">Pillars</div>
+      <div id="pillar-all" onclick="selectPillar('all')" style="padding:7px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:#f0faf7;border-left:3px solid #1D9E75">
+        <span style="font-size:12px;font-weight:600;color:#1D9E75">All pillars</span>
+        <span style="font-size:10px;color:#6b6a66">200</span>
+      </div>
+      <div id="pillar-cinnamon" onclick="selectPillar('cinnamon')" style="padding:7px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-left:3px solid transparent">
+        <div>
+          <div style="font-size:12px;color:#1a1917">cinnamon</div>
+          <div style="font-size:9px;color:#1D9E75;margin-top:1px">Opp: 72 · Avg KD: 34</div>
+        </div>
+        <span style="font-size:10px;color:#6b6a66">38</span>
+      </div>
+      <div id="pillar-turmeric" onclick="selectPillar('turmeric')" style="padding:7px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-left:3px solid transparent">
+        <div>
+          <div style="font-size:12px;color:#1a1917">turmeric</div>
+          <div style="font-size:9px;color:#1D9E75;margin-top:1px">Opp: 68 · Avg KD: 29</div>
+        </div>
+        <span style="font-size:10px;color:#6b6a66">38</span>
+      </div>
+      <div id="pillar-clove" onclick="selectPillar('clove')" style="padding:7px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;border-left:3px solid transparent">
+        <div>
+          <div style="font-size:12px;color:#1a1917">clove</div>
+          <div style="font-size:9px;color:#d97706;margin-top:1px">Opp: 51 · Avg KD: 48</div>
+        </div>
+        <span style="font-size:10px;color:#6b6a66">38</span>
+      </div>
+      <div style="padding:7px 10px;color:#9a9891;font-size:11px;font-style:italic">+2 more…</div>
+      <!-- KD legend -->
+      <div style="padding:8px 10px;border-top:1px solid #f0ede8">
+        <div style="font-size:9px;font-weight:700;color:#6b6a66;text-transform:uppercase;margin-bottom:5px">KD Legend</div>
+        <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+          <div style="width:8px;height:8px;border-radius:2px;background:#16a34a;flex-shrink:0"></div>
+          <span style="font-size:10px;color:#6b6a66">0–20 Easy</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
+          <div style="width:8px;height:8px;border-radius:2px;background:#d97706;flex-shrink:0"></div>
+          <span style="font-size:10px;color:#6b6a66">21–50 Medium</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:5px">
+          <div style="width:8px;height:8px;border-radius:2px;background:#dc2626;flex-shrink:0"></div>
+          <span style="font-size:10px;color:#6b6a66">51+ Hard</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Table area -->
+    <div style="flex:1;min-width:0">
+
+      <!-- Toolbar -->
+      <div class="card" style="padding:8px 10px;margin-bottom:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="checkbox" id="selectAll" onchange="toggleAll(this)" title="Select all visible">
+        <span id="selCount" style="font-size:11px;color:#6b6a66;margin-right:4px">0 selected</span>
+
+        <div style="height:16px;width:1px;background:#e0ddd8;margin:0 2px"></div>
+
+        <!-- Bulk action buttons — shown when items selected -->
+        <button class="btn btn-sm tooltip" data-tip="Accept selected" onclick="bulkAction('accept')" style="background:#f0faf7;border-color:#a7f3d0;color:#16a34a">✓ Accept</button>
+        <button class="btn btn-sm tooltip" data-tip="Reject selected" onclick="bulkAction('reject')" style="background:#fef2f2;border-color:#fca5a5;color:#dc2626">✕ Reject</button>
+        <button class="btn btn-sm tooltip" data-tip="Edit keyword text" onclick="bulkAction('edit')" style="color:#7F77DD;border-color:#c4b5fd">✎ Edit</button>
+        <button class="btn btn-sm tooltip" data-tip="Move to different pillar" onclick="bulkAction('move')" style="color:#d97706;border-color:#fcd34d">⇄ Move Pillar</button>
+        <button class="btn btn-sm tooltip" onclick="bulkAction('delete')" data-tip="Delete permanently" style="color:#dc2626;border-color:#fca5a5">🗑 Delete</button>
+
+        <div style="height:16px;width:1px;background:#e0ddd8;margin:0 2px;margin-left:auto"></div>
+
+        <!-- Filters -->
+        <select style="font-size:11px;padding:3px 7px">
+          <option>All Status</option>
+          <option>Pending</option>
+          <option>Accepted</option>
+          <option>Rejected</option>
+        </select>
+        <select style="font-size:11px;padding:3px 7px">
+          <option>All Intent</option>
+          <option>Transactional</option>
+          <option>Commercial</option>
+          <option>Informational</option>
+          <option>Navigational</option>
+        </select>
+        <select style="font-size:11px;padding:3px 7px" title="Sort by">
+          <option>Sort: Opp Score ↓</option>
+          <option>Sort: KD ↑ (easiest first)</option>
+          <option>Sort: Volume ↓</option>
+          <option>Sort: Keyword A→Z</option>
+        </select>
+      </div>
+
+      <!-- Table -->
+      <div class="card">
+        <table style="width:100%;border-collapse:collapse">
+          <thead style="background:#fafaf9;border-bottom:1px solid #e0ddd8">
+            <tr>
+              <th style="width:28px;padding:8px 10px"><input type="checkbox" id="thCheck" onchange="toggleAll(this)"></th>
+              <th>Keyword</th>
+              <th>Pillar</th>
+              <th>Source</th>
+              <th>Intent</th>
+              <th style="cursor:pointer" title="Keyword Difficulty — lower is easier to rank">KD <span style="color:#d97706">↑</span></th>
+              <th style="cursor:pointer" title="Estimated monthly search volume">Vol <span style="color:#7F77DD">↓</span></th>
+              <th>
+                <span class="tooltip" data-tip="Volume × (1-KD) × Relevance ÷ 100">Opp Score ↓</span>
+              </th>
+              <th style="width:80px">Status</th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="kwTable">
+            <!-- rows rendered by JS -->
+          </tbody>
+        </table>
+        <!-- Pagination -->
+        <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-top:1px solid #f0ede8;background:#fafaf9">
+          <button class="btn btn-ghost btn-sm">← Prev</button>
+          <span style="font-size:11px;color:#6b6a66">Page 1 of 5 · 200 keywords</span>
+          <button class="btn btn-sm" style="background:#1D9E75;color:#fff;border-color:#1D9E75">Next →</button>
+          <span style="margin-left:auto;font-size:11px;color:#9a9891">Showing 40 per page</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Score engine status banner -->
+  <div id="scoreBanner" style="display:none;margin-top:10px;padding:10px 14px;background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;font-size:12px;color:#92400e">
+    <b>⚡ Scoring in progress…</b> Using: Google Autosuggest rank · SERP result count · Domain authority proxy · Exact-match title count · DataForSEO (if configured)
+    <div style="margin-top:6px;height:4px;background:#fef3c7;border-radius:2px;overflow:hidden">
+      <div id="scoreProgress" style="height:100%;background:#d97706;width:0%;border-radius:2px;transition:width .3s"></div>
+    </div>
+  </div>
+
+  <!-- Continue button -->
+  <div style="display:flex;justify-content:space-between;margin-top:12px">
+    <button class="btn btn-ghost">← Back</button>
+    <button class="btn btn-teal" style="padding:8px 20px;font-size:13px;font-weight:600">Continue to AI Check → <span style="font-size:10px;opacity:.8;margin-left:4px">(0 accepted)</span></button>
+  </div>
+
+</div>
+
+<!-- Score engine info panel (shown when clicking ⚡) -->
+<div id="scorePanel" style="display:none;position:fixed;top:0;right:0;width:320px;height:100vh;background:#fff;border-left:1px solid #e0ddd8;box-shadow:-4px 0 20px rgba(0,0,0,.1);z-index:200;overflow-y:auto;padding:16px">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <b style="font-size:14px">Keyword Score Engine</b>
+    <button onclick="document.getElementById('scorePanel').style.display='none'" style="background:none;border:none;font-size:18px;cursor:pointer;color:#6b6a66">✕</button>
+  </div>
+  <div style="font-size:11px;color:#6b6a66;margin-bottom:12px">Scores each keyword across 4 signals. Final score = weighted average.</div>
+
+  <div style="border:1px solid #e0ddd8;border-radius:8px;overflow:hidden;margin-bottom:10px">
+    <div style="padding:8px 12px;background:#fafaf9;font-size:10px;font-weight:700;color:#6b6a66;text-transform:uppercase;border-bottom:1px solid #e0ddd8">Signal Weights</div>
+    <div style="padding:8px 12px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px">
+        <span>SERP result count <span style="color:#9a9891">(competition proxy)</span></span>
+        <span style="font-weight:600;color:#7F77DD">25%</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px">
+        <span>Autosuggest position <span style="color:#9a9891">(volume proxy)</span></span>
+        <span style="font-weight:600;color:#7F77DD">30%</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px">
+        <span>Big-brand domain count <span style="color:#9a9891">(authority proxy)</span></span>
+        <span style="font-weight:600;color:#7F77DD">25%</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px">
+        <span>Exact-match title count <span style="color:#9a9891">(optimization proxy)</span></span>
+        <span style="font-weight:600;color:#7F77DD">20%</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="border:1px solid #a7f3d0;border-radius:8px;padding:10px 12px;background:#f0faf7;font-size:11px;color:#065f46;margin-bottom:10px">
+    <b>DataForSEO</b> not configured. Using free signals only.<br>
+    <span style="color:#6b6a66">Set DATAFORSEO_LOGIN + DATAFORSEO_PASSWORD in .env for exact volume + KD.</span>
+  </div>
+
+  <div style="font-size:11px;color:#6b6a66;margin-bottom:6px;font-weight:600">Example: "buy organic cinnamon"</div>
+  <div style="border:1px solid #e0ddd8;border-radius:8px;overflow:hidden;font-size:11px">
+    <div style="display:grid;grid-template-columns:1fr 50px 50px;padding:5px 10px;background:#fafaf9;font-size:10px;font-weight:600;color:#6b6a66;border-bottom:1px solid #e0ddd8"><div>Signal</div><div>Raw</div><div>Score</div></div>
+    <div style="display:grid;grid-template-columns:1fr 50px 50px;padding:5px 10px;border-bottom:1px solid #f0ede8"><div>SERP results</div><div style="color:#9a9891">2.1M</div><div class="kd-easy">72</div></div>
+    <div style="display:grid;grid-template-columns:1fr 50px 50px;padding:5px 10px;border-bottom:1px solid #f0ede8"><div>Autosuggest pos.</div><div style="color:#9a9891">#3</div><div style="color:#1D9E75;font-weight:700">85</div></div>
+    <div style="display:grid;grid-template-columns:1fr 50px 50px;padding:5px 10px;border-bottom:1px solid #f0ede8"><div>Big brands top-10</div><div style="color:#9a9891">1</div><div class="kd-easy">78</div></div>
+    <div style="display:grid;grid-template-columns:1fr 50px 50px;padding:5px 10px;border-bottom:1px solid #f0ede8"><div>Exact title match</div><div style="color:#9a9891">3</div><div class="kd-med">52</div></div>
+    <div style="display:grid;grid-template-columns:1fr 50px 50px;padding:5px 10px;background:#f0faf7;font-weight:700"><div>Final Opp Score</div><div></div><div style="color:#1D9E75">79</div></div>
+  </div>
+</div>
+
+<script>
+const KW_DATA = [
+  {id:'k1',kw:'buy organic cinnamon',pillar:'cinnamon',source:'User×',intent:'transactional',kd:18,vol:720,opp:88,status:'pending',srcColor:'#EDE9FE',srcText:'#7c3aed'},
+  {id:'k2',kw:'cinnamon price kerala',pillar:'cinnamon',source:'User×',intent:'commercial',kd:22,vol:480,opp:81,status:'pending',srcColor:'#EDE9FE',srcText:'#7c3aed'},
+  {id:'k3',kw:'organic cinnamon sticks',pillar:'cinnamon',source:'Suggest',intent:'transactional',kd:31,vol:390,opp:74,status:'pending',srcColor:'#dbeafe',srcText:'#1d4ed8'},
+  {id:'k4',kw:'turmeric powder online',pillar:'turmeric',source:'User×',intent:'transactional',kd:15,vol:1200,opp:92,status:'pending',srcColor:'#EDE9FE',srcText:'#7c3aed'},
+  {id:'k5',kw:'best turmeric brand india',pillar:'turmeric',source:'Suggest',intent:'commercial',kd:28,vol:640,opp:79,status:'accepted',srcColor:'#dbeafe',srcText:'#1d4ed8'},
+  {id:'k6',kw:'clove spices wholesale',pillar:'clove',source:'Gap',intent:'transactional',kd:44,vol:320,opp:58,status:'pending',srcColor:'#fef9c3',srcText:'#a16207'},
+  {id:'k7',kw:'kerala spices export',pillar:'clove',source:'Site',intent:'informational',kd:19,vol:520,opp:76,status:'pending',srcColor:'#d1fae5',srcText:'#065f46'},
+  {id:'k8',kw:'turmeric health benefits',pillar:'turmeric',source:'Template',intent:'informational',kd:62,vol:8200,opp:42,status:'rejected',srcColor:'#f3f4f6',srcText:'#6b7280'},
+];
+
+let selected = new Set();
+
+function renderTable(data) {
+  const tbody = document.getElementById('kwTable');
+  tbody.innerHTML = '';
+  data.forEach(kw => {
+    const isSelected = selected.has(kw.id);
+    const statusColor = kw.status==='accepted'?'#16a34a':kw.status==='rejected'?'#dc2626':'#d97706';
+    const statusBg = kw.status==='accepted'?'#f0faf7':kw.status==='rejected'?'#fef2f2':'#fffbeb';
+    const kdClass = kw.kd<=20?'kd-easy':kw.kd<=50?'kd-med':'kd-hard';
+    const volColor = kw.vol>=500?'#7F77DD':kw.vol>=200?'#1D9E75':'#9a9891';
+    const oppW = Math.round(kw.opp * 0.7);
+    const oppColor = kw.opp>=75?'#1D9E75':kw.opp>=50?'#d97706':'#dc2626';
+    const tr = document.createElement('tr');
+    if(isSelected) tr.classList.add('selected');
+    tr.innerHTML = `
+      <td style="width:28px"><input type="checkbox" ${isSelected?'checked':''} onchange="toggleRow('${kw.id}',this)"></td>
+      <td style="font-size:12px;font-weight:500">${kw.kw}</td>
+      <td><span style="font-size:11px;color:#1D9E75;font-weight:600">${kw.pillar}</span></td>
+      <td><span class="pill" style="background:${kw.srcColor};color:${kw.srcText}">${kw.source}</span></td>
+      <td><span class="pill" style="background:${kw.intent==='transactional'?'#dbeafe':kw.intent==='commercial'?'#fef9c3':kw.intent==='informational'?'#f3f4f6':'#ede9fe'};color:${kw.intent==='transactional'?'#1d4ed8':kw.intent==='commercial'?'#a16207':kw.intent==='informational'?'#6b7280':'#7c3aed'}">${kw.intent.substring(0,6)}.</span></td>
+      <td><span class="${kdClass}">${kw.kd}</span></td>
+      <td style="font-size:12px;color:${volColor};font-weight:600">${kw.vol>=1000?(kw.vol/1000).toFixed(1)+'K':kw.vol}</td>
+      <td>
+        <div style="display:flex;align-items:center;gap:5px">
+          <div class="score-bar" style="width:55px"><div class="score-fill" style="width:${oppW}%;background:${oppColor}"></div></div>
+          <span style="font-size:11px;font-weight:700;color:${oppColor};min-width:24px">${kw.opp}</span>
+        </div>
+      </td>
+      <td><span class="pill" style="background:${statusBg};color:${statusColor}">${kw.status}</span></td>
+      <td>
+        <div style="display:flex;gap:3px">
+          ${kw.status!=='accepted'?`<button class="btn btn-sm" style="background:#f0faf7;border-color:#a7f3d0;color:#16a34a" onclick="rowAction('${kw.id}','accept')">✓</button>`:''}
+          ${kw.status!=='rejected'?`<button class="btn btn-sm" style="background:#fef2f2;border-color:#fca5a5;color:#dc2626" onclick="rowAction('${kw.id}','reject')">✕</button>`:''}
+        </div>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+  updateSelCount();
+}
+
+function toggleRow(id, cb) {
+  if(cb.checked) selected.add(id); else selected.delete(id);
+  updateSelCount();
+  renderTable(KW_DATA);
+}
+
+function toggleAll(cb) {
+  KW_DATA.forEach(kw => cb.checked ? selected.add(kw.id) : selected.delete(kw.id));
+  renderTable(KW_DATA);
+}
+
+function updateSelCount() {
+  document.getElementById('selCount').textContent = selected.size > 0 ? `${selected.size} selected` : '0 selected';
+}
+
+function rowAction(id, action) {
+  const kw = KW_DATA.find(k=>k.id===id);
+  if(kw) kw.status = action==='accept'?'accepted':'rejected';
+  renderTable(KW_DATA);
+}
+
+function bulkAction(action) {
+  if(selected.size===0){alert('Select keywords first.');return;}
+  if(action==='delete'){if(!confirm(`Delete ${selected.size} keywords permanently?`))return;}
+  if(action==='accept'||action==='reject'){
+    KW_DATA.forEach(kw=>{if(selected.has(kw.id))kw.status=action==='accept'?'accepted':'rejected';});
+  }
+  if(action==='move'){alert('Move to pillar: assign dialog (coming in implementation)');}
+  if(action==='edit'){alert('Inline edit dialog for selected keywords (coming in implementation)');}
+  if(action==='delete'){KW_DATA.splice(0,KW_DATA.length,...KW_DATA.filter(k=>!selected.has(k.id)));selected.clear();}
+  renderTable(KW_DATA);
+}
+
+function selectPillar(p) {
+  document.querySelectorAll('[id^="pillar-"]').forEach(el=>{
+    el.style.background='';el.style.borderLeft='3px solid transparent';
+  });
+  const el = document.getElementById('pillar-'+p);
+  if(el){el.style.background='#f0faf7';el.style.borderLeft='3px solid #1D9E75';}
+}
+
+function scoreRow() {
+  const panel = document.getElementById('scorePanel');
+  panel.style.display = panel.style.display==='none'?'block':'none';
+  if(panel.style.display==='block'){
+    const banner = document.getElementById('scoreBanner');
+    banner.style.display = 'block';
+    let w = 0;
+    const prog = document.getElementById('scoreProgress');
+    const iv = setInterval(()=>{
+      w += Math.random()*8+2;
+      prog.style.width = Math.min(w,100)+'%';
+      if(w>=100){clearInterval(iv);setTimeout(()=>{banner.style.display='none';},1500);}
+    },200);
+  }
+}
+
+renderTable(KW_DATA);
+</script>
+</body>
+</html>

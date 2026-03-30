@@ -26,7 +26,7 @@ AI routing:
 """
 
 import os, json, re, time, logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -93,6 +93,8 @@ class Cfg:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
     GEMINI_RATE    = float(os.getenv("GEMINI_RATE", "4.0"))
+    GROQ_API_KEY   = os.getenv("GROQ_API_KEY",   "")
+    GROQ_MODEL     = os.getenv("GROQ_MODEL",     "llama-3.3-70b-instruct")
     ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL",   "claude-sonnet-4-6")
 
@@ -126,6 +128,10 @@ class UserInput:
     faq_list:         List[str] = field(default_factory=list)
     seasonal_events:  List[str] = field(default_factory=list)  # ["Christmas","Onam","Eid"]
     custom_regions:   List[str] = field(default_factory=list)  # ["Thrissur","Kozhikode"]
+    pillars:          List[dict] = field(default_factory=list)
+    supporting_keywords: List[str] = field(default_factory=list)
+    intent_focus:     str = "transactional"
+    customer_url:     str = ""
 
     # Intent focus
     primary_intent:   str = "awareness"  # awareness/consideration/purchase/retention
@@ -140,6 +146,27 @@ class AI:
     _last_gemini = 0.0
 
     @staticmethod
+    def _extract_ollama_text(data: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        if isinstance(data.get("response"), str) and data.get("response").strip():
+            return data["response"].strip()
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
+            return msg["content"].strip()
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
+                    return first["message"]["content"].strip()
+                if isinstance(first.get("text"), str):
+                    return first["text"].strip()
+        if isinstance(data.get("text"), str):
+            return data["text"].strip()
+        return ""
+
+    @staticmethod
     def deepseek(prompt: str, system: str = "You are a strategic marketing expert.",
                   temperature: float = 0.2) -> str:
         try:
@@ -150,7 +177,10 @@ class AI:
                              {"role":"user","content":prompt}]
             }, timeout=120)
             r.raise_for_status()
-            t = r.json()["message"]["content"].strip()
+            data = r.json()
+            t = AI._extract_ollama_text(data)
+            if not t:
+                t = (data.get("response") or data.get("text") or "").strip()
             return re.sub(r"<think>.*?</think>","",t,flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"DeepSeek error: {e}")
@@ -176,6 +206,31 @@ class AI:
         except Exception as e:
             log.warning(f"Gemini error: {e}")
             return cls.deepseek(prompt, temperature=temperature)
+
+    @staticmethod
+    def groq(prompt: str, temperature: float = 0.25) -> str:
+        if not Cfg.GROQ_API_KEY:
+            return AI.gemini(prompt, temperature=temperature)
+        try:
+            r = _req.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {Cfg.GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": Cfg.GROQ_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "max_tokens": 3000,
+                },
+                timeout=120
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            log.warning(f"Groq error: {e}")
+            return AI.gemini(prompt, temperature=temperature)
 
     @staticmethod
     def claude(system: str, prompt: str, max_tokens: int = 3000) -> Tuple[str, int]:
@@ -492,8 +547,21 @@ Return ONLY valid JSON array of supporting keyword strings (50 keywords):
         """Fallback when AI fails — returns seed personas from industry template."""
         template = INDUSTRY_TEMPLATES.get(user_input.industry, {})
         seeds    = template.get("persona_seeds", ["general buyers"])
+        # Use industry keyword modifiers to build sensible fallback search queries.
+        mods = template.get("keyword_modifiers", [])
+        if not mods:
+            mods = ["buy", "price", "uses"]
+
+        def make_queries(p):
+            # Return up to three modifier-augmented queries, plus the plain product.
+            qs = [f"{p}"]
+            for m in mods[:3]:
+                qs.append(f"{p} {m}")
+            return qs
+
         return [
-            {"persona_name": s, "search_queries": [f"{product} {mod}"],
+            {"persona_name": s,
+             "search_queries": make_queries(product),
              "language": "english", "religion": "general", "region": "india",
              "supporting_keywords": [], "purchase_intent": "medium",
              "who_exactly": s, "when_they_buy": "anytime",
@@ -789,6 +857,15 @@ COMPETITOR GAPS:
 REVIEW-BASED KEYWORDS:
 {review_kws}
 
+PILLARS INPUT:
+{pillars_json}
+
+SUPPORTING KEYWORDS:
+{supporting_json}
+
+INTENT FOCUS: {intent_focus}
+CUSTOMER URL: {customer_url}
+
 TARGET CONFIGURATION:
 Locations: {locations}
 Religions: {religions}
@@ -897,12 +974,28 @@ Return ONLY valid JSON:
             competitor_json=json.dumps([{"url":c["url"],"headings":c.get("headings",[])[:5]}
                                          for c in competitor_data[:3]])[:800],
             review_kws=json.dumps(review_kws[:20]),
+            pillars_json=json.dumps(getattr(user_input, 'pillars', [])[:10], indent=2),
+            supporting_json=json.dumps(getattr(user_input, 'supporting_keywords', [])[:20], indent=2),
+            intent_focus=getattr(user_input, 'intent_focus', 'transactional'),
+            customer_url=getattr(user_input, 'customer_url', ''),
             locations=", ".join(l.value for l in user_input.target_locations),
             religions=", ".join(r.value for r in user_input.target_religions),
             languages=", ".join(l.value for l in user_input.target_languages),
             products=", ".join(user_input.products)
         )
-        return AI.claude(self.STRATEGY_SYSTEM, prompt, max_tokens=4000)
+        # Prefer Groq for final strategy, with Gemini/DeepSeek fallback.
+        text = AI.groq(prompt, temperature=0.25)
+        if not text or text.lower().strip().startswith('{"error"'):
+            text = AI.gemini(prompt, temperature=0.3)
+        if not text:
+            text = AI.deepseek(prompt, temperature=0.2)
+        try:
+            parsed = AI.parse_json(text)
+            if isinstance(parsed, dict):
+                return parsed, 0
+            return {"strategy": parsed}, 0
+        except Exception:
+            return {"error": "parse_failed", "raw": text[:1000]}, 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1019,7 +1112,12 @@ class StrategyDevelopmentEngine:
             strategy = AI.parse_json(strategy_text)
         except Exception as e:
             log.warning(f"Strategy parse failed: {e}")
-            strategy = {"error": "parse_failed", "raw": strategy_text[:500]}
+            # `strategy_text` may be a dict (already parsed) or other type — guard slicing
+            try:
+                raw_preview = strategy_text[:500] if isinstance(strategy_text, (str, bytes)) else json.dumps(strategy_text)[:500]
+            except Exception:
+                raw_preview = str(strategy_text)[:500]
+            strategy = {"error": "parse_failed", "raw": raw_preview}
         steps_log.append({"step":"claude_synthesis","ms":int((time.time()-t)*1000),
                            "tokens":tokens})
 
@@ -1040,7 +1138,7 @@ class StrategyDevelopmentEngine:
             "steps_log":          steps_log,
             "total_ms":           total_ms,
             "claude_tokens":      tokens,
-            "generated_at":       datetime.utcnow().isoformat(),
+            "generated_at":       datetime.now(timezone.utc).isoformat(),
         }
 
 

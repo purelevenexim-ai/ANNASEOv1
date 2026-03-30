@@ -1,0 +1,46 @@
+version: '3.9'
+services:
+  api:
+    build: .
+    # Production-safe command: single worker, no --reload
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1 --log-level info
+    ports:
+      - "8000:8000"
+    environment:
+      - ANNASEO_DB=/data/annaseo/annaseo.db
+      - REDIS_URL=redis://redis:6379/0
+      - ANNASEO_ENV=development
+    volumes:
+      - annaseo_data:/data/annaseo
+      - .:/app
+    depends_on:
+      - redis
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build: .
+    command: python jobqueue/worker.py
+    environment:
+      - ANNASEO_DB=/data/annaseo/annaseo.db
+      - REDIS_URL=redis://redis:6379/0
+      - ANNASEO_ENV=development
+    volumes:
+      - annaseo_data:/data/annaseo
+      - .:/app
+    depends_on:
+      - redis
+    restart: always
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+volumes:
+  annaseo_data:
+    driver: local
