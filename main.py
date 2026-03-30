@@ -589,7 +589,9 @@ def create_project(body: ProjectBody,user=Depends(current_user)):
         from annaseo_domain_context import DomainContextEngine
         DomainContextEngine().setup_project(project_id=pid,project_name=body.name,industry=body.industry,seeds=body.seed_keywords,description=body.description,custom_accepts=body.custom_accepts,custom_rejects=body.custom_rejects)
     except Exception as e: log.warning(f"DomainContext setup: {e}")
-    return {"project_id":pid,"name":body.name,"industry":body.industry}
+    # Return full project object for immediate UI refresh
+    proj = dict(db.execute("SELECT * FROM projects WHERE project_id=?", (pid,)).fetchone())
+    return {"project_id":pid,"name":body.name,"industry":body.industry,"status":proj.get("status","active"),"owner_id":proj.get("owner_id")}
 
 @app.get("/api/projects",tags=["Projects"])
 def list_projects(user=Depends(current_user)):

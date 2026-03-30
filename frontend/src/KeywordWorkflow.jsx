@@ -265,8 +265,8 @@ function StepInput({ projectId, onComplete, setPage }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [saved, setSaved] = useState(false)
-  // Task 6: Business intent fields for research engine
-  const [businessIntent, setBusinessIntent] = useState("mixed")
+  // Task 6: Business intent fields for research engine (now multi-select)
+  const [businessIntent, setBusinessIntent] = useState(["ecommerce"])
   const [targetAudience, setTargetAudience] = useState("")
   const [geographicFocus, setGeographicFocus] = useState("India")
   const inStyle = { width: '100%', padding: '7px 10px', borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: 'border-box' }
@@ -310,8 +310,11 @@ function StepInput({ projectId, onComplete, setPage }) {
     if (latestSession.intent_focus) setIntentFocus(latestSession.intent_focus)
     if (latestSession.customer_url) setCustomerUrl(latestSession.customer_url)
     if (Array.isArray(latestSession.competitor_urls)) setCompetitorUrls(latestSession.competitor_urls)
-    // Task 6: Load business intent fields
-    if (latestSession.business_intent) setBusinessIntent(latestSession.business_intent)
+    // Task 6: Load business intent fields (handle both string and array)
+    if (latestSession.business_intent) {
+      const bi = latestSession.business_intent
+      setBusinessIntent(Array.isArray(bi) ? bi : [bi])
+    }
     if (latestSession.target_audience) setTargetAudience(latestSession.target_audience)
     if (latestSession.geographic_focus) setGeographicFocus(latestSession.geographic_focus)
   }, [latestSession])
@@ -503,15 +506,34 @@ function StepInput({ projectId, onComplete, setPage }) {
 
         {/* Task 6: Business Intent Questions */}
         <div style={{ background: T.purpleLight, borderRadius: 12, padding: 12, marginBottom: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Business Intent (for Research Ranking)</div>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Business Intent (Select Multiple)</div>
           <div style={{ marginBottom: 8 }}>
-            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>What's your primary business intent?</label>
-            <select value={businessIntent} onChange={e => setBusinessIntent(e.target.value)} style={{ ...inStyle }}>
-              <option value="mixed">Mixed / General</option>
-              <option value="ecommerce">E-commerce (selling products)</option>
-              <option value="content_blog">Content Blog (informational)</option>
-              <option value="supplier">B2B / Supplier</option>
-            </select>
+            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 6 }}>Select all applicable business intents:</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[
+                { value: 'ecommerce', label: 'E-commerce (selling products)' },
+                { value: 'content_blog', label: 'Content Blog (informational)' },
+                { value: 'supplier', label: 'B2B / Supplier' },
+                { value: 'mixed', label: 'Mixed / General' },
+              ].map(intent => (
+                <label key={intent.value} style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', fontSize: 12, gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={businessIntent.includes(intent.value)}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setBusinessIntent([...businessIntent.filter(b => b !== 'mixed'), intent.value])
+                      } else {
+                        const updated = businessIntent.filter(b => b !== intent.value)
+                        setBusinessIntent(updated.length === 0 ? ['mixed'] : updated)
+                      }
+                    }}
+                    style={{ width: 16, height: 16, cursor: 'pointer' }}
+                  />
+                  {intent.label}
+                </label>
+              ))}
+            </div>
           </div>
           <div style={{ marginBottom: 8 }}>
             <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>Target audience (optional)</label>
@@ -633,8 +655,8 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
       const r = await apiCall(`/api/ki/${projectId}/research`, "POST", {
         session_id: sessionId, customer_url: customerUrl,
         competitor_urls: competitorUrls,
-        // Task 6: Pass business intent to research engine
-        business_intent: businessIntent || "mixed",
+        // Task 6: Pass business intents (array) to research engine
+        business_intent: businessIntent && businessIntent.length > 0 ? businessIntent : ["ecommerce"],
       })
       if (r.job_id) {
         setJobId(r.job_id); setStatus("running")
