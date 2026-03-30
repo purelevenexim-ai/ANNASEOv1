@@ -11,6 +11,14 @@ self-improving algorithm tuning. Target: rank #1 on Google AND AI search.
 - Frontend: React 18 + Vite (frontend/, port 5173)
 - Orchestrator: Ruflo (job queue for background tasks)
 
+## Deployment Model
+
+**PRODUCTION ONLY** — All changes go directly to main branch and live immediately.
+- No dev/staging environment
+- Single branch: main
+- Changes deployed within minutes
+- Direct push to origin/main = production deployment
+
 ## Non-negotiable rules
 
 ### 1. Domain isolation — the most important architectural rule
