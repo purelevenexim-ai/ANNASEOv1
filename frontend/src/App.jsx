@@ -3016,18 +3016,24 @@ const NAV = [
   { id: "bug-fixer",    label: "Bug Fixer" },
   { id: "queue",        label: "Queue" },
   { id: "errors",       label: "Errors" },
+]
+
+function Sidebar({ page: currentPage, setPage }) {
+  const logout = () => { localStorage.removeItem("token"); window.location.reload() }
+  return (
+    <div style={{ width: 200, background: "white", borderRight: "0.5px solid rgba(0,0,0,0.08)", display: "flex", flexDirection: "column" }}>
       <div style={{ flex: 1, overflow: "auto" }}>
         {NAV.map(n => (
           <button key={n.id} onClick={() => setPage(n.id)} style={{
             display: "flex", alignItems: "center", gap: 9, padding: "7px 16px",
             width: "100%", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500,
-            background: page === n.id ? T.purpleLight : "transparent",
-            color: page === n.id ? T.purpleDark : T.gray,
-            borderLeft: `3px solid ${page === n.id ? T.purple : "transparent"}`,
+            background: currentPage === n.id ? T.purpleLight : "transparent",
+            color: currentPage === n.id ? T.purpleDark : T.gray,
+            borderLeft: `3px solid ${currentPage === n.id ? T.purple : "transparent"}`,
             textAlign: "left",
           }}>
             <span style={{ width: 7, height: 7, borderRadius: "50%",
-              background: page === n.id ? T.purple : "rgba(0,0,0,0.1)", flexShrink: 0 }}/>
+              background: currentPage === n.id ? T.purple : "rgba(0,0,0,0.1)", flexShrink: 0 }}/>
             {n.label}
           </button>
         ))}

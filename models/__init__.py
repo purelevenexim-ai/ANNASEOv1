@@ -1,9 +1,5 @@
-"""Shim package to route `models` imports to `backend.models` during refactor."""
+"""Models package for ANNASEOv1."""
 
-from backend.models import *
+from models.error_log import ErrorLog, Base
 
-try:
-    from backend.models import __all__ as _backend_all
-    __all__ = _backend_all
-except Exception:
-    __all__ = ["ErrorLog"]
+__all__ = ["ErrorLog", "Base"]
