@@ -147,6 +147,9 @@ def _db() -> sqlite3.Connection:
         sources_done    TEXT DEFAULT '[]',
         customer_url    TEXT DEFAULT '',
         competitor_urls TEXT DEFAULT '[]',
+        business_intent TEXT DEFAULT 'mixed',
+        target_audience TEXT DEFAULT '',
+        geographic_focus TEXT DEFAULT 'India',
         created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -192,6 +195,9 @@ def _db() -> sqlite3.Connection:
         "ALTER TABLE keyword_input_sessions ADD COLUMN seed_keyword TEXT DEFAULT ''",
         "ALTER TABLE keyword_input_sessions ADD COLUMN pillar_support_map TEXT DEFAULT '{}'",
         "ALTER TABLE keyword_input_sessions ADD COLUMN intent_focus TEXT DEFAULT 'both'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN business_intent TEXT DEFAULT 'mixed'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN target_audience TEXT DEFAULT ''",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN geographic_focus TEXT DEFAULT 'India'",
     ]:
         try:
             con.execute(_sql)
@@ -1087,7 +1093,9 @@ class KeywordInputEngine:
     def save_customer_input(self, project_id: str, pillars: List[dict],
                               supporting: List[str], pillar_support_map: Dict[str, List[str]] = None,
                               intent_focus: str = "both",
-                              customer_url: str = "", competitor_urls: List[str] = None) -> str:
+                              customer_url: str = "", competitor_urls: List[str] = None,
+                              business_intent: str = "mixed", target_audience: str = "",
+                              geographic_focus: str = "India") -> str:
         self.input_collector.save_pillars(project_id, pillars)
         self.input_collector.save_supporting(project_id, supporting)
 
@@ -1100,11 +1108,12 @@ class KeywordInputEngine:
         con = _db()
         con.execute("""
             INSERT INTO keyword_input_sessions
-            (session_id, project_id, seed_keyword, stage, pillar_support_map, intent_focus, customer_url, competitor_urls)
-            VALUES (?, ?, ?, 'input', ?, ?, ?, ?)
+            (session_id, project_id, seed_keyword, stage, pillar_support_map, intent_focus, customer_url, competitor_urls, business_intent, target_audience, geographic_focus)
+            VALUES (?, ?, ?, 'input', ?, ?, ?, ?, ?, ?, ?)
         """, (session_id, project_id, seed_keyword,
               json.dumps(pillar_support_map or {}), intent_focus,
-              customer_url or "", json.dumps(competitor_urls or [])))
+              customer_url or "", json.dumps(competitor_urls or []),
+              business_intent or "mixed", target_audience or "", geographic_focus or "India"))
         con.commit()
         log.info(f"[KIE] Customer input saved: {len(pillars)} pillars, "
                   f"{len(supporting)} supporting — session {session_id}")

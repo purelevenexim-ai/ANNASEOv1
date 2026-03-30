@@ -2551,6 +2551,9 @@ try:
         intent_focus: str = "transactional"
         customer_url: Optional[str] = None
         competitor_urls: list = []
+        business_intent: str = "mixed"  # NEW: ecommerce|content_blog|supplier|mixed
+        target_audience: str = ""  # NEW: string
+        geographic_focus: str = "India"  # NEW: string
 
     class _KIAction(BaseModel):
         keyword_id: str = ""    # item_id from keyword_universe_items
@@ -2597,13 +2600,16 @@ try:
                 intent_focus=body.intent_focus,
                 customer_url=body.customer_url,
                 competitor_urls=body.competitor_urls,
+                business_intent=body.business_intent,
+                target_audience=body.target_audience,
+                geographic_focus=body.geographic_focus,
             )
 
             # Trigger cross_multiply immediately in background so review queue has items
             bg.add_task(_kie.generate_universe, project_id=project_id, session_id=sid,
                         customer_url=body.customer_url or "",
                         competitor_urls=body.competitor_urls or [])
-            return {"session_id": sid, "status": "saved"}
+            return {"session_id": sid, "status": "saved", "business_intent": body.business_intent, "target_audience": body.target_audience, "geographic_focus": body.geographic_focus}
 
         except sqlite3.IntegrityError as e:
             log.warning(f"[main] ki_save_input integrity error for {project_id}: {e}")
