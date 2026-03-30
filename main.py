@@ -3901,15 +3901,19 @@ async def ki_research(
     user=Depends(current_user)
 ):
     """
-    Step 2: Research keywords using 3-source priority ranking.
+    Step 3: Research keywords using 3-source priority ranking.
 
     Sources:
     1. User's supporting keywords (score +10)
     2. Google Autosuggest (score +5)
     3. AI classification (variable score)
+
+    Uses strategy_context from Step 2 if available for enhanced filtering.
     """
     db = get_db()
     session_id = body.get("session_id", "")
+    strategy_context = body.get("strategy_context")  # From Step 2
+
     # Normalize business_intent: accept both string and list
     _bi = body.get("business_intent", "mixed")
     if isinstance(_bi, list):
@@ -3927,9 +3931,16 @@ async def ki_research(
     ).fetchone()
     industry = project["industry"] if project else "general"
 
-    # Create research job
+    # Create research job (store strategy_context in payload for reference)
     job_id = str(uuid.uuid4())
-    job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="research", input_payload={"session_id": session_id, "business_intent": business_intent})
+    job_tracker.create_strategy_job(
+        db, job_id, project_id=project_id, job_type="research",
+        input_payload={
+            "session_id": session_id,
+            "business_intent": business_intent,
+            "strategy_context": strategy_context
+        }
+    )
 
     try:
         # Run research synchronously (fast: <5s per pillar)

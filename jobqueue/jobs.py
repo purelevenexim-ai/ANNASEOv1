@@ -596,13 +596,77 @@ def run_single_call_job(job_id: str):
     try:
         while retry_count <= max_retries:
             try:
-                job_tracker.update_strategy_job(db, job_id, status="running", current_step="single_call", current_step_name="single_call", progress=10, retry_count=retry_count, last_heartbeat=_now())
+                job_tracker.update_strategy_job(db, job_id, status="running", current_step="strategy_processing", current_step_name="Strategy Processing", progress=10, retry_count=retry_count, last_heartbeat=_now())
 
                 input_data = job.get("input_payload", {}) or {}
-                project_data = {"project_id": job.get("project_id")}
+                project_id = job.get("project_id")
 
-                engine = FinalStrategyEngine(DefaultLLMClient())
-                result = engine.run(input_data)
+                # Import StrategyProcessor for Step 1 keyword processing
+                from engines.strategy_processor import process_strategy
+
+                # Extract Step 1 data from input_payload
+                session_id = input_data.get("session_id", "")
+                business_intent = input_data.get("business_intent", "mixed")
+                customer_url = input_data.get("customer_url")
+                competitor_urls = input_data.get("competitor_urls", [])
+
+                # Load user keywords from session if session_id provided
+                user_keywords = []
+                if session_id:
+                    try:
+                        # Try to load keywords from Step 1 session
+                        _ki_db = main._ki_db if hasattr(main, '_ki_db') else lambda: db
+                        ki_db = _ki_db()
+                        session_row = ki_db.execute(
+                            "SELECT * FROM keyword_input_sessions WHERE session_id=? AND project_id=?",
+                            (session_id, project_id)
+                        ).fetchone()
+                        if session_row:
+                            session_data = dict(session_row)
+                            user_keywords = [
+                                {"keyword": kw, "source": "user_input"}
+                                for kw in (session_data.get("pillars") or [])
+                            ]
+                        ki_db.close()
+                    except Exception as e:
+                        log = logging.getLogger("strategy")
+                        log.warning(f"Could not load keywords from session {session_id}: {e}")
+
+                # Process strategy with Step 1 data
+                result = process_strategy(
+                    project_id=project_id,
+                    session_id=session_id,
+                    business_intent=business_intent,
+                    customer_url=customer_url,
+                    competitor_urls=competitor_urls,
+                    user_keywords=user_keywords
+                )
+
+                # Convert result to match FinalStrategyEngine output format
+                if result.get("success"):
+                    result = {
+                        "success": True,
+                        "data": {
+                            "strategy_context": result.get("strategy_context"),
+                            "scored_keywords": result.get("scored_keywords"),
+                            "message": result.get("message")
+                        },
+                        "raw": json.dumps(result, default=str),
+                        "tokens_used": 0,
+                        "cost_usd": 0.0,
+                        "validation_status": "valid"
+                    }
+                else:
+                    result = {
+                        "success": False,
+                        "error": result.get("error", "Strategy processing failed"),
+                        "error_type": "strategy_error",
+                        "raw": "",
+                        "data": {},
+                        "tokens_used": 0,
+                        "cost_usd": 0.0,
+                        "validation_status": "invalid"
+                    }
 
                 raw_response = result.get("raw")
                 if raw_response is None:

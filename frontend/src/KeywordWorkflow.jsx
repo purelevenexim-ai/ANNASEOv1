@@ -575,7 +575,7 @@ function StepInput({ projectId, onComplete, setPage }) {
 // STEP 2 — RESEARCH (Method 2)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function StepStrategy({ projectId, onComplete, onBack }) {
+function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, businessIntent, onComplete, onBack }) {
   const [jobId, setJobId] = useState(null)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState("")
@@ -585,14 +585,16 @@ function StepStrategy({ projectId, onComplete, onBack }) {
     if (!jobId || status !== "running") return
     const interval = setInterval(async () => {
       try {
-        const r = await apiCall(`/api/strategy/${projectId}/jobs/${jobId}`)
+        const r = await apiCall(`/api/jobs/${jobId}`)
         if (r.status === "completed") {
           setStatus("completed")
           clearInterval(interval)
-          if (onComplete) onComplete({ jobId })
+          // Extract strategy_context from result_payload
+          const strategyContext = r.result_payload?.strategy_context || r.result_payload?.data?.strategy_context
+          if (onComplete) onComplete({ jobId, strategy_context: strategyContext })
         } else if (r.status === "failed") {
           setStatus("failed")
-          setError(r.error || "Strategy processing failed")
+          setError(r.error_message || r.error || "Strategy processing failed")
           clearInterval(interval)
         }
       } catch (e) {
@@ -608,7 +610,13 @@ function StepStrategy({ projectId, onComplete, onBack }) {
     setError("")
     try {
       setStatus("running")
-      const response = await apiCall(`/api/ki/${projectId}/run`, "POST", { execution_mode: "single_call" })
+      const response = await apiCall(`/api/ki/${projectId}/run`, "POST", {
+        execution_mode: "single_call",
+        session_id: sessionId,
+        customer_url: customerUrl,
+        competitor_urls: competitorUrls || [],
+        business_intent: businessIntent
+      })
       if (response.job_id) {
         setJobId(response.job_id)
         setStatus("running")
@@ -645,7 +653,7 @@ function StepStrategy({ projectId, onComplete, onBack }) {
   )
 }
 
-function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, businessIntent, onComplete, onBack }) {
+function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, businessIntent, strategyContext, onComplete, onBack }) {
   const [jobId, setJobId]     = useState(null)
   const [status, setStatus]   = useState(null)  // null | running | completed | failed
   const [result, setResult]   = useState(null)
@@ -660,6 +668,8 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
         competitor_urls: competitorUrls,
         // Task 6: Pass business intents (array) to research engine
         business_intent: businessIntent && businessIntent.length > 0 ? businessIntent : ["ecommerce"],
+        // Pass strategy_context from Step 2 for enhanced filtering
+        strategy_context: strategyContext,
       })
       if (r.job_id) {
         setJobId(r.job_id); setStatus("running")
@@ -3133,6 +3143,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
   const [customerUrl, setCustomerUrl]   = useState("")
   const [competitorUrls, setCompetitorUrls] = useState([])
   const [businessIntent, setBusinessIntent] = useState("mixed")  // Task 6
+  const [strategyContext, setStrategyContext] = useState(null)  // From Step 2
   const [skipDashboard, setSkipDashboard] = useState(false)
 
   const [workflowStatus, setWorkflowStatus] = useState(null)
@@ -3293,13 +3304,19 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
 
       {step === 1 && <StepInput projectId={projectId} onComplete={handleStep1Done} setPage={setPage} />}
       {step === 2 && (
-        <StepStrategy projectId={projectId}
-          onComplete={() => handleAdvance(3)} onBack={() => setStep(1)} />
+        <StepStrategy projectId={projectId} sessionId={sessionId}
+          customerUrl={customerUrl} competitorUrls={competitorUrls}
+          businessIntent={businessIntent}
+          onComplete={(ctx) => {
+            if (ctx?.strategy_context) setStrategyContext(ctx.strategy_context)
+            handleAdvance(3)
+          }}
+          onBack={() => setStep(1)} />
       )}
       {step === 3 && (
         <StepResearch projectId={projectId} sessionId={sessionId}
           customerUrl={customerUrl} competitorUrls={competitorUrls}
-          businessIntent={businessIntent}
+          businessIntent={businessIntent} strategyContext={strategyContext}
           onComplete={() => handleAdvance(4)} onBack={() => setStep(2)} />
       )}
       {step === 4 && (
