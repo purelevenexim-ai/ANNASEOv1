@@ -19,6 +19,18 @@ DB_PATH = Path(os.getenv("ANNASEO_DB", "./annaseo.db"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DATABASE HELPER FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _db():
+    """Get a database connection."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PART 1 — GSC CONNECTOR
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -688,6 +700,54 @@ try:
 
 except ImportError:
     pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PART 4 — RESEARCH SCHEMA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def setup_research_tables():
+    """Ensure research-related tables exist."""
+    db = _db()
+    try:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS keyword_research_sessions (
+            session_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            business_intent TEXT DEFAULT 'mixed',
+            target_audience TEXT DEFAULT '',
+            geographic_focus TEXT DEFAULT 'India',
+            research_status TEXT DEFAULT 'pending',
+            keyword_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS research_results (
+            result_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            source TEXT,
+            intent TEXT,
+            volume TEXT,
+            difficulty TEXT,
+            score FLOAT DEFAULT 0,
+            confidence FLOAT DEFAULT 0,
+            pillar_keyword TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES keyword_research_sessions(session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_research_session_project ON keyword_research_sessions(project_id);
+        CREATE INDEX IF NOT EXISTS idx_research_results_session ON research_results(session_id);
+        """)
+        db.commit()
+    finally:
+        db.close()
+
+
+# Call at module import time
+setup_research_tables()
 
 
 if __name__ == "__main__":
