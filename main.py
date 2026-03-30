@@ -3886,51 +3886,128 @@ def _run_score_job(job_id: str, project_id: str, session_id: str):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/ki/{project_id}/research")
-async def ki_research(project_id: str, background_tasks: BackgroundTasks,
-                       body: dict = Body(default={}),
-                       user=Depends(current_user)):
-    """Trigger Method 2 research engine: autosuggest + site crawl + competitor gap."""
+async def ki_research(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    body: dict = Body(default={}),
+    user=Depends(current_user)
+):
+    """
+    Step 2: Research keywords using 3-source priority ranking.
+
+    Sources:
+    1. User's supporting keywords (score +10)
+    2. Google Autosuggest (score +5)
+    3. AI classification (variable score)
+    """
     db = get_db()
     session_id = body.get("session_id", "")
-    customer_url = body.get("customer_url", "")
-    competitor_urls = body.get("competitor_urls", [])
+    business_intent = body.get("business_intent", "mixed")
 
     if not session_id:
+        raise HTTPException(400, "session_id required")
+
+    # Get project for industry context
+    project = db.execute(
+        "SELECT industry FROM projects WHERE project_id=?",
+        (project_id,)
+    ).fetchone()
+    industry = project["industry"] if project else "general"
+
+    # Create research job
+    job_id = str(uuid.uuid4())
+
+    try:
+        # Run research synchronously (fast: <5s per pillar)
+        from engines.research_engine import ResearchEngine
+        engine = ResearchEngine(industry=industry)
+
+        results = engine.research_keywords(
+            project_id=project_id,
+            session_id=session_id,
+            business_intent=business_intent,
+            language="en"
+        )
+
+        # Convert to dict format
+        keywords = [
+            {
+                "keyword": r.keyword,
+                "source": r.source,
+                "intent": r.intent,
+                "volume": r.volume,
+                "difficulty": r.difficulty,
+                "score": r.total_score,
+                "confidence": r.confidence,
+                "pillar_keyword": r.pillar_keyword,
+                "reasoning": r.reasoning,
+            }
+            for r in results
+        ]
+
+        # Save to research_results table
         try:
-            from engines.annaseo_keyword_input import _db as _ki_db_fn
-            ki_db_tmp = _ki_db_fn()
-            row = ki_db_tmp.execute(
-                "SELECT session_id, customer_url FROM keyword_input_sessions WHERE project_id=? ORDER BY rowid DESC LIMIT 1",
-                (project_id,)
-            ).fetchone()
-            ki_db_tmp.close()
-            if row:
-                session_id = row["session_id"]
-                if not customer_url:
-                    customer_url = row["customer_url"] or ""
-        except Exception:
-            pass
+            from annaseo_wiring import _db as wiring_db_fn
+            research_db = wiring_db_fn()
+            for kw in keywords:
+                kw_id = hashlib.md5(f"{job_id}_{kw['keyword']}".encode()).hexdigest()
+                research_db.execute(
+                    """INSERT OR IGNORE INTO research_results
+                       (result_id, session_id, keyword, source, intent, volume, difficulty, score, confidence, pillar_keyword)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (kw_id, session_id, kw["keyword"], kw["source"], kw["intent"],
+                     kw["volume"], kw["difficulty"], kw["score"], kw["confidence"],
+                     kw["pillar_keyword"])
+                )
+            research_db.commit()
+            research_db.close()
+        except Exception as e:
+            log.warning(f"[research] Could not save results: {e}")
 
-    job_id = f"research_{uuid.uuid4().hex[:12]}"
-    job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="research", input_payload={
-        "project_id": project_id,
-        "session_id": session_id,
-        "customer_url": customer_url,
-        "competitor_urls": competitor_urls,
-    })
+        # Update job_tracker
+        job_tracker.update_strategy_job(
+            db, job_id,
+            status="completed",
+            progress=100,
+            result_payload={
+                "keywords": keywords,
+                "total_count": len(keywords),
+                "by_source": {
+                    "user": len([k for k in keywords if k["source"] == "user"]),
+                    "google": len([k for k in keywords if k["source"] == "google"]),
+                },
+                "by_intent": {
+                    "transactional": len([k for k in keywords if k["intent"] == "transactional"]),
+                    "informational": len([k for k in keywords if k["intent"] == "informational"]),
+                    "comparison": len([k for k in keywords if k["intent"] == "comparison"]),
+                }
+            }
+        )
 
-    enqueued = False
-    if research_queue is not None:
-        try:
-            research_queue.enqueue(run_research_job, job_id, job_timeout=600, retry=3)
-            enqueued = True
-        except Exception:
-            pass
+        log.info(f"[research] Complete: {len(keywords)} keywords for {project_id}")
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "keywords": keywords,
+            "summary": {
+                "total": len(keywords),
+                "by_source": {
+                    "user": len([k for k in keywords if k["source"] == "user"]),
+                    "google": len([k for k in keywords if k["source"] == "google"]),
+                },
+                "by_intent": {
+                    "transactional": len([k for k in keywords if k["intent"] == "transactional"]),
+                    "informational": len([k for k in keywords if k["intent"] == "informational"]),
+                }
+            }
+        }
 
-    if not enqueued:
-        background_tasks.add_task(run_research_job, job_id)
-
-    return {"job_id": job_id, "enqueued": enqueued}
+    except Exception as e:
+        log.error(f"[research] Failed: {e}", exc_info=True)
+        job_tracker.update_strategy_job(db, job_id, status="failed", error_message=str(e))
+        raise HTTPException(500, f"Research failed: {str(e)[:100]}")
+    finally:
+        db.close()
 
 
 @app.post("/api/ki/{project_id}/run")
