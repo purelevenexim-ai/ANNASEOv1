@@ -3004,7 +3004,6 @@ function SystemGraphPage() {
 
 const NAV = [
   { id: "dashboard",    label: "Dashboard" },
-  { id: "strategy",     label: "Content Strategy" },
   { id: "keywords",     label: "Keywords" },
   { id: "content",      label: "Content" },
   { id: "blogs",        label: "Content Calendar" },

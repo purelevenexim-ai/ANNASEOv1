@@ -3929,6 +3929,7 @@ async def ki_research(
 
     # Create research job
     job_id = str(uuid.uuid4())
+    job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="research", input_payload={"session_id": session_id, "business_intent": business_intent})
 
     try:
         # Run research synchronously (fast: <5s per pillar)

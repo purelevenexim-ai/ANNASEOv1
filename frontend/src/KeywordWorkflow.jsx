@@ -592,7 +592,7 @@ function StepStrategy({ projectId, onComplete, onBack }) {
           if (onComplete) onComplete({ jobId })
         } else if (r.status === "failed") {
           setStatus("failed")
-          setError(r.error || "Strategy failed")
+          setError(r.error || "Strategy processing failed")
           clearInterval(interval)
         }
       } catch (e) {
@@ -614,7 +614,7 @@ function StepStrategy({ projectId, onComplete, onBack }) {
         setStatus("running")
       } else {
         setStatus("failed")
-        setError(typeof response?.detail === 'string' ? response.detail : Array.isArray(response?.detail) ? response.detail.map(e=>e.msg||String(e)).join('; ') : "Failed to start strategy")
+        setError(typeof response?.detail === 'string' ? response.detail : Array.isArray(response?.detail) ? response.detail.map(e=>e.msg||String(e)).join('; ') : "Failed to start strategy processing")
       }
     } catch (e) {
       setStatus("failed")
@@ -624,14 +624,17 @@ function StepStrategy({ projectId, onComplete, onBack }) {
 
   return (
     <Card>
-      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2 — Keyword Research</div>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2 — Strategy Processing</div>
       <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 14 }}>
-        Discover keywords from 3 sources: your own inputs (+10), Google suggestions (+5), and AI classification. Returns 20-50 ranked keywords.
+        Validate and score your keywords using AI. This step analyzes your inputs and prepares them for discovery. Optional: you can skip to discover new keywords instead.
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <Btn onClick={onBack}>← Back</Btn>
         <Btn variant="teal" onClick={startStrategy} disabled={!projectId || status === "running"}>
-          {status === "running" ? "Researching…" : "Run Research"}
+          {status === "running" ? "Processing…" : "Run Strategy Processing"}
+        </Btn>
+        <Btn variant="default" onClick={onComplete} style={{ marginLeft: "auto" }}>
+          Skip to Research →
         </Btn>
       </div>
       {status && <div style={{ marginBottom: 8, color: status === "failed" ? T.red : T.teal }}>
@@ -686,9 +689,9 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
 
   return (
     <Card>
-      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Step 3 — Research Engine</div>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Step 3 — Keyword Discovery</div>
       <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 16 }}>
-        Automatically discover top keywords using 3 sources: your website, Google Autosuggest, and competitor analysis.
+        Discover new keywords from 3 sources: your supporting keywords (+10), Google Autosuggest (+5), and AI classification. Returns 20-50 ranked keywords with business intent filtering.
       </div>
 
       {/* Pillars summary */}
