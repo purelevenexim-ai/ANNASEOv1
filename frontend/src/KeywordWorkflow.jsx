@@ -76,6 +76,19 @@ const SOURCE_COLORS = {
   research_competitor_gap: "#dc2626",
   research_site_crawl: "#0d9488",
   strategy:          "#16a34a",
+  // Research engine source colors (Task 6)
+  "user":            "#10b981",      // green
+  "google":          "#3b82f6",      // blue
+  "ai_generated":    "#f59e0b",      // amber
+}
+
+// Intent badge colors for Step 3 (Task 6)
+const intentBadgeColors = {
+  "transactional":   "#ef4444",      // red
+  "informational":   "#06b6d4",      // cyan
+  "comparison":      "#8b5cf6",      // purple
+  "commercial":      "#ec4899",      // pink
+  "local":           "#eab308",      // yellow
 }
 
 function intentColor(intent) {
@@ -252,6 +265,10 @@ function StepInput({ projectId, onComplete, setPage }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [saved, setSaved] = useState(false)
+  // Task 6: Business intent fields for research engine
+  const [businessIntent, setBusinessIntent] = useState("mixed")
+  const [targetAudience, setTargetAudience] = useState("")
+  const [geographicFocus, setGeographicFocus] = useState("India")
   const inStyle = { width: '100%', padding: '7px 10px', borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: 'border-box' }
 
   const { data: existingPillars } = useQuery({
@@ -293,6 +310,10 @@ function StepInput({ projectId, onComplete, setPage }) {
     if (latestSession.intent_focus) setIntentFocus(latestSession.intent_focus)
     if (latestSession.customer_url) setCustomerUrl(latestSession.customer_url)
     if (Array.isArray(latestSession.competitor_urls)) setCompetitorUrls(latestSession.competitor_urls)
+    // Task 6: Load business intent fields
+    if (latestSession.business_intent) setBusinessIntent(latestSession.business_intent)
+    if (latestSession.target_audience) setTargetAudience(latestSession.target_audience)
+    if (latestSession.geographic_focus) setGeographicFocus(latestSession.geographic_focus)
   }, [latestSession])
 
   const addSupport = () => {
@@ -349,12 +370,16 @@ function StepInput({ projectId, onComplete, setPage }) {
         intent_focus: intentFocus,
         customer_url: customerUrl,
         competitor_urls: competitorUrls,
+        // Task 6: Include business intent fields
+        business_intent: businessIntent,
+        target_audience: targetAudience,
+        geographic_focus: geographicFocus,
       })
       setLoading(false)
       if (r?.session_id) {
         setSaved(true)
         setTimeout(() => setSaved(false), 2200)
-        return { sessionId: r.session_id, pillars, supports: globalSupports, customerUrl, competitorUrls }
+        return { sessionId: r.session_id, pillars, supports: globalSupports, customerUrl, competitorUrls, businessIntent, targetAudience, geographicFocus }
       }
       setError(r?.detail || 'Save failed')
       return null
@@ -476,6 +501,41 @@ function StepInput({ projectId, onComplete, setPage }) {
           </div>
         </div>
 
+        {/* Task 6: Business Intent Questions */}
+        <div style={{ background: T.purpleLight, borderRadius: 12, padding: 12, marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Business Intent (for Research Ranking)</div>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>What's your primary business intent?</label>
+            <select value={businessIntent} onChange={e => setBusinessIntent(e.target.value)} style={{ ...inStyle }}>
+              <option value="mixed">Mixed / General</option>
+              <option value="ecommerce">E-commerce (selling products)</option>
+              <option value="content_blog">Content Blog (informational)</option>
+              <option value="supplier">B2B / Supplier</option>
+            </select>
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>Target audience (optional)</label>
+            <input
+              value={targetAudience}
+              onChange={e => setTargetAudience(e.target.value)}
+              placeholder="e.g., health-conscious, budget-buyers, enterprise"
+              style={{ ...inStyle }}
+            />
+          </div>
+          <div>
+            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>Geographic focus</label>
+            <select value={geographicFocus} onChange={e => setGeographicFocus(e.target.value)} style={{ ...inStyle }}>
+              <option value="India">India</option>
+              <option value="global">Global</option>
+              <option value="north_india">North India</option>
+              <option value="south_india">South India</option>
+              <option value="usa">USA</option>
+              <option value="uk">UK</option>
+              <option value="eu">Europe</option>
+            </select>
+          </div>
+        </div>
+
         <div style={{ background: T.grayLight, borderRadius: 12, padding: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Reuse Recent Pillars</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -560,7 +620,7 @@ function StepStrategy({ projectId, onComplete, onBack }) {
   )
 }
 
-function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, onComplete, onBack }) {
+function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, businessIntent, onComplete, onBack }) {
   const [jobId, setJobId]     = useState(null)
   const [status, setStatus]   = useState(null)  // null | running | completed | failed
   const [result, setResult]   = useState(null)
@@ -573,6 +633,8 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, onCom
       const r = await apiCall(`/api/ki/${projectId}/research`, "POST", {
         session_id: sessionId, customer_url: customerUrl,
         competitor_urls: competitorUrls,
+        // Task 6: Pass business intent to research engine
+        business_intent: businessIntent || "mixed",
       })
       if (r.job_id) {
         setJobId(r.job_id); setStatus("running")
@@ -907,6 +969,7 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
   const [filterPillar, setFilterPillar] = useState("all")
   const [filterStatus, setFilterStatus] = useState("all")
   const [filterIntent, setFilterIntent] = useState("all")
+  const [intentFilter, setIntentFilter] = useState("all")  // Task 6: Intent filter for research results
   const [reviewMethod, setReviewMethod] = useState("merged")
   const [sortBy, setSortBy]             = useState("opp_desc")
   const [page, setPage]                 = useState(0)
@@ -1279,6 +1342,30 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
             <Btn small variant="teal" onClick={acceptAll}>✓ Accept All Visible</Btn>
           </Card>
 
+          {/* Task 6: Intent Filter Buttons */}
+          <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {["all", "transactional", "informational", "comparison", "commercial", "local"].map(intent => (
+              <button
+                key={intent}
+                onClick={() => { setIntentFilter(intent); setPage(0) }}
+                style={{
+                  padding: "6px 12px",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  borderRadius: 4,
+                  border: intentFilter === intent ? "2px solid #000" : "1px solid #ddd",
+                  background: intentFilter === intent ? (intentBadgeColors[intent] || "#f0f0f0") : "#f9f9f9",
+                  color: intentFilter === intent ? "#fff" : "#666",
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                }}
+              >
+                {intent === "all" ? "ALL INTENTS" : intent.toUpperCase()}
+                {intent !== "all" && ` (${(keywords || []).filter(k => k.intent === intent).length})`}
+              </button>
+            ))}
+          </div>
+
           {/* Table */}
           <Card style={{ padding:0, overflow:"hidden" }}>
             <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
@@ -1304,7 +1391,10 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
                 </tr>
               </thead>
               <tbody>
-                {keywords.map((kw, i) => {
+                {keywords
+                  // Task 6: Filter by selected intent
+                  .filter(kw => intentFilter === "all" || kw.intent === intentFilter)
+                  .map((kw, i) => {
                   const isSel = selected.has(kw.item_id)
                   const statusColor = kw.status==="accepted"?"#16a34a":kw.status==="rejected"?"#dc2626":T.amber
                   const statusBg = kw.status==="accepted"?"#f0faf7":kw.status==="rejected"?"#fef2f2":"#fffbeb"
@@ -1322,12 +1412,16 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
                         {kw.pillar_keyword || "—"}
                       </td>
                       <td style={{ padding:"6px 10px" }}>
-                        <Badge color={SOURCE_COLORS[kw.source] || T.gray}>
+                        {/* Task 6: Use source colors from research engine */}
+                        <Badge color={SOURCE_COLORS[kw.source] || intentColor(kw.source) || T.gray}>
                           {sourceLabel(kw.source)}
                         </Badge>
                       </td>
                       <td style={{ padding:"6px 10px" }}>
-                        <Badge color={intentColor(kw.intent)}>{kw.intent?.slice(0,6)}.</Badge>
+                        {/* Task 6: Use intent badge colors */}
+                        <Badge color={intentBadgeColors[kw.intent] || intentColor(kw.intent)}>
+                          {kw.intent?.slice(0,6)}{kw.intent?.length > 6 ? "." : ""}
+                        </Badge>
                       </td>
                       <td style={{ padding:"6px 10px" }}>
                         <span style={{ fontWeight:700, color: kdColor(kw.difficulty) }}>
@@ -3013,6 +3107,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
   const [sessionId, setSessionId]       = useState(null)
   const [customerUrl, setCustomerUrl]   = useState("")
   const [competitorUrls, setCompetitorUrls] = useState([])
+  const [businessIntent, setBusinessIntent] = useState("mixed")  // Task 6
   const [skipDashboard, setSkipDashboard] = useState(false)
 
   const [workflowStatus, setWorkflowStatus] = useState(null)
@@ -3129,10 +3224,11 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
     if (step !== desiredStep) setStep(desiredStep)
   }, [workflowStatus])
 
-  const handleStep1Done = async ({ sessionId: sid, customerUrl: url, competitorUrls: urls }) => {
+  const handleStep1Done = async ({ sessionId: sid, customerUrl: url, competitorUrls: urls, businessIntent: bi }) => {
     setSessionId(sid)
     setCustomerUrl(url)
     setCompetitorUrls(urls)
+    if (bi) setBusinessIntent(bi)  // Task 6
     await fetchWorkflowStatus()
     await handleAdvance(2)
   }
@@ -3178,6 +3274,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
       {step === 3 && (
         <StepResearch projectId={projectId} sessionId={sessionId}
           customerUrl={customerUrl} competitorUrls={competitorUrls}
+          businessIntent={businessIntent}
           onComplete={() => handleAdvance(4)} onBack={() => setStep(2)} />
       )}
       {step === 4 && (
