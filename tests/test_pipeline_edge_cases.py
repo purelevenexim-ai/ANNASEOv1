@@ -258,14 +258,71 @@ class TestP7EdgeCases:
         kw = "black pepper tea"
         result = p7.run(seed, [kw], {kw: "informational"}, {})
         # Should handle missing serp gracefully
-        assert isinstance(result, dict)
-
-    @pytest.mark.parametrize("intent", ["transactional", "commercial", "informational", "comparison", "navigational"])
-    def test_all_intent_types_scored(self, p7, seed, intent):
-        kw = f"black pepper {intent} test"
-        result = p7.run(seed, [kw], {kw: intent}, {kw: {"kd_estimate": 40}})
         assert kw in result
-        assert 0 <= result[kw] <= 100
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEO KEYWORD PIPELINE (new regression tests)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from engines.seo_keyword_pipeline import (
+    run_full_pipeline, normalize_keywords, _select_top100_for_pillar,
+    create_clusters, validate_clusters
+)
+
+
+def test_p3_normalization_maintains_keyword_count():
+    raw = [
+        f"clove keyword {i}" for i in range(34)
+    ]
+    normalized = normalize_keywords(raw, seed="clove")
+    assert len(normalized["keywords"]) == 34
+    assert len(normalized["normalization"]) <= 34
+
+
+def test_p6_validate_clusters_warns_for_small_clusters():
+    clusters = [
+        {"cluster_name": "small group", "primary_keyword": "clove price", "intent": "commercial", "keywords": []},
+        {"cluster_name": "healthy group", "primary_keyword": "clove benefits", "intent": "informational", "keywords": ["clove health"]},
+    ]
+    warnings = validate_clusters(clusters)
+    assert any("only" in w for w in warnings)
+
+
+def test_p7_top100_intent_balance():
+    enriched = [
+        {"keyword": f"clove transactional {i}", "intent": "transactional", "score": 100-i} for i in range(40)
+    ] + [
+        {"keyword": f"clove commercial {i}", "intent": "commercial", "score": 100-i} for i in range(40)
+    ] + [
+        {"keyword": f"clove informational {i}", "intent": "informational", "score": 100-i} for i in range(80)
+    ]
+    top = _select_top100_for_pillar(enriched)
+    assert len(top) == 100
+
+
+def test_full_pipeline_returns_normalization_in_report():
+    body = {
+        "project_id": "proj_test",
+        "session_id": "sess_test",
+        "pillar": "clove",
+        "seed": "clove",
+        "business_type": "ecommerce",
+        "industry": "spices",
+        "keywords": [f"clove keyword {i}" for i in range(34)],
+    }
+    result = run_full_pipeline(body)
+    assert result.get("total_keywords") == 34
+    assert "normalization" in result
+    assert len(result.get("normalized_keywords", [])) == 34
+
+
+@pytest.mark.parametrize("intent", ["transactional", "commercial", "informational", "comparison", "navigational"])
+def test_all_intent_types_scored(p7, seed, intent):
+    kw = f"black pepper {intent} test"
+    result = p7.run(seed, [kw], {kw: intent}, {kw: {"kd_estimate": 40}})
+    assert kw in result
+    assert 0 <= result[kw] <= 100
 
 
 # ─────────────────────────────────────────────────────────────────────────────

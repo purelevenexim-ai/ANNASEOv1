@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import os, json, re, time, math, hashlib, logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from dotenv import load_dotenv
@@ -171,6 +171,27 @@ class AI:
     _last_gemini = 0.0
 
     @staticmethod
+    def _extract_ollama_text(data: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        if isinstance(data.get("response"), str) and data.get("response").strip():
+            return data["response"].strip()
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
+            return msg["content"].strip()
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
+                    return first["message"]["content"].strip()
+                if isinstance(first.get("text"), str):
+                    return first["text"].strip()
+        if isinstance(data.get("text"), str):
+            return data["text"].strip()
+        return ""
+
+    @staticmethod
     def deepseek(prompt: str, system: str = "", temperature: float = 0.1) -> str:
         try:
             r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
@@ -180,7 +201,10 @@ class AI:
                              {"role":"user","content":prompt}]
             }, timeout=120)
             r.raise_for_status()
-            t = r.json()["message"]["content"].strip()
+            data = r.json()
+            t = AI._extract_ollama_text(data)
+            if not t:
+                t = (data.get("response") or data.get("text") or "").strip()
             return re.sub(r"<think>.*?</think>","",t,flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"[AI] DeepSeek: {e}")
@@ -1025,7 +1049,7 @@ class ContentGenerationEngine:
             citations=research.get("citations",[]),
             internal_links=[l.get("anchor","") for l in internal_links],
             brief=brief, style_used=style, tokens_used=total_tokens,
-            generated_at=datetime.utcnow().isoformat(), status=status
+            generated_at=datetime.now(timezone.utc).isoformat(), status=status
         )
 
     # ── Private helpers ────────────────────────────────────────────────────────

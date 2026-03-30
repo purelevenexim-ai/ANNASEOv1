@@ -258,6 +258,12 @@ class TestP3RunBatch:
         result = p3.run(seed, spice_kws)
         assert len(result) == len(spice_kws)  # all unique & valid
 
+    def test_run_preserves_single_word_keywords(self, p3, seed):
+        raw = ["cardamom", "what is cardamom", "cardamom benefits"]
+        result = p3.run(seed, raw)
+        assert "cardamom" in result
+        assert "cardamom benefits" in result
+
     def test_run_dedup_with_trailing_stopwords(self, seed, p3):
         raw = ["black pepper the", "black pepper"]
         result = p3.run(seed, raw)

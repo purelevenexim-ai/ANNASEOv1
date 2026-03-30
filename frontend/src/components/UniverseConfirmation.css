@@ -1,0 +1,108 @@
+/* UniverseConfirmation Component Styles */
+
+.universe-modal {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.universe-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.universe-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.universe-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.universe-keywords-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.universe-keywords-table thead th {
+  text-align: left;
+  padding: 8px 12px;
+  background-color: #f9fafb;
+  font-weight: 600;
+  color: #6b7280;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.universe-keywords-table tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.universe-keywords-table tbody tr:hover {
+  background-color: #fafafa;
+}
+
+.universe-action-buttons {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+}
+
+.universe-action-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.universe-action-btn:hover {
+  background-color: #f9fafb;
+  border-color: #d1d5db;
+}
+
+.universe-action-btn.delete {
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.universe-action-btn.delete:hover {
+  background-color: #fef2f2;
+}
+
+.universe-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.universe-error {
+  padding: 10px 12px;
+  background-color: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.universe-success {
+  padding: 10px 12px;
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #16a34a;
+  border-radius: 6px;
+  font-size: 12px;
+}

@@ -245,5 +245,29 @@ class TestP6BatchAnalysis:
         assert call_count[0] == 2
 
 
+class TestCompetitorSnapshotCompatibility:
+    def test_from_dict_uses_da_as_estimated_da(self):
+        from engines.ruflo_final_strategy_engine import CompetitorSnapshot
+        snapshot = CompetitorSnapshot.from_dict({
+            "domain": "example.com",
+            "da": 50,
+            "pillars_covered": ["tea products"],
+            "pillars_missing": ["tea recipes"],
+            "content_freshness": "fresh"
+        })
+        assert snapshot.estimated_da == 50
+
+    def test_from_dict_uses_domain_authority_as_estimated_da(self):
+        from engines.ruflo_final_strategy_engine import CompetitorSnapshot
+        snapshot = CompetitorSnapshot.from_dict({
+            "domain": "example.com",
+            "domain_authority": 48,
+            "pillars_covered": ["tea products"],
+            "pillars_missing": ["tea recipes"],
+            "content_freshness": "fresh"
+        })
+        assert snapshot.estimated_da == 48
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -14,7 +14,7 @@ That way the original engine stays clean and testable on its own.
 """
 
 from __future__ import annotations
-import sys, os, logging
+import sys, os, logging, json, sqlite3, time, psutil
 from pathlib import Path
 
 # Ensure all folders on path
@@ -81,23 +81,196 @@ class WiredRufloOrchestrator(RufloOrchestrator):
         self._project_id = project_id
         self._run_id     = run_id
 
+    def _load_confirmed_pillars_from_db(self, run_id: str) -> tuple[dict, bool]:
+        """
+        Load confirmed pillars from gate_states table if Gate 2 is already confirmed.
+        
+        Returns:
+            (pillars_dict, is_gate_2_confirmed)
+            - pillars_dict: {pillar_name: pillar_data} or {} if not found
+            - is_gate_2_confirmed: True if gate_2_confirmed=1 in runs table
+        """
+        try:
+            db_path = Path(__file__).parent.parent / "annaseo.db"
+            if not db_path.exists():
+                return {}, False
+            
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            
+            # Check if Gate 2 is confirmed
+            run_row = conn.execute(
+                "SELECT gate_2_confirmed, pillars_json FROM runs WHERE run_id=?",
+                (run_id,)
+            ).fetchone()
+            
+            if not run_row or not run_row["gate_2_confirmed"]:
+                conn.close()
+                return {}, False
+            
+            # Load confirmed pillars from gate_states
+            gate_row = conn.execute(
+                "SELECT customer_input_json FROM gate_states WHERE run_id=? AND gate_number=2",
+                (run_id,)
+            ).fetchone()
+            
+            conn.close()
+            
+            if gate_row and gate_row["customer_input_json"]:
+                try:
+                    pillars_list = json.loads(gate_row["customer_input_json"])
+                    # Convert list of PillarData to dict keyed by pillar_title
+                    pillars_dict = {}
+                    for p in pillars_list:
+                        pillar_title = p.get("pillar_title", p.get("cluster_name", ""))
+                        pillars_dict[pillar_title] = p
+                    return pillars_dict, True
+                except Exception as e:
+                    log.warning(f"[Wired] Failed to parse confirmed pillars: {e}")
+            
+            return {}, True  # Gate 2 confirmed but no pillars found
+            
+        except Exception as e:
+            log.debug(f"[Wired] _load_confirmed_pillars_from_db error: {e}")
+            return {}, False
+
     def _run_phase(self, name: str, fn, *args, **kwargs):
-        """Override: emit phase_log events to SSE stream around each phase."""
-        if self._emit_fn:
-            try: self._emit_fn("phase_log", {"phase": name, "msg": f"{name} starting..."})
-            except Exception: pass
-        import time as _t; t0 = _t.time()
-        result = super()._run_phase(name, fn, *args, **kwargs)
-        elapsed = round(_t.time() - t0, 1)
+        """Override: emit detailed phase_log events to SSE stream with timing, colors, data counts."""
+        # Phase metadata
+        phase_colors = {
+            "P1": "teal", "P2": "teal", "P3": "teal", "P4": "cyan", "P5": "cyan",
+            "P6": "cyan", "P7": "amber", "P8": "amber", "P9": "amber", "P10": "orange",
+            "P11": "orange", "P12": "orange", "P13": "blue", "P14": "blue",
+            "P15": "purple", "P16": "purple", "P17": "purple", "P18": "purple",
+            "P19": "red", "P20": "red",
+        }
+        
+        phase_descriptions = {
+            "P1": "Seed Validation", "P2": "Keyword Expansion", "P3": "Normalization",
+            "P4": "Entity Detection", "P5": "Intent Classification", "P6": "SERP Analysis",
+            "P7": "Opportunity Scoring", "P8": "Topic Detection", "P9": "Cluster Formation",
+            "P10": "Pillar Identification", "P11": "Knowledge Graph", "P12": "Internal Links",
+            "P13": "Content Calendar", "P14": "Deduplication", "P15": "Blog Suggestions",
+            "P16": "Content Generation", "P17": "SEO Optimization", "P18": "Schema Generation",
+            "P19": "Publishing", "P20": "Feedback Loop",
+        }
+        
+        color = phase_colors.get(name, "gray")
+        description = phase_descriptions.get(name, name)
+        
+        # Emit start event
         if self._emit_fn:
             try:
-                if result is not None:
-                    count = len(result) if hasattr(result, '__len__') else None
-                    msg = f"{name} complete ({elapsed}s)" + (f" — {count} items" if count is not None else "")
-                    self._emit_fn("phase_log", {"phase": name, "msg": msg})
-                else:
-                    self._emit_fn("phase_log", {"phase": name, "msg": f"{name} returned no result ({elapsed}s)", "warn": True})
-            except Exception: pass
+                self._emit_fn("phase_log", {
+                    "phase": name,
+                    "status": "starting",
+                    "color": color,
+                    "description": description,
+                    "msg": f"▶ {description} starting...",
+                })
+            except Exception:
+                pass
+        
+        # Track timing and memory
+        t0 = time.time()
+        process = psutil.Process()
+        mem0 = process.memory_info().rss / (1024 * 1024)  # MB
+        
+        # Run phase
+        try:
+            result = super()._run_phase(name, fn, *args, **kwargs)
+        except Exception as e:
+            elapsed = round(time.time() - t0, 1)
+            mem1 = process.memory_info().rss / (1024 * 1024)
+            delta_mem = round(mem1 - mem0, 1)
+            
+            # Emit error event
+            if self._emit_fn:
+                try:
+                    self._emit_fn("phase_log", {
+                        "phase": name,
+                        "status": "error",
+                        "color": "red",
+                        "msg": f"✗ {description} failed: {str(e)[:100]}",
+                        "elapsed_ms": round(elapsed * 1000),
+                        "memory_delta_mb": delta_mem,
+                    })
+                except Exception:
+                    pass
+            raise
+        
+        # Calculate metrics
+        elapsed = round(time.time() - t0, 1)
+        mem1 = process.memory_info().rss / (1024 * 1024)
+        delta_mem = round(mem1 - mem0, 1)
+        
+        # Determine output count
+        output_count = None
+        if result is not None:
+            if isinstance(result, (list, dict)):
+                output_count = len(result)
+            elif hasattr(result, "__len__"):
+                try:
+                    output_count = len(result)
+                except:
+                    pass
+        
+        # Emit completion event
+        if self._emit_fn:
+            try:
+                msg_parts = [f"✓ {description}"]
+                if output_count is not None:
+                    msg_parts.append(f"{output_count} items")
+                msg_parts.append(f"{elapsed}s")
+
+                payload = {
+                    "phase": name,
+                    "status": "complete",
+                    "color": color,
+                    "msg": " | ".join(msg_parts),
+                    "elapsed_ms": round(elapsed * 1000),
+                    "memory_delta_mb": delta_mem,
+                    "output_count": output_count,
+                }
+
+                # Add data flow hint
+                phase_num = int(name[1:]) if name.startswith("P") and len(name) > 1 else None
+                if phase_num and phase_num < 20:
+                    next_phase = f"P{phase_num + 1}"
+                    payload["next_phase"] = next_phase
+
+                # Serialize a result sample so the frontend can show actual data
+                try:
+                    if isinstance(result, list):
+                        payload["result_sample"] = {
+                            "type": "list",
+                            "items": [str(x) for x in result[:150]],
+                        }
+                    elif isinstance(result, dict):
+                        items = list(result.items())[:100]
+                        payload["result_sample"] = {
+                            "type": "dict",
+                            "items": [[str(k), str(v)] for k, v in items],
+                        }
+                    elif result is not None:
+                        # Dataclass / namedtuple / object
+                        _d = None
+                        if hasattr(result, '_asdict'):
+                            _d = dict(result._asdict())
+                        elif hasattr(result, '__dict__'):
+                            _d = vars(result)
+                        if _d:
+                            payload["result_sample"] = {
+                                "type": "object",
+                                "items": [[str(k), str(v)] for k, v in list(_d.items())[:30]],
+                            }
+                except Exception:
+                    pass
+
+                self._emit_fn("phase_log", payload)
+            except Exception:
+                pass
+        
         return result
 
     # ── Overridden run_seed with full wiring ──────────────────────────────────
@@ -124,18 +297,62 @@ class WiredRufloOrchestrator(RufloOrchestrator):
             return {"error": "P1 failed"}
 
         # ── P2 Expansion ─────────────────────────────────────────────────────
-        # Try P2_Enhanced first (uses customer pillars+supporting from DB)
+        # Try P2_Enhanced only when the seed keyword matches a stored pillar.
+        # This prevents "ginger" run from pulling "clove/turmeric" pillar data.
         _p2e_kws = None
         if pid:
             try:
-                from annaseo_p2_enhanced import P2_Enhanced
-                p2e = P2_Enhanced()
-                _p2e_kws = p2e.run_from_input(pid, language=language, region=region)
-                if _p2e_kws:
-                    log.info(f"[Wired] P2_Enhanced returned {len(_p2e_kws)} keywords for {pid}")
+                from annaseo_p2_enhanced import P2_Enhanced, _db as _p2e_db
+                p2e   = P2_Enhanced()
+                _pdb  = _p2e_db()
+                _stored_pillars = p2e._load_pillars(_pdb, pid)
+                _pdb.close()
+
+                # Seed parts (handles "turmeric, clove" comma syntax)
+                _seed_parts = [s.strip().lower() for s in keyword.split(',') if s.strip()]
+
+                # Match: any seed part is contained in or contains a stored pillar
+                def _matches(seed_part, pillar):
+                    return seed_part in pillar.lower() or pillar.lower() in seed_part
+
+                _seed_matches = _stored_pillars and any(
+                    _matches(sp, p) for sp in _seed_parts for p in _stored_pillars
+                )
+
+                if _seed_matches:
+                    # Emit proper start event for P2
+                    _t2 = time.time()
                     if self._emit_fn:
-                        try: self._emit_fn("phase_log", {"phase": "P2", "msg": f"P2 Enhanced: {len(_p2e_kws)} phrases from pillars"})
+                        try:
+                            self._emit_fn("phase_log", {
+                                "phase": "P2", "status": "starting", "color": "teal",
+                                "description": "Keyword Expansion",
+                                "msg": "▶ Keyword Expansion starting (P2 Enhanced — autosuggest + pillars)...",
+                            })
                         except Exception: pass
+
+                    _p2e_kws = p2e.run_from_input(pid, language=language, region=region, seed_keyword=keyword)
+                    _e2 = round(time.time() - _t2, 1)
+
+                    if _p2e_kws:
+                        log.info(f"[Wired] P2_Enhanced returned {len(_p2e_kws)} keywords for {pid}")
+                        if self._emit_fn:
+                            try:
+                                self._emit_fn("phase_log", {
+                                    "phase": "P2", "status": "complete", "color": "teal",
+                                    "description": "Keyword Expansion",
+                                    "msg": f"✓ Keyword Expansion | {len(_p2e_kws)} phrases | {_e2}s",
+                                    "elapsed_ms": round(_e2 * 1000),
+                                    "output_count": len(_p2e_kws),
+                                    "next_phase": "P3",
+                                    "result_sample": {
+                                        "type": "list",
+                                        "items": [str(k) for k in _p2e_kws[:150]],
+                                    },
+                                })
+                            except Exception: pass
+                else:
+                    log.debug(f"[Wired] P2_Enhanced skipped: seed '{keyword}' not in pillars {_stored_pillars}")
             except Exception as _p2e_err:
                 log.debug(f"[Wired] P2_Enhanced skipped: {_p2e_err}")
 
@@ -143,11 +360,27 @@ class WiredRufloOrchestrator(RufloOrchestrator):
             raw_kws = _p2e_kws
             print(f"  P2: {len(raw_kws)} keywords from pillar+supporting model")
         else:
-            with self._observe("P2_KeywordExpansion"):
-                raw_kws = self._run_phase("P2", self.p2.run, seed)
-            if not raw_kws:
-                return {"error": "P2 failed"}
-            print(f"  P2: {len(raw_kws)} raw keywords from 5 sources")
+            # Comma-separated pillars: expand each independently, then combine
+            import dataclasses as _dc
+            _seed_parts = [s.strip() for s in keyword.split(',') if s.strip()]
+            if len(_seed_parts) > 1:
+                raw_kws = []
+                with self._observe("P2_KeywordExpansion"):
+                    for _part in _seed_parts:
+                        _sub_seed = _dc.replace(seed, keyword=_part)
+                        _part_kws = self._run_phase("P2", self.p2.run, _sub_seed) or []
+                        raw_kws.extend(_part_kws)
+                        print(f"  P2: '{_part}' → {len(_part_kws)} keywords")
+                raw_kws = list(dict.fromkeys(raw_kws))  # dedup, preserve order
+                if not raw_kws:
+                    return {"error": "P2 failed"}
+                print(f"  P2: {len(raw_kws)} total from {len(_seed_parts)} pillars")
+            else:
+                with self._observe("P2_KeywordExpansion"):
+                    raw_kws = self._run_phase("P2", self.p2.run, seed)
+                if not raw_kws:
+                    return {"error": "P2 failed"}
+                print(f"  P2: {len(raw_kws)} raw keywords from 5 sources")
 
         # ✦ Record P2 outputs
         self._record("P2_KeywordExpansion", rid, pid,
@@ -212,51 +445,69 @@ class WiredRufloOrchestrator(RufloOrchestrator):
             topic_map = self._run_phase("P8", self.p8.run, seed, kws, scores) or {}
         print(f"  P8: {len(topic_map)} topics detected")
 
-        with self._observe("P9_ClusterFormation"):
-            clusters = self._run_phase("P9", self.p9.run, seed, topic_map) or {}
-        print(f"  P9: {len(clusters)} clusters formed")
-
-        # ✦ Record P9 clusters
-        self._record("P9_ClusterFormation", rid, pid,
-                     {"count": len(clusters)},
-                     [(name, "cluster", {"topics": topics[:5]})
-                      for name, topics in clusters.items()])
-
-        # ── GATE B: Pillars confirmed ─────────────────────────────────────────
-        if gate_callback:
-            confirmed = gate_callback("pillars", {"clusters": list(clusters.keys())})
-            if confirmed is None:
-                return {"status": "stopped_at_gate_B"}
-            removed = confirmed.get("removed_clusters", [])
-            clusters = {k: v for k, v in clusters.items() if k not in removed}
-
-        # ── P10 Pillar Identification ─────────────────────────────────────────
-        with self._observe("P10_PillarIdentification"):
-            pillars = self._run_phase("P10", self.p10.run, seed, clusters) or {}
-
-        # ✦ Domain Context — validate pillars (project-isolated)
-        if self._dce and pid and pillars:
-            valid_pillars, rejected_pillars = self._dce.validate_pillars(pillars, pid)
-            if rejected_pillars:
-                msg = f"[DomainCtx] {len(rejected_pillars)} pillars rejected by domain filter"
-                print(f"  {msg}")
-                for rp in rejected_pillars:
-                    print(f"    ✗ {rp['pillar_keyword']} — {rp['reason'][:60]}")
-                pillars = valid_pillars
-                if self._emit_fn:
-                    try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg})
-                    except Exception: pass
-            msg2 = f"[DomainCtx] {len(pillars)} pillars validated for project {pid}"
-            print(f"  {msg2}")
+        # ── CHECK: Resume from Gate 2 (skip P9-P10 if confirmed) ──────────────
+        confirmed_pillars, gate2_confirmed = self._load_confirmed_pillars_from_db(rid)
+        
+        if gate2_confirmed and confirmed_pillars:
+            # Gate 2 already confirmed — use stored pillars and skip P9-P10
+            pillars = confirmed_pillars
+            clusters = {}  # Not strictly needed after this point, but keep empty for consistency
+            
+            msg = f"[Gate 2 Resume] Loaded {len(pillars)} confirmed pillars from DB, skipping P9-P10"
+            print(f"  {msg}")
+            log.info(msg)
             if self._emit_fn:
-                try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg2})
-                except Exception: pass
+                try:
+                    self._emit_fn("phase_log", {"phase": "Gate2Resume", "msg": msg})
+                except Exception:
+                    pass
+        else:
+            # Normal flow: Run P9-P10 to generate pillars
+            with self._observe("P9_ClusterFormation"):
+                clusters = self._run_phase("P9", self.p9.run, seed, topic_map) or {}
+            print(f"  P9: {len(clusters)} clusters formed")
 
-        # ✦ Record P10 pillars
-        self._record("P10_PillarIdentification", rid, pid,
-                     {"count": len(pillars)},
-                     [(v.get("pillar_keyword", k), "pillar", v)
-                      for k, v in pillars.items()])
+            # ✦ Record P9 clusters
+            self._record("P9_ClusterFormation", rid, pid,
+                         {"count": len(clusters)},
+                         [(name, "cluster", {"topics": topics[:5]})
+                          for name, topics in clusters.items()])
+
+            # ── GATE B: Pillars confirmed ─────────────────────────────────────────
+            if gate_callback:
+                confirmed = gate_callback("pillars", {"clusters": list(clusters.keys())})
+                if confirmed is None:
+                    return {"status": "stopped_at_gate_B"}
+                removed = confirmed.get("removed_clusters", [])
+                clusters = {k: v for k, v in clusters.items() if k not in removed}
+
+            # ── P10 Pillar Identification ─────────────────────────────────────────
+            with self._observe("P10_PillarIdentification"):
+                pillars = self._run_phase("P10", self.p10.run, seed, clusters) or {}
+
+            # ✦ Domain Context — validate pillars (project-isolated)
+            if self._dce and pid and pillars:
+                valid_pillars, rejected_pillars = self._dce.validate_pillars(pillars, pid)
+                if rejected_pillars:
+                    msg = f"[DomainCtx] {len(rejected_pillars)} pillars rejected by domain filter"
+                    print(f"  {msg}")
+                    for rp in rejected_pillars:
+                        print(f"    ✗ {rp['pillar_keyword']} — {rp['reason'][:60]}")
+                    pillars = valid_pillars
+                    if self._emit_fn:
+                        try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg})
+                        except Exception: pass
+                msg2 = f"[DomainCtx] {len(pillars)} pillars validated for project {pid}"
+                print(f"  {msg2}")
+                if self._emit_fn:
+                    try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg2})
+                    except Exception: pass
+
+            # ✦ Record P10 pillars
+            self._record("P10_PillarIdentification", rid, pid,
+                         {"count": len(pillars)},
+                         [(v.get("pillar_keyword", k), "pillar", v)
+                          for k, v in pillars.items()])
 
         # ── P11–P14 (unchanged from base) ─────────────────────────────────────
         graph = self._run_phase("P11", self.p11.run, seed, pillars,

@@ -1,0 +1,31 @@
+Project Name: <enter project name>
+Owner / Requester: <your name or team>
+Priority (high/med/low): <priority>
+
+Goal (one sentence):
+<What success looks like>
+
+Background / Context:
+- Repo: ANNASEOv1
+- Relevant files: engines/ruflo_20phase_engine.py, quality/annaseo_domain_context.py, main.py
+- Current state summary: <short summary>
+
+Constraints / Non-goals:
+- <e.g. must not modify DB schema, must be backwards-compatible, timebox 2 days>
+
+Stakeholders:
+- <who to ask for decisions>
+
+Acceptance criteria (minimum):
+1. <automated test(s) that fail before change and pass after>
+2. <static checks / lint rules>
+3. <manual verification steps>
+
+Deliverables:
+- Files changed, tests added, README/docs updated, example usage
+
+Questions for the developer (answer these before coding):
+1. <question>
+2. <question>
+
+Now: produce a compact design/spec (3–8 bullets) and list 5 bite-sized tasks (2–20 minutes each) with file paths and a single test to add.

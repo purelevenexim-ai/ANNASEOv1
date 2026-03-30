@@ -321,43 +321,52 @@ function KeywordInputForm({ projectId, onSubmit }) {
 // STEP 2 — GENERATING VIEW
 // ─────────────────────────────────────────────────────────────────────────────
 
+// stage → number of completed steps (0-6)
+const STAGE_DONE = {
+  cross_multiply:    0,
+  crawl_site:        1,
+  crawl_competitors: 2,
+  enrich:            3,
+  assemble:          4,
+  score:             5,
+  review_cross:      6,
+  confirmed:         6,
+}
+
 function GeneratingView({ projectId, sessionId, onComplete }) {
-  const [status, setStatus]   = useState("running")
-  const [progress, setProgress] = useState(0)
-  const [log, setLog]         = useState([])
-  const intervalRef           = useRef(null)
+  const [status, setStatus]       = useState("running")
+  const [doneSoFar, setDoneSoFar] = useState(0)
+  const [stepCounts, setStepCounts] = useState([])
+  const [errMsg, setErrMsg]       = useState("")
+  const intervalRef               = useRef(null)
+  const doneRef                   = useRef(false)
 
   const poll = useCallback(async () => {
     try {
       const data = await apiCall(`/api/ki/${projectId}/session/${sessionId}`)
       if (!data || data.detail) return
 
-      const st = data.status || "running"
-      setStatus(st)
+      const stage = data.stage || "cross_multiply"
+      const done  = STAGE_DONE[stage] ?? 0
+      setDoneSoFar(done)
 
-      const total = data.total_keywords || 0
-      if (total > 0) {
-        setProgress(Math.min(100, Math.round(total / 3)))
-      }
+      // Parse sources_done for per-step counts
+      try {
+        const sd = typeof data.sources_done === "string"
+          ? JSON.parse(data.sources_done || "[]")
+          : (data.sources_done || [])
+        if (Array.isArray(sd)) setStepCounts(sd)
+      } catch {}
 
-      setLog(l => {
-        const msgs = []
-        if (data.cross_product_count > 0 && !l.includes("cross_product"))
-          msgs.push(`cross_product: ${data.cross_product_count} phrases generated`)
-        if (data.website_kw_count > 0 && !l.includes("website"))
-          msgs.push(`website: ${data.website_kw_count} keywords from crawl`)
-        if (data.enriched_count > 0 && !l.includes("enriched"))
-          msgs.push(`enriched: ${data.enriched_count} enriched keywords`)
-        if (total > 0 && !l.includes("assembled"))
-          msgs.push(`assembled: ${total} total keywords in universe`)
-        return [...new Set([...l, ...msgs])]
-      })
+      const isReady = stage === "review_cross" || stage === "confirmed"
+      const isError = stage === "error"
 
-      if (st === "ready" || st === "error") {
+      if ((isReady || isError) && !doneRef.current) {
+        doneRef.current = true
         clearInterval(intervalRef.current)
-        if (st === "ready") {
-          setTimeout(() => onComplete(), 800)
-        }
+        setStatus(isError ? "error" : "ready")
+        if (isReady) setTimeout(() => onComplete(), 800)
+        if (isError) setErrMsg(data.error_message || "Generation failed. Please try again.")
       }
     } catch (e) {
       console.error("Poll error:", e)
@@ -365,82 +374,99 @@ function GeneratingView({ projectId, sessionId, onComplete }) {
   }, [projectId, sessionId, onComplete])
 
   useEffect(() => {
-    // Trigger generation
     apiCall(`/api/ki/${projectId}/generate/${sessionId}`, "POST").catch(console.error)
-
     intervalRef.current = setInterval(poll, 2000)
     return () => clearInterval(intervalRef.current)
   }, [projectId, sessionId, poll])
 
   const steps = [
-    { key: "cross_multiply",  label: "Cross-multiplying pillars × supporting keywords" },
-    { key: "crawl_website",   label: "Crawling your website for keywords" },
+    { key: "cross_multiply",   label: "Cross-multiplying pillars × supporting keywords" },
+    { key: "crawl_site",       label: "Crawling your website for keywords" },
     { key: "crawl_competitors",label: "Analyzing competitor websites" },
-    { key: "google_enrich",   label: "Fetching Google autosuggest data" },
-    { key: "assemble",        label: "Assembling keyword universe" },
-    { key: "score",           label: "Scoring opportunities" },
+    { key: "enrich",           label: "Fetching Google autosuggest & scoring" },
+    { key: "assemble",         label: "Assembling keyword universe" },
+    { key: "score",            label: "Scoring opportunities" },
   ]
 
-  const completedStep = Math.floor(progress / 18)
+  const progress = Math.round((doneSoFar / 6) * 100)
 
   return (
     <div style={{ maxWidth: 520, margin: "80px auto", textAlign: "center" }}>
-      <div style={{
-        width: 64, height: 64, borderRadius: "50%",
-        border: `4px solid ${T.purpleLight}`, borderTopColor: T.purple,
-        animation: "spin 0.8s linear infinite", margin: "0 auto 24px",
-      }}/>
+      {status !== "error" && (
+        <div style={{
+          width: 64, height: 64, borderRadius: "50%",
+          border: `4px solid ${T.purpleLight}`, borderTopColor: T.purple,
+          animation: "spin 0.8s linear infinite", margin: "0 auto 24px",
+        }}/>
+      )}
       <div style={{ fontSize: 20, fontWeight: 700, color: T.text, marginBottom: 8 }}>
         Building Keyword Universe
       </div>
-      <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 28 }}>
-        Analyzing pillars, supporting keywords, and website data...
+      <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 20 }}>
+        {doneSoFar === 0 ? "Starting analysis..." : `${doneSoFar} of 6 steps complete`}
       </div>
 
       {/* Progress bar */}
-      <div style={{ background: T.grayLight, borderRadius: 99, height: 6, marginBottom: 24 }}>
+      <div style={{ background: T.grayLight, borderRadius: 99, height: 8, marginBottom: 24, overflow: "hidden" }}>
         <div style={{
-          height: "100%", borderRadius: 99, background: T.purple,
-          width: `${progress}%`, transition: "width 0.4s ease",
+          height: "100%", borderRadius: 99,
+          background: `linear-gradient(90deg, ${T.purple}, ${T.teal})`,
+          width: `${progress}%`, transition: "width 0.6s ease",
         }}/>
       </div>
 
       {/* Steps */}
-      <div style={{ textAlign: "left", background: "#fff", border: `1px solid ${T.border}`, borderRadius: 10, padding: 16 }}>
-        {steps.map((s, i) => (
-          <div key={s.key} style={{
-            display: "flex", gap: 10, alignItems: "center", padding: "7px 0",
-            borderBottom: i < steps.length - 1 ? `1px solid ${T.border}` : "none",
-          }}>
-            <div style={{
-              width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
-              background: i < completedStep ? T.green : i === completedStep ? T.amber : T.grayLight,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 10, color: "#fff",
+      <div style={{ textAlign: "left", background: "#fff", border: `1px solid ${T.border}`, borderRadius: 10, overflow: "hidden" }}>
+        {steps.map((s, i) => {
+          const isDone    = i < doneSoFar
+          const isCurrent = i === doneSoFar && status === "running"
+          const sc        = stepCounts.find(c => c.step === s.key)
+          return (
+            <div key={s.key} style={{
+              display: "flex", gap: 12, alignItems: "center", padding: "10px 16px",
+              borderBottom: i < steps.length - 1 ? `1px solid ${T.border}` : "none",
+              background: isCurrent ? T.purpleLight : isDone ? T.greenLight : "#fff",
+              transition: "background 0.3s",
             }}>
-              {i < completedStep ? "✓" : i + 1}
+              {/* Step dot */}
+              <div style={{
+                width: 22, height: 22, borderRadius: "50%", flexShrink: 0,
+                background: isDone ? T.green : isCurrent ? T.purple : "#e5e7eb",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 10, fontWeight: 700, color: "#fff",
+              }}>
+                {isDone ? "✓" : i + 1}
+              </div>
+              {/* Label + count */}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: isDone ? T.green : isCurrent ? T.purple : T.textSoft }}>
+                  {s.label}
+                </div>
+                {isDone && sc && (
+                  <div style={{ fontSize: 11, color: T.textSoft, marginTop: 1 }}>
+                    {sc.count} {sc.label}
+                  </div>
+                )}
+                {isCurrent && (
+                  <div style={{ fontSize: 11, color: T.purple, marginTop: 1 }}>Running...</div>
+                )}
+              </div>
+              {/* Spinner for current */}
+              {isCurrent && (
+                <div style={{
+                  width: 14, height: 14, borderRadius: "50%",
+                  border: `2px solid ${T.purpleLight}`, borderTopColor: T.purple,
+                  animation: "spin 0.8s linear infinite", flexShrink: 0,
+                }}/>
+              )}
             </div>
-            <div style={{ fontSize: 12, color: i <= completedStep ? T.text : T.textSoft }}>
-              {s.label}
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
-
-      {/* Log */}
-      {log.length > 0 && (
-        <div style={{ marginTop: 16, textAlign: "left" }}>
-          {log.map((l, i) => (
-            <div key={i} style={{ fontSize: 11, color: T.textSoft, padding: "2px 0" }}>
-              {l}
-            </div>
-          ))}
-        </div>
-      )}
 
       {status === "error" && (
         <div style={{ marginTop: 16, background: T.redLight, color: T.red, padding: 12, borderRadius: 8, fontSize: 13 }}>
-          Generation failed. Please try again.
+          {errMsg || "Generation failed. Please try again."}
         </div>
       )}
     </div>

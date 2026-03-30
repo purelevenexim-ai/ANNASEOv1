@@ -1,8 +1,8 @@
 # AnnaSEO — Data Models
 
-**Database:** SQLite (dev) → PostgreSQL (prod)  
-**ORM:** SQLAlchemy + Alembic migrations  
-**Total tables:** 35+
+**Database:** SQLite (dev) → PostgreSQL (prod)
+**ORM:** SQLAlchemy + Alembic migrations
+**Total tables:** 45+
 
 ---
 
@@ -11,6 +11,14 @@
 ```sql
 projects
   id, name, industry, description, seeds, created_at, updated_at
+  -- audience intelligence columns (added via migration):
+  target_languages TEXT DEFAULT '[]'   -- JSON array: ["english","malayalam"]
+  target_locations TEXT DEFAULT '[]'   -- JSON array: ["india","kerala"]
+  business_type    TEXT DEFAULT 'B2C'  -- B2C | B2B | D2C | Service | Marketplace
+  usp              TEXT DEFAULT ''     -- unique selling proposition
+  audience_personas TEXT DEFAULT '[]'  -- JSON array of persona strings
+  competitor_urls  TEXT DEFAULT '[]'   -- JSON array of competitor URL strings
+  customer_reviews TEXT DEFAULT ''     -- paste of sample reviews
 
 project_settings
   project_id, wp_url, wp_user, wp_pass_hash, shopify_store, shopify_token,
@@ -18,6 +26,16 @@ project_settings
 
 project_competitors
   id, project_id, domain, notes
+
+audience_profiles
+  id          INTEGER PRIMARY KEY AUTOINCREMENT
+  project_id  TEXT NOT NULL UNIQUE
+  target_locations  TEXT DEFAULT '[]'  -- JSON
+  target_religions  TEXT DEFAULT '[]'  -- JSON
+  target_languages  TEXT DEFAULT '[]'  -- JSON
+  personas          TEXT DEFAULT '[]'  -- JSON array of persona strings
+  created_at  TEXT DEFAULT (datetime('now'))
+  -- upsert: ON CONFLICT(project_id) DO UPDATE SET ...
 ```
 
 ---
@@ -86,6 +104,19 @@ personas
 context_clusters
   id, project_id, keyword, location, religion, language,
   context_type, priority
+
+strategy_sessions
+  id          INTEGER PRIMARY KEY AUTOINCREMENT
+  session_id  TEXT NOT NULL UNIQUE        -- uuid
+  project_id  TEXT NOT NULL
+  engine_type TEXT DEFAULT 'development'  -- development | final
+  status      TEXT DEFAULT 'pending'      -- pending | running | completed | failed
+  input_json  TEXT DEFAULT '{}'           -- UserInput serialized
+  result_json TEXT DEFAULT '{}'           -- StrategyOutput serialized
+  confidence  REAL DEFAULT 0.0
+  tokens_used INTEGER DEFAULT 0
+  error       TEXT DEFAULT ''
+  created_at  TEXT DEFAULT (datetime('now'))
 ```
 
 ---
@@ -103,7 +134,88 @@ ranking_history
   recorded_date
 
 ranking_alerts
-  id, project_id, keyword, old_position, new_position, change, created_at
+  id             INTEGER PRIMARY KEY AUTOINCREMENT
+  project_id     TEXT NOT NULL
+  keyword        TEXT NOT NULL
+  old_position   INTEGER
+  new_position   INTEGER
+  change         INTEGER          -- positive = dropped, negative = gained
+  severity       TEXT DEFAULT 'warning'  -- critical | high | warning
+  status         TEXT DEFAULT 'new'      -- new | acknowledged | fixed
+  diagnosis_json TEXT DEFAULT '{}'       -- RankingMonitor.diagnose_drop() result
+  created_at     TEXT DEFAULT (datetime('now'))
+
+ranking_predictions
+  id               INTEGER PRIMARY KEY AUTOINCREMENT
+  project_id       TEXT NOT NULL
+  keyword          TEXT NOT NULL
+  pillar           TEXT
+  predicted_rank   INTEGER
+  predicted_month  INTEGER  -- 1–12
+  confidence       TEXT DEFAULT 'medium'  -- low | medium | high
+  created_at       TEXT DEFAULT (datetime('now'))
+```
+
+---
+
+## Content Freeze System Tables
+
+```sql
+content_blogs   (new freeze-lifecycle table — separate from legacy content_blogs)
+  blog_id          TEXT PRIMARY KEY   -- uuid
+  project_id       TEXT NOT NULL
+  pillar           TEXT DEFAULT ''
+  cluster          TEXT DEFAULT ''
+  keyword          TEXT DEFAULT ''
+  title            TEXT DEFAULT ''
+  body             TEXT DEFAULT ''
+  meta_desc        TEXT DEFAULT ''
+  schema_type      TEXT DEFAULT 'Article'
+  language         TEXT DEFAULT 'english'
+  status           TEXT DEFAULT 'draft'
+    -- draft | approved | frozen | published | failed
+  frozen_at        TEXT              -- ISO datetime when frozen
+  scheduled_date   TEXT              -- YYYY-MM-DD publication target
+  published_url    TEXT DEFAULT ''
+  internal_links   TEXT DEFAULT '[]' -- JSON array of injected URLs
+  word_count       INTEGER DEFAULT 0
+  seo_score        REAL DEFAULT 0.0
+  version          INTEGER DEFAULT 1
+  created_at       TEXT DEFAULT (datetime('now'))
+  updated_at       TEXT DEFAULT (datetime('now'))
+
+blog_versions
+  id           INTEGER PRIMARY KEY AUTOINCREMENT
+  blog_id      TEXT NOT NULL
+  version      INTEGER NOT NULL
+  title        TEXT DEFAULT ''
+  body         TEXT DEFAULT ''
+  meta_desc    TEXT DEFAULT ''
+  saved_at     TEXT DEFAULT (datetime('now'))
+
+content_freeze_queue
+  id             INTEGER PRIMARY KEY AUTOINCREMENT
+  blog_id        TEXT NOT NULL
+  project_id     TEXT NOT NULL
+  pillar         TEXT DEFAULT ''
+  scheduled_date TEXT NOT NULL
+  published      INTEGER DEFAULT 0  -- 0 | 1
+  published_at   TEXT
+```
+
+---
+
+## System Graph Tables
+
+```sql
+system_graph_cache
+  id           INTEGER PRIMARY KEY AUTOINCREMENT
+  project_id   TEXT NOT NULL UNIQUE
+  graph_json   TEXT DEFAULT '{}'   -- D3-ready nodes + edges JSON
+  node_count   INTEGER DEFAULT 0
+  edge_count   INTEGER DEFAULT 0
+  updated_at   TEXT DEFAULT (datetime('now'))
+  -- upsert: ON CONFLICT(project_id) DO UPDATE SET ...
 ```
 
 ---

@@ -235,15 +235,41 @@ class PublishQueue:
         Conditions: status=scheduled AND frozen=1 AND scheduled_date <= now
         Ordered by scheduled_date ASC — earliest first.
         """
+        # Atomically select-and-claim the next scheduled article to avoid
+        # double-claiming in concurrent scheduler processes. Uses a
+        # BEGIN IMMEDIATE transaction to acquire a write lock for the
+        # duration of the claim.
         now = datetime.utcnow().isoformat()
-        return self._db.execute("""
-            SELECT * FROM content_blogs
-            WHERE status = 'scheduled'
-              AND frozen = 1
-              AND scheduled_date <= ?
-            ORDER BY scheduled_date ASC
-            LIMIT 1
-        """, (now,)).fetchone()
+        cur = self._db.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            row = cur.execute("""
+                SELECT * FROM content_blogs
+                WHERE status = 'scheduled'
+                  AND frozen = 1
+                  AND scheduled_date <= ?
+                ORDER BY scheduled_date ASC
+                LIMIT 1
+            """, (now,)).fetchone()
+            if not row:
+                cur.execute("COMMIT")
+                return None
+            # Attempt to atomically mark as publishing only if still scheduled
+            cur.execute("UPDATE content_blogs SET status=? WHERE id=? AND status='scheduled'",
+                        (PublishStatus.PUBLISHING.value, row["id"]))
+            if cur.rowcount == 1:
+                self._db.commit()
+                return row
+            else:
+                # Another process claimed it first
+                cur.execute("COMMIT")
+                return None
+        except Exception:
+            try:
+                cur.execute("ROLLBACK")
+            except Exception:
+                pass
+            return None
 
     def mark_publishing(self, article_id: str):
         self._db.execute(
@@ -907,15 +933,19 @@ try:
     _scheduler: Optional[PublishScheduler] = None
     _sched_thread: Optional[threading.Thread] = None
 
+    from pydantic import Field
+
     class ArticleIn(PM):
+        # Use internal attribute names that don't shadow BaseModel methods.
+        # Map incoming JSON keys using aliases so external API remains `schema_json`.
         article_id:       str
         title:            str
         slug:             str = ""
         body:             str
         meta_title:       str = ""
         meta_description: str = ""
-        schema_json:      str = ""
-        faq_schema_json:  str = ""
+        schema_json_:      str = Field("", alias="schema_json")
+        faq_schema_json_:  str = Field("", alias="faq_schema_json")
         keyword:          str = ""
         pillar:           str = ""
         language:         str = "english"
@@ -947,7 +977,7 @@ try:
             slug=art.slug or re.sub(r"\s+","-",art.title.lower())[:80],
             body=art.body, meta_title=art.meta_title or art.title,
             meta_description=art.meta_description,
-            schema_json=art.schema_json, faq_schema_json=art.faq_schema_json,
+            schema_json=art.schema_json_, faq_schema_json=art.faq_schema_json_,
             keyword=art.keyword, pillar=art.pillar, language=art.language,
             platform=Platform(art.platform),
             scheduled_date=art.scheduled_date,

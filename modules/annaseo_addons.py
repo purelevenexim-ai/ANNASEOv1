@@ -29,7 +29,7 @@ How to integrate:
 from __future__ import annotations
 
 import os, re, json, hashlib, logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -140,15 +140,28 @@ class HDBSCANClustering:
 
     def _kmeans_fallback(self, keywords: List[str],
                           embeddings: List[List[float]]) -> Dict[str, List[str]]:
-        import numpy as np
-        from sklearn.cluster import KMeans
-        k = max(3, min(50, len(keywords) // 10))
-        X = np.array(embeddings)
-        labels = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(X)
-        clusters: Dict[int, List[str]] = {}
-        for kw, label in zip(keywords, labels):
-            clusters.setdefault(int(label), []).append(kw)
-        return {sorted(kws, key=len)[0]: kws for kws in clusters.values()}
+        # Lightweight fallback clustering without sklearn/hdbscan.
+        # This creates a deterministic partition of keywords into k buckets
+        # where k is proportional to the list size. Guarantees:
+        # - returns dict
+        # - all keywords assigned exactly once
+        # - keys are strings and values are lists
+        n = len(keywords)
+        if n == 0:
+            return {}
+        k = max(1, min(50, n // 10 if n >= 10 else 1))
+        clusters: Dict[int, List[str]] = {i: [] for i in range(k)}
+        for idx, kw in enumerate(keywords):
+            clusters[idx % k].append(kw)
+
+        # Name cluster by its shortest keyword to be stable and human-readable
+        named: Dict[str, List[str]] = {}
+        for kws in clusters.values():
+            if not kws:
+                continue
+            name = sorted(kws, key=len)[0]
+            named[name] = kws
+        return named
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -757,7 +770,7 @@ class ContentLifecycle:
     peak_rank:    int        = 999
     consecutive_drops: int   = 0
     weeks_at_stage:    int   = 0
-    last_updated:      str   = field(default_factory=lambda: datetime.utcnow().isoformat())
+    last_updated:      str   = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     next_action:       str   = ""
 
 
@@ -818,7 +831,7 @@ class ContentLifecycleManager:
             log.info(f"[Lifecycle] '{lc.keyword}' stage change: "
                      f"{prev_stage} → {lc.stage} (rank {new_rank})")
 
-        lc.last_updated = datetime.utcnow().isoformat()
+        lc.last_updated = datetime.now(timezone.utc).isoformat()
         return lc
 
     def _transition(self, lc: ContentLifecycle,

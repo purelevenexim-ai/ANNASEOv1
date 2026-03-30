@@ -49,7 +49,7 @@ every internal link targets it.
 """
 
 from __future__ import annotations
-import os, re, json, hashlib, time, logging, sqlite3
+import os, re, json, hashlib, time, logging, sqlite3, uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -136,13 +136,20 @@ def _db() -> sqlite3.Connection:
     CREATE TABLE IF NOT EXISTS keyword_input_sessions (
         session_id      TEXT PRIMARY KEY,
         project_id      TEXT NOT NULL,
+        seed_keyword    TEXT DEFAULT '',
         stage           TEXT DEFAULT 'input',
+        stage_status    TEXT DEFAULT 'pending',
+        pillar_support_map TEXT DEFAULT '{}',
+        intent_focus    TEXT DEFAULT 'both',
         total_generated INTEGER DEFAULT 0,
         total_accepted  INTEGER DEFAULT 0,
         total_rejected  INTEGER DEFAULT 0,
         sources_done    TEXT DEFAULT '[]',
         customer_url    TEXT DEFAULT '',
         competitor_urls TEXT DEFAULT '[]',
+        business_intent TEXT DEFAULT 'mixed',
+        target_audience TEXT DEFAULT '',
+        geographic_focus TEXT DEFAULT 'India',
         created_at      TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at      TEXT DEFAULT CURRENT_TIMESTAMP
     );
@@ -163,8 +170,40 @@ def _db() -> sqlite3.Connection:
     CREATE INDEX IF NOT EXISTS ix_kw_pillar  ON keyword_universe_items(pillar_keyword);
     CREATE INDEX IF NOT EXISTS ix_kw_status  ON keyword_universe_items(status);
     CREATE INDEX IF NOT EXISTS ix_pillar_project ON pillar_keywords(project_id);
+
+    CREATE TABLE IF NOT EXISTS top100_snapshots (
+        snapshot_id TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        keywords    TEXT NOT NULL,
+        created_at  TEXT DEFAULT CURRENT_TIMESTAMP
+    );
     """)
     con.commit()
+    # Migration: add columns introduced after initial schema
+    try:
+        con.execute("ALTER TABLE keyword_input_sessions ADD COLUMN stage_status TEXT DEFAULT 'pending'")
+        con.commit()
+    except Exception:
+        pass
+    for _sql in [
+        "ALTER TABLE keyword_universe_items ADD COLUMN ai_score REAL DEFAULT 0.0",
+        "ALTER TABLE keyword_universe_items ADD COLUMN ai_flags TEXT DEFAULT '[]'",
+        "ALTER TABLE keyword_universe_items ADD COLUMN score_signals TEXT DEFAULT '{}'",
+        "ALTER TABLE keyword_universe_items ADD COLUMN final_score REAL DEFAULT 0.0",
+        "ALTER TABLE keyword_universe_items ADD COLUMN category TEXT DEFAULT 'informational'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN seed_keyword TEXT DEFAULT ''",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN pillar_support_map TEXT DEFAULT '{}'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN intent_focus TEXT DEFAULT 'both'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN business_intent TEXT DEFAULT 'mixed'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN target_audience TEXT DEFAULT ''",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN geographic_focus TEXT DEFAULT 'India'",
+    ]:
+        try:
+            con.execute(_sql)
+            con.commit()
+        except Exception:
+            pass  # column already exists
     return con
 
 
@@ -211,11 +250,14 @@ class CustomerInputCollector:
         log.info(f"[Input] Saved {len(saved)} supporting keywords for {project_id}")
         return saved
 
-    def get_pillars(self, project_id: str) -> List[dict]:
-        return [dict(r) for r in _db().execute(
-            "SELECT * FROM pillar_keywords WHERE project_id=? AND confirmed=1 ORDER BY priority",
-            (project_id,)
-        ).fetchall()]
+    def get_pillars(self, project_id: str, seed: str = "") -> List[dict]:
+        query = "SELECT * FROM pillar_keywords WHERE project_id=? AND confirmed=1"
+        params = [project_id]
+        if seed:
+            query += " AND LOWER(keyword) LIKE ?"
+            params.append(f"%{seed.lower()}%")
+        query += " ORDER BY priority"
+        return [dict(r) for r in _db().execute(query, params).fetchall()]
 
     def get_supporting(self, project_id: str) -> List[dict]:
         return [dict(r) for r in _db().execute(
@@ -276,7 +318,8 @@ class CrossMultiplier:
     }
 
     def generate(self, pillars: List[dict], supporting: List[dict],
-                  intent_focus: str = "both") -> List[dict]:
+                  intent_focus: str = "both", seed: str = "",
+                  pillar_support_map: Optional[Dict[str, List[str]]] = None) -> List[dict]:
         results = []
 
         for pillar_item in pillars:
@@ -285,7 +328,14 @@ class CrossMultiplier:
 
             results.append(self._make_item(pil, pil, "pillar_direct", pil_intent, 100))
 
-            for sup_item in supporting:
+            # Determine supporting set for this pillar (manual selection enforces local mapping)
+            if pillar_support_map and pil.lower() in pillar_support_map:
+                selected_supports = set([s.lower() for s in pillar_support_map[pil.lower()] if isinstance(s, str)])
+                support_items = [sup_item for sup_item in supporting if sup_item["keyword"].lower() in selected_supports]
+            else:
+                support_items = supporting
+
+            for sup_item in support_items:
                 sup = sup_item["keyword"]
                 sup_intent = sup_item.get("intent_type", "informational")
                 combos = self._combine(pil, sup, sup_intent)
@@ -309,8 +359,15 @@ class CrossMultiplier:
                 seen.add(k)
                 unique.append(r)
 
+        if seed:
+            filtered = [r for r in unique if seed.lower() in r["keyword"].lower()]
+            invalid = [r for r in unique if seed.lower() not in r["keyword"].lower()]
+            if invalid:
+                log.warning(f"[CrossMul] Seed contamination removed {len(invalid)} items for seed={seed}: {invalid[:5]}")
+            unique = filtered
+
         log.info(f"[CrossMul] Generated {len(unique)} combinations from "
-                  f"{len(pillars)} pillars x {len(supporting)} supporting")
+                  f"{len(pillars)} pillars x {len(supporting)} supporting (seed={seed})")
         return unique
 
     def _combine(self, pillar: str, supporting: str, intent: str) -> List[Tuple[str, str]]:
@@ -527,7 +584,7 @@ class GoogleKeywordEnricher:
             diff = kw_item.get("difficulty", 50)
             rel  = kw_item.get("relevance_score", 50)
             kw_item["opportunity_score"] = round(
-                (vol / 100) * (1 - diff / 100) * (rel / 100) * 100, 1
+                min(vol / 1000, 1.0) * (1 - diff / 100) * (rel / 100) * 100, 1
             )
         return keywords
 
@@ -598,24 +655,232 @@ class GoogleKeywordEnricher:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class UniverseAssembler:
+    def _is_entity_match(self, keyword: str, pillars: List[str]) -> bool:
+        if not pillars:
+            return True
+        kw = keyword.lower()
+        for p in pillars:
+            pword = p.strip().lower()
+            if not pword:
+                continue
+            if pword in kw:
+                return True
+        tokens = [t for p in pillars for t in p.lower().split() if len(t) > 2]
+        return any(t in kw for t in tokens)
+
+    def _classify_intent(self, keyword: str) -> str:
+        kw = keyword.lower()
+        if any(tok in kw for tok in TRANSACTIONAL_SIGNALS):
+            return "transactional"
+        if any(tok in kw for tok in INFORMATIONAL_SIGNALS):
+            return "informational"
+        if any(x in kw for x in ["vs", "compare", "comparison", "vs."]):
+            return "comparison"
+        if any(x in kw for x in ["near me", "local", "in india", "kerala", "kochi"]):
+            return "local"
+        return "commercial"
+
+    def _extract_modifiers(self, keyword: str) -> dict:
+        kw = keyword.lower()
+        return {
+            "quality": [m for m in ["organic", "premium", "export", "supreme", "fresh"] if m in kw],
+            "location": [m for m in ["india", "kerala", "kochi", "malabar", "wayanad"] if m in kw],
+            "intent": [m for m in TRANSACTIONAL_SIGNALS + INFORMATIONAL_SIGNALS if m in kw],
+        }
+
+    # ---------- P3 Scoring Constants ----------
+    JUNK_PATTERNS = [
+        "drawing", "emoji", "meaning", "experiment",
+        "diagram", "kids", "photos", "images"
+    ]
+
+    BUYER_KEYWORDS = ["buy", "price", "wholesale", "supplier", "export", "bulk"]
+
+    INTENT_SCORE = {
+        "transactional": 100,
+        "commercial": 80,
+        "comparison": 70,
+        "informational": 40,
+        "navigational": 20,
+    }
+
+    def _is_junk(self, keyword: str) -> bool:
+        kw = keyword.lower()
+        return any(token in kw for token in self.JUNK_PATTERNS)
+
+    def _buyer_score(self, keyword: str) -> int:
+        kw = keyword.lower()
+        return 100 if any(token in kw for token in self.BUYER_KEYWORDS) else 40
+
+    def _local_score(self, keyword: str) -> int:
+        kw = keyword.lower()
+        return 100 if any(loc in kw for loc in ["india", "kerala", "near me"]) else 50
+
+    def _relevance_score(self, keyword: str, entity: str) -> int:
+        kw = keyword.lower()
+        ent = (entity or "").lower().strip()
+        if ent and ent in kw:
+            return 100
+        return 60
+
+    def _brand_score(self, keyword: str, usp: str) -> int:
+        kw = keyword.lower()
+        if any(v in kw for v in ["export", "premium", "bulk"]):
+            return 90
+        if usp and any(word in kw for word in usp.lower().split()):
+            return 85
+        return 60
+
+    def _naturalness_score(self, keyword: str) -> int:
+        # basic heuristic; extend with ML model later
+        kw = keyword.lower().strip()
+        tokens = kw.split()
+        if len(tokens) >= 3 and " " in kw:
+            return 90
+        if len(tokens) == 2:
+            return 80
+        return 60
+
+    def _compute_score(self, kw: dict, entity: str, usp: str) -> float:
+        keyword = kw.get("keyword", "")
+        intent = kw.get("intent", "informational")
+
+        intent_s = self.INTENT_SCORE.get(intent, 40)
+        buyer_s = self._buyer_score(keyword)
+        rel_s = self._relevance_score(keyword, entity)
+        brand_s = self._brand_score(keyword, usp)
+        local_s = self._local_score(keyword)
+        nat_s = self._naturalness_score(keyword)
+
+        final_score = (
+            intent_s * 0.30 +
+            buyer_s * 0.25 +
+            rel_s * 0.20 +
+            brand_s * 0.15 +
+            local_s * 0.05 +
+            nat_s * 0.05
+        )
+        return round(min(100, max(0, final_score)), 2)
+
+    def _select_top_100(self, scored: List[dict]) -> List[dict]:
+        sorted_kw = sorted(scored, key=lambda x: x.get("final_score", 0), reverse=True)
+
+        money = [k for k in sorted_kw if k.get("category") == "money"][:40]
+        consideration = [k for k in sorted_kw if k.get("category") == "consideration"][:30]
+        informational = [k for k in sorted_kw if k.get("category") == "informational"][:20]
+        local = [k for k in sorted_kw if any(loc in k.get("keyword","") for loc in ["india", "kerala"])][:10]
+
+        final = money + consideration + informational + local
+        seen = set(); unique = []
+        for kw in final:
+            text = kw.get("keyword","")
+            if text not in seen:
+                seen.add(text)
+                unique.append(kw)
+        return unique[:100]
+
+    def score_and_select_top100(self, project_id: str, session_id: str, entity: str = "", usp: str = "") -> List[dict]:
+        # fallback lookup if not passed
+        project_db = get_db()
+        if not usp:
+            p = project_db.execute("SELECT usp FROM projects WHERE project_id=?", (project_id,)).fetchone()
+            usp = p["usp"] if p else ""
+        if not entity:
+            p = project_db.execute("SELECT keyword FROM pillar_keywords WHERE project_id=? ORDER BY priority LIMIT 1", (project_id,)).fetchone()
+            entity = p["keyword"] if p else ""
+        project_db.close()
+
+        con = _db()
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM keyword_universe_items WHERE session_id=? AND project_id=?",
+            (session_id, project_id)
+        ).fetchall()]
+        con.close()
+
+        scored = []
+        for kw in rows:
+            keyword_text = kw.get("keyword", "")
+            if self._is_junk(keyword_text):
+                continue
+            kw_intent = kw.get("intent", "informational")
+            kw_obj = {
+                "keyword": keyword_text,
+                "intent": kw_intent,
+                "entities": {
+                    "product": [kw.get("pillar_keyword", "")],
+                },
+            }
+            final_score = self._compute_score(kw_obj, entity, usp)
+            category = self._categorize(final_score)
+            row_copy = kw.copy()  # copy existing data
+            row_copy["final_score"] = final_score
+            row_copy["category"] = category
+            scored.append(row_copy)
+
+        return self._select_top_100(scored)
+
+    def _categorize(self, score: float) -> str:
+        if score >= 80:
+            return "money"
+        if score >= 65:
+            return "consideration"
+        if score >= 40:
+            return "informational"
+        return "junk"
+
+    def _cluster_keywords(self, keywords: List[dict]) -> List[dict]:
+        clusters = {}
+        for kw in keywords:
+            intent = kw.get("intent", "commercial")
+            modifiers = kw.get("modifiers", {})
+            key = (intent, tuple(sorted(modifiers.get("quality", []))), tuple(sorted(modifiers.get("location", []))))
+            clusters.setdefault(key, []).append(kw)
+
+        grouped = []
+        for key, items in clusters.items():
+            primary = sorted(items, key=lambda x: x.get("opportunity_score", 0), reverse=True)[0]
+            grouped.append({
+                "cluster_key": key,
+                "primary": primary,
+                "variants": [i for i in items if i["keyword"] != primary["keyword"]],
+                "intent": key[0],
+                "count": len(items),
+            })
+        return grouped
+
     def assemble(self, project_id: str, session_id: str,
                   cross_kws: List[dict], site_kws: List[dict],
-                  competitor_kws: List[dict], gsc_kws: List[dict] = None) -> List[dict]:
+                  competitor_kws: List[dict], gsc_kws: List[dict] = None,
+                  seed: str = "") -> List[dict]:
         all_kws = list(cross_kws) + list(site_kws) + list(competitor_kws)
         if gsc_kws:
             all_kws.extend(gsc_kws)
 
-        deduped: Dict[str, dict] = {}
+        # Entity lock: avoid drift across pillars (clove should not mutate into turmeric etc.)
+        if seed:
+            pillar_words = [p["keyword"] for p in CustomerInputCollector().get_pillars(project_id, seed=seed)]
+        else:
+            pillar_words = [p["keyword"] for p in CustomerInputCollector().get_pillars(project_id)]
+        filtered = []
         for kw in all_kws:
-            k = kw["keyword"].lower().strip()
-            if not k or len(k) < 4:
+            text = kw.get("keyword", "").strip()
+            if not text or len(text) < 4:
                 continue
+            if self._is_entity_match(text, pillar_words):
+                filtered.append(kw)
+
+        # Exact dedup + best source merging, no destructive normalization that collapses intent / modifier variants.
+        deduped: Dict[str, dict] = {}
+        for kw in filtered:
+            k = kw["keyword"].lower().strip()
             if k not in deduped:
                 deduped[k] = kw
             else:
                 existing = deduped[k]
-                if kw.get("opportunity_score", 0) > existing.get("opportunity_score", 0):
-                    deduped[k] = {**kw, "source": f"{existing['source']}+{kw['source']}"}
+                existing_score = existing.get("opportunity_score", 0) or 0
+                kw_score = kw.get("opportunity_score", 0) or 0
+                if kw_score > existing_score:
+                    deduped[k] = {**kw, "source": f"{existing.get('source','')}+{kw.get('source','')}".strip("+")}
                 else:
                     deduped[k]["source"] = f"{existing.get('source','')}+{kw.get('source','')}".strip("+")
 
@@ -624,18 +889,49 @@ class UniverseAssembler:
             if kw["keyword"].lower() in gsc_near_rank:
                 kw["quick_win"] = 1
 
-        final = sorted(deduped.values(),
-                        key=lambda x: x.get("opportunity_score", 0), reverse=True)
+        universe_keywords = []
+        for kw in deduped.values():
+            # Relaxed seed filter: only filter if seed is provided and the keyword has no relation to it.
+            # Previously: if seed and seed.lower() not in kw.get("keyword", "").lower(): continue
+            # Now we keep keywords even if they don't contain the literal seed string, as long as they passed _is_entity_match.
+            text = kw.get("keyword", "")
+            intent = kw.get("intent") or self._classify_intent(text)
+            modifiers = kw.get("modifiers") or self._extract_modifiers(text)
+            kw["intent"] = intent
+            kw["modifiers"] = modifiers
+            universe_keywords.append(kw)
+
+        clusters = self._cluster_keywords(universe_keywords)
+        log.info(f"[Assembler] created {len(clusters)} clusters from {len(universe_keywords)} keywords")
+
+        # Score and classify each keyword (core P3 scoring)
+        entity = pillar_words[0] if pillar_words else ""
+        usp = ""  # if project has USP pulled in, pass it here
+        for kw in universe_keywords:
+            kw["final_score"] = self._compute_score(kw, entity, usp)
+            kw["category"] = self._categorize(kw["final_score"])
+
+        final = sorted(universe_keywords,
+                       key=lambda x: x.get("final_score", x.get("opportunity_score", 0)), reverse=True)
+
+        top100 = self._select_top_100(final)
 
         con = _db()
         for kw in final:
             item_id = f"ki_{session_id}_{hashlib.md5(kw['keyword'].encode()).hexdigest()[:8]}"
+            serp_domain_proxy = 100 if kw.get("source") in ["site_crawl", "competitor_crawl"] else 70
+            serp_intent_diff = 100 if kw.get("intent", "informational") == "transactional" else 70
+            ai_flags = {
+                "serp_domain_proxy": serp_domain_proxy,
+                "serp_intent_diff": serp_intent_diff,
+                "brand_tone_matched": kw.get("brand_score", 0) >= 70
+            }
             con.execute("""
                 INSERT OR REPLACE INTO keyword_universe_items
                 (item_id, project_id, session_id, keyword, pillar_keyword,
                  source, intent, volume_estimate, difficulty, relevance_score,
-                 opportunity_score, quick_win, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 opportunity_score, final_score, category, quick_win, status, ai_flags)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (item_id, project_id, session_id, kw["keyword"],
                    kw.get("pillar_keyword", ""),
                    kw.get("source", ""),
@@ -644,8 +940,10 @@ class UniverseAssembler:
                    int(kw.get("difficulty", 50)),
                    float(kw.get("relevance_score", 50)),
                    float(kw.get("opportunity_score", 0)),
+                   float(kw.get("final_score", 0)),
+                   kw.get("category", "informational"),
                    int(kw.get("quick_win", 0)),
-                   "pending"))
+                   "pending", json.dumps({**kw.get("modifiers", {}), **ai_flags})))
         con.execute("""
             UPDATE keyword_input_sessions SET total_generated=?, updated_at=?
             WHERE session_id=?
@@ -653,7 +951,8 @@ class UniverseAssembler:
         con.commit()
 
         log.info(f"[Assembler] {len(final)} unique keywords assembled for {project_id}")
-        return final
+        return {"final": final, "clusters": clusters, "top100": top100}
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -719,15 +1018,33 @@ class ReviewManager:
         return {r["status"]: r["cnt"] for r in rows}
 
     def get_review_queue(self, session_id: str, pillar: str = None,
-                          status: str = "pending", limit: int = 100,
-                          offset: int = 0) -> List[dict]:
+                          status: str = None, intent: str = None,
+                          review_method: str = None,
+                          sort_by: str = "opp_desc",
+                          limit: int = 100, offset: int = 0) -> List[dict]:
         con = _db()
-        q = "SELECT * FROM keyword_universe_items WHERE session_id=? AND status=?"
-        p = [session_id, status]
+        q = "SELECT * FROM keyword_universe_items WHERE session_id=?"
+        p: list = [session_id]
+        if status and status != "all":
+            q += " AND status=?"
+            p.append(status)
         if pillar:
             q += " AND pillar_keyword=?"
             p.append(pillar)
-        q += " ORDER BY opportunity_score DESC, relevance_score DESC LIMIT ? OFFSET ?"
+        if intent:
+            q += " AND intent=?"
+            p.append(intent)
+        if review_method == "method1":
+            q += " AND source IN ('cross_multiply','site_crawl','competitor_crawl')"
+        elif review_method == "method2":
+            q += " AND source IN ('research_autosuggest','research_competitor_gap','research_site_crawl','strategy')"
+        sort_map = {
+            "opp_desc": "opportunity_score DESC, relevance_score DESC",
+            "kd_asc":   "difficulty ASC",
+            "vol_desc":  "volume_estimate DESC",
+            "kw_asc":    "keyword ASC",
+        }
+        q += f" ORDER BY {sort_map.get(sort_by, 'opportunity_score DESC')} LIMIT ? OFFSET ?"
         p += [limit, offset]
         return [dict(r) for r in con.execute(q, p).fetchall()]
 
@@ -774,78 +1091,158 @@ class KeywordInputEngine:
         self.reviewer         = ReviewManager()
 
     def save_customer_input(self, project_id: str, pillars: List[dict],
-                              supporting: List[str], intent_focus: str = "both",
-                              customer_url: str = "", competitor_urls: List[str] = None) -> str:
+                              supporting: List[str], pillar_support_map: Dict[str, List[str]] = None,
+                              intent_focus: str = "both",
+                              customer_url: str = "", competitor_urls: List[str] = None,
+                              business_intent: str = "mixed", target_audience: str = "",
+                              geographic_focus: str = "India") -> str:
         self.input_collector.save_pillars(project_id, pillars)
         self.input_collector.save_supporting(project_id, supporting)
 
-        session_id = f"kis_{project_id}_{int(time.time())}"
+        session_id = f"kis_{project_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        seed_keyword = ""
+        if pillars and isinstance(pillars, list) and len(pillars) > 0:
+            first_pillar = str(pillars[0].get("keyword", "")).strip().lower()
+            seed_keyword = first_pillar
+
         con = _db()
         con.execute("""
             INSERT INTO keyword_input_sessions
-            (session_id, project_id, stage, customer_url, competitor_urls)
-            VALUES (?, ?, 'input', ?, ?)
-        """, (session_id, project_id, customer_url or "",
-              json.dumps(competitor_urls or [])))
+            (session_id, project_id, seed_keyword, stage, pillar_support_map, intent_focus, customer_url, competitor_urls, business_intent, target_audience, geographic_focus)
+            VALUES (?, ?, ?, 'input', ?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, project_id, seed_keyword,
+              json.dumps(pillar_support_map or {}), intent_focus,
+              customer_url or "", json.dumps(competitor_urls or []),
+              business_intent or "mixed", target_audience or "", geographic_focus or "India"))
         con.commit()
         log.info(f"[KIE] Customer input saved: {len(pillars)} pillars, "
                   f"{len(supporting)} supporting — session {session_id}")
         return session_id
 
+    def _run_ai_review_pipeline(self, project_id: str, session_id: str,
+                                stage: str = "deepseek",
+                                auto_apply: bool = True,
+                                backend_url: str = None) -> Optional[dict]:
+        """Run a blocking AI review stage by calling the local review endpoint."""
+        if not backend_url:
+            backend_url = os.getenv("ANNASEO_BACKEND_URL", "http://localhost:8000")
+        try:
+            resp = _req.post(
+                f"{backend_url}/api/ki/{project_id}/ai-review/session/{session_id}",
+                json={"stage": stage, "auto_apply": auto_apply, "limit": 5000},
+                timeout=240
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            log.warning(f"[KIE] AI review call failed for session {session_id}: {e}")
+            return None
+
     def generate_universe(self, project_id: str, session_id: str,
                             customer_url: str = "",
                             competitor_urls: List[str] = None) -> dict:
         con = _db()
-        con.execute("UPDATE keyword_input_sessions SET stage='crawling' WHERE session_id=?",
-                     (session_id,))
-        con.commit()
 
-        pillars_data    = self.input_collector.get_pillars(project_id)
+        def _step(stage, sources):
+            con.execute(
+                "UPDATE keyword_input_sessions SET stage=?, sources_done=?, updated_at=? WHERE session_id=?",
+                (stage, json.dumps(sources), datetime.utcnow().isoformat(), session_id)
+            )
+            con.commit()
+
+        sources = []
+        _step('cross_multiply', sources)
+
+        # Ensure strict per-session seed isolation from customer input
+        row = _db().execute(
+            "SELECT seed_keyword, pillar_support_map, intent_focus FROM keyword_input_sessions WHERE session_id=?",
+            (session_id,)
+        ).fetchone()
+        session_seed = row["seed_keyword"] if row and row["seed_keyword"] else ""
+        pillar_support_map = {}
+        intent_focus_db = "both"
+        if row:
+            try:
+                pillar_support_map = json.loads(row.get("pillar_support_map") or "{}")
+            except Exception:
+                pillar_support_map = {}
+            intent_focus_db = row.get("intent_focus") or "both"
+
+        pillars_data    = self.input_collector.get_pillars(project_id, seed=session_seed)
         supporting_data = self.input_collector.get_supporting(project_id)
-        pillar_words    = [p["keyword"] for p in pillars_data]
+        if session_seed:
+            pillar_words = [p["keyword"] for p in pillars_data if session_seed.lower() in p["keyword"].lower()]
+        else:
+            pillar_words = [p["keyword"] for p in pillars_data]
 
-        # Source A: Cross multiplication
-        log.info("[KIE] Source A: Cross-multiplying pillars x supporting...")
-        cross_kws = self.cross_multiplier.generate(pillars_data, supporting_data)
+        # Step 1: Cross multiplication
+        log.info("[KIE] Step 1: Cross-multiplying pillars x supporting...")
+        cross_kws = self.cross_multiplier.generate(
+            pillars_data,
+            supporting_data,
+            intent_focus=intent_focus_db,
+            seed=session_seed,
+            pillar_support_map=pillar_support_map,
+        )
+        sources.append({"step": "cross_multiply", "count": len(cross_kws), "label": "phrase combinations"})
+        _step('crawl_site', sources)
 
-        # Source B: Customer website crawl
+        # Step 2: Customer website crawl
         site_kws = []
         if customer_url:
-            log.info(f"[KIE] Source B: Crawling customer site {customer_url}...")
+            log.info(f"[KIE] Step 2: Crawling customer site {customer_url}...")
             try:
                 site_kws = self.web_extractor.crawl(customer_url, pillar_words, "site_crawl")
             except Exception as e:
                 log.warning(f"[KIE] Site crawl failed: {e}")
+        sources.append({"step": "crawl_site", "count": len(site_kws), "label": "keywords from site"})
+        _step('crawl_competitors', sources)
 
-        # Source C: Competitor crawl
+        # Step 3: Competitor crawl
         competitor_kws = []
         for comp_url in (competitor_urls or [])[:4]:
             if comp_url:
-                log.info(f"[KIE] Source C: Crawling competitor {comp_url}...")
+                log.info(f"[KIE] Step 3: Crawling competitor {comp_url}...")
                 try:
                     kws = self.web_extractor.crawl(comp_url, pillar_words, "competitor")
                     competitor_kws.extend(kws)
                 except Exception as e:
                     log.warning(f"[KIE] Competitor crawl failed {comp_url}: {e}")
+        sources.append({"step": "crawl_competitors", "count": len(competitor_kws), "label": "keywords from competitors"})
+        _step('enrich', sources)
 
-        # Source D: Enrich with volume + difficulty (free proxy)
-        log.info("[KIE] Source D: Enriching keyword scores...")
+        # Step 4: Enrich with autosuggest + volume + difficulty
+        log.info("[KIE] Step 4: Enriching keyword scores...")
         all_kws = cross_kws + site_kws + competitor_kws
         enriched = self.enricher.enrich_batch(all_kws, project_id)
+        sources.append({"step": "enrich", "count": len(enriched), "label": "keywords enriched"})
+        _step('assemble', sources)
 
-        # Assemble final universe
+        # Step 5: Assemble final universe
         nc = len(cross_kws)
         ns = len(site_kws)
-        final = self.assembler.assemble(
+        assembled = self.assembler.assemble(
             project_id, session_id,
             cross_kws=enriched[:nc],
             site_kws=enriched[nc:nc+ns],
             competitor_kws=enriched[nc+ns:],
+            seed=session_seed
         )
+        final = assembled.get("final", [])
+        top100 = assembled.get("top100", [])
+        sources.append({"step": "assemble", "count": len(final), "label": "keywords assembled"})
+        _step('score', sources)
 
-        con.execute("UPDATE keyword_input_sessions SET stage='review_cross', updated_at=? WHERE session_id=?",
-                     (datetime.utcnow().isoformat(), session_id))
-        con.commit()
+        # Step 6: Score (done inline — mark complete)
+        sources.append({"step": "score", "count": len(final), "label": "keywords scored"})
+        _step('review_cross', sources)
+
+        # Step 7: AI Review step (auto-run from pipeline before human review)
+        for ai_stage in ["deepseek", "groq", "gemini"]:
+            ai_review_result = self._run_ai_review_pipeline(project_id, session_id, stage=ai_stage)
+            if ai_review_result:
+                log.info(f"[KIE] AI stage {ai_stage} completed for session {session_id}: {ai_review_result.get('flagged_count',0)} flagged")
+        _step('ai_review', sources)
 
         by_pillar = {}
         for kw in final:
@@ -856,8 +1253,9 @@ class KeywordInputEngine:
 
         return {
             "session_id":     session_id,
-            "stage":          "review_cross",
+            "stage":          "ai_review",  # next stage now includes auto AI review
             "total_keywords": len(final),
+            "top_100_keywords": top100,
             "by_pillar":      by_pillar,
             "by_source": {
                 "cross_multiply": nc,

@@ -7,9 +7,8 @@ from alembic import context
 config = context.config
 fileConfig(config.config_file_name)
 
-# Use ANNASEO_DB env var or sqlite default
-db_url = os.getenv("DATABASE_URL",
-                    f"sqlite:///{os.getenv('ANNASEO_DB','./annaseo.db')}")
+# Prefer DATABASE_URL env var, then alembic config, then ANNASEO_DB sqlite default
+db_url = os.getenv("DATABASE_URL") or config.get_main_option("sqlalchemy.url") or f"sqlite:///{os.getenv('ANNASEO_DB','./annaseo.db')}"
 config.set_main_option("sqlalchemy.url", db_url)
 
 def run_migrations_offline():

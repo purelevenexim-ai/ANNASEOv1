@@ -85,7 +85,9 @@ ANNASEOv1/
 │
 ├── frontend/                     ← React 18 + Vite frontend
 │   ├── src/
-│   │   ├── App.jsx               ← All 8 pages
+│   │   ├── App.jsx               ← Dashboard, Keywords, Rankings, Blogs, Graph, Settings…
+│   │   ├── StrategyPage.jsx      ← Audience Setup, Run Strategy, Results, Priority Queue
+│   │   ├── KeywordInput.jsx      ← Keyword universe 5-step confirmation UI
 │   │   └── main.jsx
 │   ├── index.html
 │   ├── package.json
@@ -97,11 +99,14 @@ ANNASEOv1/
 ├── docs/                         ← Full documentation
 │   ├── ENGINES.md                ← Every engine, inputs, outputs, failure modes
 │   ├── API.md                    ← All API endpoints
-│   ├── DATA_MODELS.md            ← All 35+ database tables
+│   ├── DATA_MODELS.md            ← All 45+ database tables
 │   ├── DOMAIN_CONTEXT.md         ← Cross-domain vocabulary system
 │   ├── DEVELOPMENT_PLAN.md       ← Week-by-week build checklist
 │   ├── DISCUSSIONS.md            ← All design decisions and why
-│   └── RSD.md                    ← Global vs project RSD scope
+│   ├── RSD.md                    ← Global vs project RSD scope
+│   ├── STRATEGY_ENGINE.md        ← Both strategy engines, API routes, costs
+│   ├── RANKING_INTELLIGENCE.md   ← Ranking monitor, alerts, diagnosis
+│   └── CONTENT_FREEZE.md         ← Blog lifecycle: generate→approve→freeze→publish
 │
 ├── scripts/                      ← Utility scripts
 └── tests/                        ← Test suite
@@ -155,6 +160,32 @@ A Universe is what the customer types. A Pillar is what ranks for competitors.
 
 ---
 
+## Recent updates (P7/P8)
+
+- Added `P7_TopKeywordSelector` in `engines/ruflo_20phase_engine.py`:
+  - intent diversity quotas
+  - top 100 selection across keyword universe
+  - per-seed caching and pipeline output `top100_keywords`
+- Wired in P7B call inside `RufloOrchestrator.run_seed()`
+- Added pipeline output fields:
+  - `top100_count`
+  - `top100_keywords`
+
+### Dev verify commands
+
+```bash
+# 1. Run python syntax check
+python3 -m py_compile engines/ruflo_20phase_engine.py main.py
+
+# 2. Run targeted tests
+python3 -m pytest tests/test_p2_keyword_expansion.py tests/test_p1_p3_normalization.py
+
+# 3. Run the full pipeline for a sample seed
+python3 -c "from engines.ruflo_20phase_engine import RufloOrchestrator; r=RufloOrchestrator().run_seed('cardamom', generate_articles=False); print(r['top100_count'], [k['keyword'] for k in r['top100_keywords'][:5]])"
+```
+
+---
+
 ## The domain isolation system ⭐
 
 AnnaSEO is used by businesses in different industries. The same keyword means different things:
@@ -184,6 +215,42 @@ Engine: `quality/annaseo_domain_context.py` → `DomainContextEngine.classify(ke
 
 ---
 
+## System architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Browser (React 18 + Vite :5173)                                 │
+│  ┌────────────┐ ┌─────────────┐ ┌──────────┐ ┌───────────────┐  │
+│  │ Keywords   │ │  Strategy   │ │  Blogs   │ │ Rankings/Graph│  │
+│  │ (4 tabs +  │ │ (Audience + │ │ Calendar │ │  D3 force     │  │
+│  │  Universe) │ │  Run + PQ)  │ │ Freeze   │ │  directed     │  │
+│  └──────┬─────┘ └──────┬──────┘ └────┬─────┘ └──────┬────────┘  │
+└─────────│──────────────│─────────────│───────────────│───────────┘
+          │  REST+SSE    │             │               │
+┌─────────▼──────────────▼─────────────▼───────────────▼───────────┐
+│  FastAPI :8000 (main.py)                                          │
+│  ┌────────────────────────────────────────────────────────────┐   │
+│  │ Keyword pipeline  │ Strategy API  │ Blog API  │ Graph API  │   │
+│  │ /api/run          │ /api/strategy │ /api/blogs│ /api/graph │   │
+│  └───────────────────┴───────────────┴───────────┴────────────┘   │
+│                                                                    │
+│  ┌───────────────┐  ┌──────────────────┐  ┌────────────────────┐  │
+│  │ ruflo_20phase │  │ StrategyDev +    │  │ ContentGeneration  │  │
+│  │ (P1-P20)      │  │ FinalStrategy    │  │ Engine (7-pass)    │  │
+│  │ + P2_Enhanced │  │ RankingMonitor   │  │ + Publisher        │  │
+│  └───────────────┘  └──────────────────┘  └────────────────────┘  │
+│                                                                    │
+│  ┌───────────────────────────┐  ┌─────────────────────────────┐   │
+│  │ QI Engine + DomainContext │  │ GSC OAuth + Rankings Import │   │
+│  └───────────────────────────┘  └─────────────────────────────┘   │
+└────────────────────────────────┬───────────────────────────────────┘
+                                 │
+                    ┌────────────▼──────────┐
+                    │  SQLite (annaseo.db)   │
+                    │  45+ tables            │
+                    └───────────────────────┘
+```
+
 ## API ports
 
 | Port | Service |
@@ -200,10 +267,13 @@ Engine: `quality/annaseo_domain_context.py` → `DomainContextEngine.classify(ke
 |-----|---------|
 | `docs/ENGINES.md` | Every engine with inputs, outputs, failure modes |
 | `docs/API.md` | All REST API endpoints |
-| `docs/DATA_MODELS.md` | All 35+ database tables |
+| `docs/DATA_MODELS.md` | All 45+ database tables |
 | `docs/DOMAIN_CONTEXT.md` | Cross-domain vocabulary and project isolation |
 | `docs/DEVELOPMENT_PLAN.md` | Week-by-week build checklist |
 | `docs/DISCUSSIONS.md` | 20 design decisions and reasoning |
+| `docs/STRATEGY_ENGINE.md` | Strategy engines, API routes, cost estimates |
+| `docs/RANKING_INTELLIGENCE.md` | Ranking monitor, alert thresholds, diagnosis flow |
+| `docs/CONTENT_FREEZE.md` | Blog lifecycle: generate → approve → freeze → publish |
 
 ---
 

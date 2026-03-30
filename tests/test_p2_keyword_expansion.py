@@ -150,6 +150,26 @@ class TestP2Run:
         # google=3, youtube=2, amazon=3, ddg=2, reddit=2, questions=N → deduped
         assert len(result) >= 10
 
+    def test_includes_permutation_keywords(self, p2_instance, p1):
+        s = p1.run("black pepper")
+        result = p2_instance.run(s)
+        assert "buy black pepper" in result
+        assert "black pepper online" in result
+
+    def test_recursive_expansion_adds_new_keywords(self, p2_instance, p1, monkeypatch):
+        def small_google(kw): return [f"{kw} x"]
+        def no_other(kw): return []
+
+        monkeypatch.setattr(p2_instance, "_google_autosuggest", small_google)
+        monkeypatch.setattr(p2_instance, "_youtube_autosuggest", no_other)
+        monkeypatch.setattr(p2_instance, "_amazon_autosuggest", no_other)
+        monkeypatch.setattr(p2_instance, "_duckduckgo", no_other)
+        monkeypatch.setattr(p2_instance, "_reddit_titles", no_other)
+
+        s = p1.run("black pepper")
+        result = p2_instance.run(s)
+        assert any("x" in kw for kw in result)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DEDUPLICATION IN P2

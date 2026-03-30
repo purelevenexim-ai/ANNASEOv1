@@ -234,6 +234,27 @@ class AI:
     _last_gemini  = 0.0
 
     @staticmethod
+    def _extract_ollama_text(data: Any) -> str:
+        if not isinstance(data, dict):
+            return ""
+        if isinstance(data.get("response"), str) and data.get("response").strip():
+            return data["response"].strip()
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
+            return msg["content"].strip()
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
+                    return first["message"]["content"].strip()
+                if isinstance(first.get("text"), str):
+                    return first["text"].strip()
+        if isinstance(data.get("text"), str):
+            return data["text"].strip()
+        return ""
+
+    @staticmethod
     def deepseek(prompt: str, system: str = "You are a keyword research assistant.",
                   temperature: float = 0.1) -> str:
         """Local DeepSeek — ALL keyword classification/scoring/naming tasks."""
@@ -244,7 +265,10 @@ class AI:
                          {"role": "user",   "content": prompt}]
         }, timeout=120)
         r.raise_for_status()
-        text = r.json()["message"]["content"].strip()
+        data = r.json()
+        text = AI._extract_ollama_text(data)
+        if not text:
+            text = (data.get("response") or data.get("text") or "").strip()
         # Strip DeepSeek's <think>...</think> reasoning wrapper
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
         return text

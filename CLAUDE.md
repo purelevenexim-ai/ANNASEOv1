@@ -56,7 +56,10 @@ wrapper class `engines/ruflo_20phase_wired.py → WiredRufloOrchestrator`.
 | engines/ruflo_20phase_engine.py | P1–P20 keyword universe, RufloOrchestrator.run_seed() |
 | engines/ruflo_20phase_wired.py | WiredRufloOrchestrator — RawCollector + DCE + Metrics wrapper |
 | engines/ruflo_content_engine.py | ContentGenerationEngine.generate() — 7 passes |
-| engines/ruflo_strategy_dev_engine.py | StrategyDevelopmentEngine.run() |
+| engines/ruflo_strategy_dev_engine.py | StrategyDevelopmentEngine.run() — audience × location × religion × language |
+| engines/ruflo_final_strategy_engine.py | FinalStrategyEngine.run() — Claude CoT; RankingMonitor.diagnose_drop() |
+| engines/annaseo_p2_enhanced.py | P2_Enhanced — pillar×supporting phrase autosuggest expansion |
+| frontend/src/StrategyPage.jsx | Strategy page — 4 tabs: Audience Setup, Run, Results, Priority Queue |
 | engines/ruflo_confirmation_pipeline.py | ConfirmationPipeline — 5 gates |
 | engines/ruflo_seo_audit.py | RufloSEOAudit.full_audit() |
 | engines/ruflo_publisher.py | Publisher — WordPress + Shopify |
@@ -81,6 +84,13 @@ wrapper class `engines/ruflo_20phase_wired.py → WiredRufloOrchestrator`.
 SQLite for dev: ./annaseo.db
 Run migrations: python annaseo_wiring.py write-migrations . && alembic upgrade head
 All tables documented in: docs/DATA_MODELS.md
+
+New tables (added in-app via _init_db migration loop):
+  strategy_sessions, content_blogs (freeze), blog_versions, content_freeze_queue,
+  ranking_predictions, audience_profiles, system_graph_cache
+New columns on projects: target_languages, target_locations, business_type, usp,
+  audience_personas, competitor_urls, customer_reviews
+New columns on ranking_alerts: severity, status, diagnosis_json
 
 ## Environment variables
 See .env.example for all required variables.

@@ -1,0 +1,265 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategy_meta",
+    "market_analysis",
+    "keyword_strategy",
+    "content_strategy",
+    "authority_strategy",
+    "execution_plan"
+  ],
+  "properties": {
+    "strategy_meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "generated_at",
+        "execution_mode"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "generated_at": {
+          "type": "string"
+        },
+        "execution_mode": {
+          "type": "string",
+          "enum": [
+            "single_call"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "market_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_audience",
+        "search_intent_types",
+        "pain_points"
+      ],
+      "properties": {
+        "target_audience": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "search_intent_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "informational",
+              "commercial",
+              "transactional",
+              "navigational"
+            ]
+          }
+        },
+        "pain_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "keyword_strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_keywords",
+        "secondary_keywords",
+        "long_tail_keywords"
+      ],
+      "properties": {
+        "primary_keywords": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/keyword"
+          }
+        },
+        "secondary_keywords": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/keyword"
+          }
+        },
+        "long_tail_keywords": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/keyword"
+          }
+        }
+      }
+    },
+    "content_strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pillar_pages",
+        "cluster_topics"
+      ],
+      "properties": {
+        "pillar_pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/content_piece"
+          }
+        },
+        "cluster_topics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/content_piece"
+          }
+        }
+      }
+    },
+    "authority_strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backlink_plan",
+        "topical_depth"
+      ],
+      "properties": {
+        "backlink_plan": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "topical_depth": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "execution_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phases"
+      ],
+      "properties": {
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "phase_name",
+              "tasks"
+            ],
+            "properties": {
+              "phase_name": {
+                "type": "string"
+              },
+              "tasks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/task"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "keyword": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "keyword",
+        "intent",
+        "difficulty",
+        "priority"
+      ],
+      "properties": {
+        "keyword": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string",
+          "enum": [
+            "informational",
+            "commercial",
+            "transactional",
+            "navigational"
+          ]
+        },
+        "difficulty": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "priority": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5
+        }
+      }
+    },
+    "content_piece": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "target_keyword",
+        "search_intent",
+        "outline"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "target_keyword": {
+          "type": "string"
+        },
+        "search_intent": {
+          "type": "string",
+          "enum": [
+            "informational",
+            "commercial",
+            "transactional"
+          ]
+        },
+        "outline": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_name",
+        "priority"
+      ],
+      "properties": {
+        "task_name": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 5
+        }
+      }
+    }
+  }
+}

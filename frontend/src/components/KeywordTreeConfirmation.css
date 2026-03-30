@@ -1,0 +1,167 @@
+/* KeywordTreeConfirmation Component Styles */
+
+.tree-modal {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.tree-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.tree-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.tree-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tree-cluster {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+  background: white;
+}
+
+.tree-cluster-header {
+  padding: 12px;
+  background-color: #f9fafb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.2s;
+}
+
+.tree-cluster-header:hover {
+  background-color: #f3f4f6;
+}
+
+.tree-cluster-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.tree-cluster-header-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.tree-cluster-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tree-cluster-btn:hover {
+  background-color: #fafafa;
+  border-color: #d1d5db;
+}
+
+.tree-cluster-btn.delete {
+  color: #dc2626;
+  border-color: #fecaca;
+}
+
+.tree-cluster-btn.delete:hover {
+  background-color: #fef2f2;
+}
+
+.tree-keywords-list {
+  padding: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  background-color: white;
+}
+
+.tree-keyword-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background-color: #f0fdfa;
+  border: 1px solid #ccfbf1;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: grab;
+  transition: all 0.2s;
+}
+
+.tree-keyword-card:active {
+  cursor: grabbing;
+  opacity: 0.7;
+}
+
+.tree-keyword-card:hover {
+  background-color: #e0f2fe;
+  border-color: #bae6fd;
+}
+
+.tree-keyword-card.dragging {
+  opacity: 0.5;
+}
+
+.tree-keyword-delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  color: #dc2626;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  transition: all 0.2s;
+}
+
+.tree-keyword-delete-btn:hover {
+  transform: scale(1.2);
+}
+
+.tree-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.tree-error {
+  padding: 10px 12px;
+  background-color: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #dc2626;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.tree-success {
+  padding: 10px 12px;
+  background-color: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #16a34a;
+  border-radius: 6px;
+  font-size: 12px;
+}
