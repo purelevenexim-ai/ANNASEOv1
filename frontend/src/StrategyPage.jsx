@@ -215,20 +215,20 @@ export default function StrategyPage({ projectId, setPage }) {
   return (
     <div style={{ padding: 20, maxWidth: 1200, margin: "0 auto" }}>
       <div style={{ marginBottom: 24 }}>
-        <h1 style={{ margin: 0, fontSize: 24 }}>Strategy Workspace</h1>
+        <h1 style={{ margin: 0, fontSize: 24 }}>Content Strategy Analyzer</h1>
         <p style={{ margin: "6px 0 0", color: T.gray }}>
-          Input keywords, auto-enrich, run pipeline with live console, and review analytics.
+          Analyze individual keywords: SERP position, win probability, competitor landscape, and content opportunities.
         </p>
       </div>
 
       <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
         <Card>
-          <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Input</h2>
+          <h2 style={{ fontSize: 16, margin: "0 0 10px" }}>Analyze Keyword</h2>
           <input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
             onKeyDown={e => e.key === "Enter" && isRunReady && handleRun()}
-            placeholder="Enter main keyword"
+            placeholder="Enter a keyword to analyze (e.g., clove)"
             style={{ width: "100%", padding: 10, border: "1px solid #d5d7dc", borderRadius: 8, fontSize: 14 }}
           />
           <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>

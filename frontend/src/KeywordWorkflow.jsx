@@ -409,7 +409,7 @@ function StepInput({ projectId, onComplete, setPage }) {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Btn variant='default' onClick={saveAll} disabled={loading}>{loading ? 'Saving...' : saved ? '✓ Saved' : 'Save Draft'}</Btn>
-            <Btn variant='teal' onClick={goToStrategy} disabled={loading}>Step 2 — Strategy →</Btn>
+            <Btn variant='teal' onClick={goToStrategy} disabled={loading}>Step 2 — Research Keywords →</Btn>
           </div>
         </div>
         <div style={{ marginBottom: 14 }}>
@@ -624,14 +624,14 @@ function StepStrategy({ projectId, onComplete, onBack }) {
 
   return (
     <Card>
-      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2 — Strategy Generation</div>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2 — Keyword Research</div>
       <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 14 }}>
-        Generate a core keyword strategy from your initial pillar/supporting input. This step must complete before research.
+        Discover keywords from 3 sources: your own inputs (+10), Google suggestions (+5), and AI classification. Returns 20-50 ranked keywords.
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <Btn onClick={onBack}>← Back</Btn>
         <Btn variant="teal" onClick={startStrategy} disabled={!projectId || status === "running"}>
-          {status === "running" ? "Running…" : "Run Strategy"}
+          {status === "running" ? "Researching…" : "Run Research"}
         </Btn>
       </div>
       {status && <div style={{ marginBottom: 8, color: status === "failed" ? T.red : T.teal }}>
