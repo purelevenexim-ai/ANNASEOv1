@@ -2337,6 +2337,84 @@ def list_realtime_errors(limit: int = 100, path: str = None):
     }
 
 
+# --- Admin: Reconciliation endpoint (protected) -----------------------------
+class AdminReconcileRequest(BaseModel):
+    apply: bool = False
+
+
+@app.post("/api/admin/reconcile-projects", tags=["Admin"])
+def admin_reconcile_projects(body: AdminReconcileRequest, user=Depends(current_user)):
+    """Run a dry-run or apply reconciliation between main DB and KI/strategy tables.
+    - Dry-run (apply=False): returns missing mappings and missing project ids.
+    - Apply (apply=True): inserts missing `user_projects` mappings and placeholder `projects` rows.
+    Requires `role=='admin'` on the authenticated user.
+    """
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Forbidden")
+
+    db = get_db()
+
+    # 1) Projects with owner_id but missing user_projects mapping
+    missing_mappings = []
+    for r in db.execute("SELECT project_id, owner_id FROM projects WHERE owner_id IS NOT NULL AND owner_id!=''", ()).fetchall():
+        pid = r["project_id"]
+        uid = r["owner_id"]
+        if not db.execute("SELECT 1 FROM user_projects WHERE project_id=? AND user_id=?", (pid, uid)).fetchone():
+            missing_mappings.append({"project_id": pid, "owner_id": uid})
+
+    added_mappings = []
+    if body.apply and missing_mappings:
+        for m in missing_mappings:
+            db.execute("INSERT OR IGNORE INTO user_projects(user_id,project_id,role)VALUES(?,?,?)", (m["owner_id"], m["project_id"], "owner"))
+            added_mappings.append(m)
+        db.commit()
+
+    # 2) Find project IDs referenced in other tables (strategy_sessions, runs) and KI DB
+    found = set()
+    for table, col in (("strategy_sessions", "project_id"), ("runs", "project_id")):
+        try:
+            for r in db.execute(f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL AND {col}!=''", ()).fetchall():
+                found.add(r[0])
+        except Exception:
+            pass
+
+    try:
+        kidb = _ki_db()
+        try:
+            for r in kidb.execute("SELECT DISTINCT project_id FROM keyword_input_sessions WHERE project_id IS NOT NULL AND project_id!=''", ()).fetchall():
+                found.add(r[0])
+        finally:
+            try:
+                kidb.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    proj_set = set(r[0] for r in db.execute("SELECT DISTINCT project_id FROM projects").fetchall())
+    missing_projects = sorted([p for p in found if p not in proj_set])
+
+    created_projects = []
+    if body.apply and missing_projects:
+        now = datetime.now(timezone.utc).isoformat()
+        for pid in missing_projects:
+            db.execute(
+                "INSERT OR IGNORE INTO projects(project_id,name,industry,description,seed_keywords,owner_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (pid, f"imported-{pid}", "general", "Imported placeholder", json.dumps([]), "", now, now),
+            )
+            created_projects.append(pid)
+        db.commit()
+
+    return {
+        "missing_mappings": missing_mappings,
+        "added_mappings": added_mappings,
+        "missing_projects": missing_projects,
+        "created_projects": created_projects,
+        "applied": body.apply,
+    }
+
+
+
 @app.get("/api/errors/{error_id}", tags=["BugFixer"])
 def get_error_detail(error_id: str, user=Depends(current_user)):
     db = SessionLocal()
