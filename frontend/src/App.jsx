@@ -1066,7 +1066,7 @@ function ContentPipelineTab({ projectId }) {
         r.runs.forEach(run => { exp[run.run_id] = true; startSSE(run.run_id) })
         setExpandedRun(r.runs[0]?.run_id || null)
       } else {
-        setError(r?.detail || "Failed to start pipeline")
+        setError(typeof r?.detail === 'string' ? r.detail : Array.isArray(r?.detail) ? r.detail.map(e=>e.msg||String(e)).join('; ') : "Failed to start pipeline")
         setRunning(false)
       }
     } catch (e) { setError(String(e)); setRunning(false) }
@@ -2552,7 +2552,7 @@ function BlogCalendarPage() {
     setPopulating(true); setMsg("")
     const r = await api.post(`/api/blogs/${activeProject}/populate-calendar`, { weeks: 12, blogs_per_week: 15 })
     setPopulating(false)
-    setMsg(r?.created ? `Created ${r.created} blog stubs from strategy.` : (r?.detail || "Error — run strategy first"))
+    setMsg(r?.created ? `Created ${r.created} blog stubs from strategy.` : (typeof r?.detail === 'string' ? r.detail : "Error — run strategy first"))
     qclient.invalidateQueries(["blog-calendar", activeProject])
   }
 

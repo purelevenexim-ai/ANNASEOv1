@@ -384,7 +384,7 @@ function StepInput({ projectId, onComplete, setPage }) {
         setTimeout(() => setSaved(false), 2200)
         return { sessionId: r.session_id, pillars, supports: globalSupports, customerUrl, competitorUrls, businessIntent, targetAudience, geographicFocus }
       }
-      setError(r?.detail || 'Save failed')
+      setError(typeof r?.detail === 'string' ? r.detail : Array.isArray(r?.detail) ? r.detail.map(e=>e.msg||String(e)).join('; ') : 'Save failed')
       return null
     } catch(e) {
       setLoading(false)
@@ -614,7 +614,7 @@ function StepStrategy({ projectId, onComplete, onBack }) {
         setStatus("running")
       } else {
         setStatus("failed")
-        setError(response.detail || "Failed to start strategy")
+        setError(typeof response?.detail === 'string' ? response.detail : Array.isArray(response?.detail) ? response.detail.map(e=>e.msg||String(e)).join('; ') : "Failed to start strategy")
       }
     } catch (e) {
       setStatus("failed")
@@ -661,7 +661,7 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
       if (r.job_id) {
         setJobId(r.job_id); setStatus("running")
       } else {
-        setError(r.detail || "Failed to start research")
+        setError(typeof r?.detail === 'string' ? r.detail : Array.isArray(r?.detail) ? r.detail.map(e=>e.msg||String(e)).join('; ') : "Failed to start research")
       }
     } catch (e) { setError(String(e)) }
   }
@@ -2756,7 +2756,7 @@ function StepPipeline({ projectId, onComplete, onBack }) {
         setMode("running")
         r.runs.forEach(run => startSSE(run.run_id))
       } else {
-        setError(r?.detail || "Failed to start pipeline")
+        setError(typeof r?.detail === 'string' ? r.detail : Array.isArray(r?.detail) ? r.detail.map(e=>e.msg||String(e)).join('; ') : "Failed to start pipeline")
       }
     } catch (e) { setError(String(e)) }
   }

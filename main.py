@@ -2553,9 +2553,9 @@ try:
         intent_focus: str = "transactional"
         customer_url: Optional[str] = None
         competitor_urls: list = []
-        business_intent: str = "mixed"  # NEW: ecommerce|content_blog|supplier|mixed
-        target_audience: str = ""  # NEW: string
-        geographic_focus: str = "India"  # NEW: string
+        business_intent: Union[str, List[str]] = "mixed"  # accepts string or list
+        target_audience: str = ""
+        geographic_focus: str = "India"
 
     class _KIAction(BaseModel):
         keyword_id: str = ""    # item_id from keyword_universe_items
@@ -2593,6 +2593,12 @@ try:
     def ki_save_input(project_id: str, body: _KIInput, bg: BackgroundTasks, user=Depends(current_user)):
         """Save customer pillar + supporting keywords, trigger cross-multiply, return session_id."""
         _validate_project_exists(project_id)
+        # Normalize business_intent: accept both string and list
+        bi = body.business_intent
+        if isinstance(bi, list):
+            bi_str = ",".join(bi) if bi else "mixed"
+        else:
+            bi_str = bi or "mixed"
         try:
             sid = _kie.save_customer_input(
                 project_id=project_id,
@@ -2602,7 +2608,7 @@ try:
                 intent_focus=body.intent_focus,
                 customer_url=body.customer_url,
                 competitor_urls=body.competitor_urls,
-                business_intent=body.business_intent,
+                business_intent=bi_str,
                 target_audience=body.target_audience,
                 geographic_focus=body.geographic_focus,
             )
@@ -2611,7 +2617,7 @@ try:
             bg.add_task(_kie.generate_universe, project_id=project_id, session_id=sid,
                         customer_url=body.customer_url or "",
                         competitor_urls=body.competitor_urls or [])
-            return {"session_id": sid, "status": "saved", "business_intent": body.business_intent, "target_audience": body.target_audience, "geographic_focus": body.geographic_focus}
+            return {"session_id": sid, "status": "saved", "business_intent": bi_str, "target_audience": body.target_audience, "geographic_focus": body.geographic_focus}
 
         except sqlite3.IntegrityError as e:
             log.warning(f"[main] ki_save_input integrity error for {project_id}: {e}")
@@ -3904,7 +3910,12 @@ async def ki_research(
     """
     db = get_db()
     session_id = body.get("session_id", "")
-    business_intent = body.get("business_intent", "mixed")
+    # Normalize business_intent: accept both string and list
+    _bi = body.get("business_intent", "mixed")
+    if isinstance(_bi, list):
+        business_intent = ",".join(_bi) if _bi else "mixed"
+    else:
+        business_intent = _bi or "mixed"
 
     if not session_id:
         raise HTTPException(400, "session_id required")
