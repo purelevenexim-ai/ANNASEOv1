@@ -2,13 +2,8 @@
 ================================================================================
 ANNASEO — WIRING PACK  (annaseo_wiring.py)
 ================================================================================
-Three critical pieces that connect all engines:
-
-  1. GSCConnector        — Google Search Console OAuth2 + daily rank import
-  2. AlembicMigrations   — database migration scripts (all 35+ tables)
-  3. RufloScheduler      — all cron jobs, job types, and scheduling config
-
-Without these three, the engines don't talk to each other.
+GSC OAuth connector, database migrations, and Ruflo scheduler configuration.
+This is the primary wiring module for AnnaSEO system integration.
 ================================================================================
 """
 

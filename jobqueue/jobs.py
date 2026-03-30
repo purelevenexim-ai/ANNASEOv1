@@ -23,7 +23,7 @@ from services.llm_parser import parse_llm_json
 from services.llm_audit import save_llm_audit
 from services.quota import check_and_consume_quota
 from engines.ruflo_final_strategy_engine import FinalStrategyEngine, DefaultLLMClient
-from core.logging import get_logger, bind_context, log_event
+from core.log_setup import get_logger, bind_context, log_event
 from core.metrics import jobs_total, jobs_failed, step_duration_seconds, strategy_step_duration_seconds, job_duration_seconds, llm_tokens_total, llm_cost_usd_total
 
 

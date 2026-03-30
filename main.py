@@ -38,7 +38,7 @@ from core.gsc_analytics_pipeline import ingest_gsc, ingest_ga4, sync_to_experime
 from jobqueue.connection import research_queue, score_queue, pipeline_queue, redis_conn
 from jobqueue.jobs import run_research_job, run_score_job, run_pipeline_job, run_develop_job, run_final_job, run_single_call_job, run_seo_sync_job
 
-from core.logging import setup_logging, get_logger, bind_context
+from core.log_setup import setup_logging, get_logger, bind_context
 from core.metrics import register_metrics, api_requests_total, api_request_latency_seconds
 from core.trace import get_trace_id, set_trace_id
 from core.sentry import setup_sentry
