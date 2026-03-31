@@ -3171,17 +3171,16 @@ try:
             elif stage == "strategy":
                 can_advance = True  # Strategy step is optional; user can always continue
             elif stage == "research":
-                can_advance = total_keywords > 0
+                can_advance = True  # Research can return 0-50 keywords; user reviews and selects top ones
             elif stage == "review":
-                # Require a meaningful number of accepted keywords to proceed
-                REVIEW_ACCEPTED_THRESHOLD = 20
-                can_advance = accepted_count >= REVIEW_ACCEPTED_THRESHOLD
+                # Review allows any number of keywords (0+); user selects which to accept
+                can_advance = True
             elif stage == "ai_review":
-                can_advance = (ai_review_total > 0 and ai_review_pending == 0)
+                can_advance = True  # AI Review is optional; can skip
             elif stage == "pipeline":
-                can_advance = pipeline_completed_runs > 0
+                can_advance = True  # Pipeline can run with any accepted keywords
             elif stage == "clusters":
-                can_advance = clusters_count > 0
+                can_advance = True  # Clusters optional
             elif stage == "calendar":
                 can_advance = True
 

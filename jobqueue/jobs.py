@@ -598,98 +598,55 @@ def run_single_call_job(job_id: str):
             try:
                 job_tracker.update_strategy_job(db, job_id, status="running", current_step="strategy_processing", current_step_name="Strategy Processing", progress=10, retry_count=retry_count, last_heartbeat=_now())
 
-                input_data = job.get("input_payload", {}) or {}
-                project_id = job.get("project_id")
+                # Prepare context for FinalStrategyEngine
+                payload = job.get("input_payload", {}) or {}
+                context = {
+                    **payload,
+                    "keyword_strategy": job.get("keywords", {}),
+                    "serp_intelligence": job.get("serp", {}),
+                }
 
-                # Import StrategyProcessor for Step 1 keyword processing
-                from engines.strategy_processor import process_strategy
+                # Call the FinalStrategyEngine (LLM) for single-call mode
+                engine = FinalStrategyEngine(DefaultLLMClient())
+                strategy_logger = get_logger("strategy")
+                strategy_logger = bind_context(strategy_logger, job_id=job_id, project_id=job.get("project_id"), step="strategy")
 
-                # Extract Step 1 data from input_payload
-                session_id = input_data.get("session_id", "")
-                business_intent = input_data.get("business_intent", "mixed")
-                customer_url = input_data.get("customer_url")
-                competitor_urls = input_data.get("competitor_urls", [])
+                step_start = time.time()
+                result = engine.run(context)
+                duration_ms = int((time.time() - step_start) * 1000)
 
-                # Load user keywords from session if session_id provided
-                user_keywords = []
-                if session_id:
-                    try:
-                        # Try to load keywords from Step 1 session
-                        _ki_db = main._ki_db if hasattr(main, '_ki_db') else lambda: db
-                        ki_db = _ki_db()
-                        session_row = ki_db.execute(
-                            "SELECT * FROM keyword_input_sessions WHERE session_id=? AND project_id=?",
-                            (session_id, project_id)
-                        ).fetchone()
-                        if session_row:
-                            session_data = dict(session_row)
-                            # Load from pillar_support_map (the correct schema), not "pillars" (which doesn't exist)
-                            psm = json.loads(session_data.get("pillar_support_map") or "{}")
-                            user_keywords = []
-                            for pillar, supports in psm.items():
-                                user_keywords.append({"keyword": pillar, "source": "user_input"})
-                                for support in (supports or []):
-                                    user_keywords.append({"keyword": support, "source": "user_input"})
-                        ki_db.close()
-                    except Exception as e:
-                        log = logging.getLogger("strategy")
-                        log.warning(f"Could not load keywords from session {session_id}: {e}")
-
-                # Process strategy with Step 1 data
-                result = process_strategy(
-                    project_id=project_id,
-                    session_id=session_id,
-                    business_intent=business_intent,
-                    customer_url=customer_url,
-                    competitor_urls=competitor_urls,
-                    user_keywords=user_keywords
-                )
-
-                # Convert result to match FinalStrategyEngine output format
                 if result.get("success"):
-                    result = {
-                        "success": True,
-                        "data": {
-                            "strategy_context": result.get("strategy_context"),
-                            "scored_keywords": result.get("scored_keywords"),
-                            "message": result.get("message")
-                        },
-                        "raw": json.dumps(result, default=str),
-                        "tokens_used": 0,
-                        "cost_usd": 0.0,
-                        "validation_status": "valid"
-                    }
+                    log_event(strategy_logger, "info", "strategy_step", status="success", duration_ms=duration_ms)
                 else:
-                    result = {
-                        "success": False,
-                        "error": result.get("error", "Strategy processing failed"),
-                        "error_type": "strategy_error",
-                        "raw": "",
-                        "data": {},
-                        "tokens_used": 0,
-                        "cost_usd": 0.0,
-                        "validation_status": "invalid"
-                    }
+                    log_event(strategy_logger, "warning", "strategy_step", status="invalid", error=result.get("error"), duration_ms=duration_ms)
 
-                raw_response = result.get("raw")
+                raw_response = result.get('raw', '')
+
                 if raw_response is None:
                     raise RuntimeError("FinalStrategyEngine returned no raw response")
 
-                job_tracker.update_strategy_job(db, job_id, raw_llm_response=raw_response, progress=80)
+                # Persist raw LLM output into strategy_jobs row for debugging
+                if db is not None and job_id is not None and raw_response:
+                    job_tracker.update_strategy_job(db, job_id, raw_llm_response=raw_response, progress=80)
+
+                # Audit and metrics for LLM
+                tokens = result.get("tokens_used", 0) or 0
+                cost_usd = result.get("cost_usd", 0.0) or 0.0
+                if llm_tokens_total is not None:
+                    llm_tokens_total.labels(model="claude").inc(tokens)
+                if llm_cost_usd_total is not None:
+                    llm_cost_usd_total.labels(model="claude").inc(cost_usd)
 
                 if not result.get("success"):
-                    err = result.get("error", "Unknown error")
-                    etype = result.get("error_type", "provider_error")
-                    job_tracker.update_strategy_job(db, job_id,
-                        error_type=etype,
-                        error_message=err,
-                        validation_status=result.get("validation_status", "invalid"),
-                        raw_llm_response=raw_response,
-                        tokens_used=result.get("tokens_used", 0),
-                        cost_usd=result.get("cost_usd", 0.0),
-                        retry_count=retry_count,
-                    )
-                    raise ValueError(f"{etype}: {err}")
+                    err_msg = str(result.get("error", "unknown"))
+                    err_type = result.get("error_type", "strategy_error")
+                    # Accept missing API key as partial success and preserve prefix outputs
+                    if "No ANTHROPIC_API_KEY" in err_msg or "No ANTHROPIC_API_KEY set" in err_msg:
+                        log_event(strategy_logger, "warning", "strategy_partial_success", status="partial_success", error=err_msg, duration_ms=duration_ms)
+                        if db is not None and job_id is not None:
+                            job_tracker.update_strategy_job(db, job_id, status="partial_success", error_message=err_msg, error_type=err_type, completed_at=_now(), last_heartbeat=_now())
+                        return
+                    raise RuntimeError(err_type + ": " + err_msg)
 
                 parsed = result.get("data")
                 if not isinstance(parsed, dict):

@@ -3513,11 +3513,11 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
     }
     if (targetStep === allowedStep + 1 && !workflowStatus.can_advance) {
       if (targetStep === 2) {
-        notify("Generate strategy before research", "warning")
+        notify("Complete Step 1 (Input) with pillars before Step 2 (Strategy)", "warning")
       } else if (targetStep === 3) {
-        notify("Complete strategy before research", "warning")
+        notify("Complete Step 2 (Strategy) before Step 3 (Research)", "warning")
       } else if (targetStep === 6) {
-        notify("Run AI review before pipeline", "warning")
+        notify("Complete Step 5 (AI Check) before Step 6 (Pipeline)", "warning")
       } else {
         notify("Complete current step before advancing", "warning")
       }
@@ -3549,12 +3549,8 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
     if (s === allowedStep + 1 && !workflowStatus.can_advance) {
       if (s === 3) {
         notify("Complete Step 2 (Strategy) before advancing to Step 3 (Research)", "warning")
-      } else if (s === 4) {
-        notify("Step 3 (Research) must complete with ≥20 keywords before Step 4 (Review). Run research or skip step.", "warning")
-      } else if (s === 5) {
-        notify("Step 4 (Review) must be completed with ≥20 accepted keywords before Step 5 (AI Check)", "warning")
       } else if (s === 6) {
-        notify("Step 5 (AI Check) must be completed before Step 6 (Pipeline). You can skip AI check.", "warning")
+        notify("Complete Step 5 (AI Check) before advancing to Step 6 (Pipeline)", "warning")
       } else {
         notify("Complete the current step before advancing to the next step", "warning")
       }

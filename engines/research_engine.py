@@ -131,13 +131,15 @@ class ResearchEngine:
             for s in scored
         ]
 
-        # Ensure minimum 20+ results with fallback (CRITICAL GUARANTEE)
-        if len(results) < 20:
-            log.warning(f"[Research] Only {len(results)} results, adding fallback to reach 20+ guarantee")
+        # Apply fallback/emergency generation ONLY when there are no scored results
+        # This prevents generated fallback keywords from outranking real user/google results.
+        if len(results) == 0:
+            log.warning(f"[Research] No scored results, applying fallback to meet minimum guarantee")
+            # First try structured fallback using pillars
             fallback_results = self._generate_fallback_keywords(pillars, supporting_kws, business_intent)
             results.extend(fallback_results)
 
-            # If still below 20 (e.g., no pillars), generate generic keywords
+            # If still below 20 (e.g., no pillars), generate emergency keywords
             if len(results) < 20:
                 log.error(f"[Research] Still below 20 after fallback, generating emergency keywords")
                 results.extend(self._generate_emergency_keywords(business_intent, target_count=20 - len(results)))
