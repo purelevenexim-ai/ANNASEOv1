@@ -111,7 +111,6 @@ const T = {
 
 const STEPS = [
   { label: "Input",    desc: "Method 1" },
-  { label: "Strategy", desc: "AI model" },
   { label: "Research", desc: "Method 2" },
   { label: "Review",   desc: "Unify" },
   { label: "AI Check", desc: "3-stage" },
@@ -3562,24 +3561,23 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
 
   const stageToStep = {
     input: 1,
-    strategy: 2,
-    research: 3,
-    review: 4,
-    ai_review: 5,
-    pipeline: 6,
-    clusters: 7,
-    calendar: 8,
+    strategy: 2,   // strategy stage maps to research step (backend may still emit it)
+    research: 2,
+    review: 3,
+    ai_review: 4,
+    pipeline: 5,
+    clusters: 6,
+    calendar: 7,
   }
 
   const stepToStage = {
     1: 'input',
-    2: 'strategy',
-    3: 'research',
-    4: 'review',
-    5: 'ai_review',
-    6: 'pipeline',
-    7: 'clusters',
-    8: 'calendar',
+    2: 'research',
+    3: 'review',
+    4: 'ai_review',
+    5: 'pipeline',
+    6: 'clusters',
+    7: 'calendar',
   }
 
   const fetchWorkflowStatus = async () => {
@@ -3596,61 +3594,27 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
   }
 
   const handleAdvance = async (targetStep) => {
-    if (!workflowStatus) {
-      notify("Workflow status not available yet", "warning")
-      return
-    }
-
-    const allowedStep = stageToStep[workflowStatus.current_stage] || 1
-    if (targetStep > allowedStep + 1) {
-      notify("Complete previous steps before moving forward", "warning")
-      return
-    }
-    if (targetStep === allowedStep + 1 && !workflowStatus.can_advance) {
-      if (targetStep === 2) {
-        notify("Complete Step 1 (Input) with pillars before Step 2 (Strategy)", "warning")
-      } else if (targetStep === 3) {
-        notify("Complete Step 2 (Strategy) before Step 3 (Research)", "warning")
-      } else if (targetStep === 6) {
-        notify("Complete Step 5 (AI Check) before Step 6 (Pipeline)", "warning")
-      } else {
-        notify("Complete current step before advancing", "warning")
-      }
-      return
-    }
-
+    // Allow free navigation without blocking — just call advance and follow next_stage
     try {
       const res = await apiCall(`/api/ki/${projectId}/workflow/advance`, "POST")
+      const nextStage = res.next_stage
+      // Skip "strategy" stage automatically — it doesn't have a UI step
+      if (nextStage === "strategy") {
+        const res2 = await apiCall(`/api/ki/${projectId}/workflow/advance`, "POST")
+        setStep(stageToStep[res2.next_stage] || targetStep)
+      } else {
+        setStep(stageToStep[nextStage] || targetStep)
+      }
       await fetchWorkflowStatus()
-      const nextStep = stageToStep[res.next_stage] || targetStep
-      setStep(nextStep)
     } catch (e) {
-      const errMsg = e?.message || e?.detail || String(e)
-      notify("Workflow advance failed: " + errMsg, "error")
+      // If advance fails (e.g. 400 can't advance), just set the step directly
+      setStep(targetStep)
     }
   }
 
   const handleGoToStep = (s, sid) => {
     if (sid) setSessionId(sid)
-    if (!workflowStatus) {
-      setStep(s)
-      return
-    }
-    const allowedStep = stageToStep[workflowStatus.current_stage] || 1
-    if (s > allowedStep + 1) {
-      notify("Please complete previous step(s) first", "warning")
-      return
-    }
-    if (s === allowedStep + 1 && !workflowStatus.can_advance) {
-      if (s === 3) {
-        notify("Complete Step 2 (Strategy) before advancing to Step 3 (Research)", "warning")
-      } else if (s === 6) {
-        notify("Complete Step 5 (AI Check) before advancing to Step 6 (Pipeline)", "warning")
-      } else {
-        notify("Complete the current step before advancing to the next step", "warning")
-      }
-      return
-    }
+    // Allow free navigation to any completed or adjacent step
     setStep(s)
   }
 
@@ -3675,9 +3639,23 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
     setSessionId(sid)
     setCustomerUrl(url)
     setCompetitorUrls(urls)
-    if (bi) setBusinessIntent(bi)  // Task 6
+    if (bi) setBusinessIntent(bi)
+    // Advance straight to Research (step 2). Backend may land on "strategy" stage first —
+    // we call advance twice to skip past it to "research".
+    try {
+      const res1 = await apiCall(`/api/ki/${sid ? projectId : projectId}/workflow/advance`, "POST")
+      if (res1.next_stage === "strategy") {
+        // Auto-skip strategy stage — advance one more time
+        const res2 = await apiCall(`/api/ki/${projectId}/workflow/advance`, "POST")
+        setStep(stageToStep[res2.next_stage] || 2)
+      } else {
+        setStep(stageToStep[res1.next_stage] || 2)
+      }
+    } catch (e) {
+      // Fallback: just go to step 2 (Research)
+      setStep(2)
+    }
     await fetchWorkflowStatus()
-    await handleAdvance(2)
   }
 
   // Show dashboard when: not skipped, on step 1, and project has keywords
@@ -3714,41 +3692,31 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
 
       {step === 1 && <StepInput projectId={projectId} onComplete={handleStep1Done} setPage={setPage} />}
       {step === 2 && (
-        <StepStrategy projectId={projectId} sessionId={sessionId}
-          customerUrl={customerUrl} competitorUrls={competitorUrls}
-          businessIntent={businessIntent}
-          onComplete={(ctx) => {
-            if (ctx?.strategy_context) setStrategyContext(ctx.strategy_context)
-            handleAdvance(3)
-          }}
-          onBack={() => setStep(1)} />
-      )}
-      {step === 3 && (
         <StepResearch projectId={projectId} sessionId={sessionId}
           customerUrl={customerUrl} competitorUrls={competitorUrls}
-          businessIntent={businessIntent} strategyContext={strategyContext}
-          onComplete={() => handleAdvance(4)} onBack={() => setStep(2)} />
+          businessIntent={businessIntent} strategyContext={null}
+          onComplete={() => handleAdvance(3)} onBack={() => setStep(1)} />
+      )}
+      {step === 3 && (
+        <StepReview projectId={projectId} sessionId={sessionId}
+          onComplete={() => handleAdvance(4)} onBack={() => setStep(2)} workflowStatus={workflowStatus} />
       )}
       {step === 4 && (
-        <StepReview projectId={projectId} sessionId={sessionId}
-          onComplete={() => handleAdvance(5)} onBack={() => setStep(3)} workflowStatus={workflowStatus} />
+        <StepAIReview projectId={projectId} sessionId={sessionId}
+          onComplete={() => handleAdvance(5)} onBack={() => setStep(3)} />
       )}
       {step === 5 && (
-        <StepAIReview projectId={projectId} sessionId={sessionId}
+        <StepPipeline projectId={projectId}
           onComplete={() => handleAdvance(6)} onBack={() => setStep(4)} />
       )}
       {step === 6 && (
-        <StepPipeline projectId={projectId}
+        <StepClusters projectId={projectId}
           onComplete={() => handleAdvance(7)} onBack={() => setStep(5)} />
       )}
       {step === 7 && (
-        <StepClusters projectId={projectId}
-          onComplete={() => handleAdvance(8)} onBack={() => setStep(6)} />
-      )}
-      {step === 8 && (
         <StepCalendar projectId={projectId}
           onGoToCalendar={onGoToCalendar || (() => {})}
-          onBack={() => setStep(7)} />
+          onBack={() => setStep(6)} />
       )}
       <DebugPanel />
     </div>

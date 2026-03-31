@@ -3135,12 +3135,14 @@ try:
             stage_status = session.get("stage_status", "pending")
 
             # Normalize internal KI stages to workflow stages
+            # Note: "strategy" is no longer a UI step — map it to "research"
             stage_map = {
-                "cross_multiply": "strategy",
-                "crawl_site": "strategy",
-                "crawl_competitors": "strategy",
-                "enrich": "strategy",
-                "assemble": "strategy",
+                "cross_multiply": "research",
+                "crawl_site": "research",
+                "crawl_competitors": "research",
+                "enrich": "research",
+                "assemble": "research",
+                "strategy": "research",   # legacy — treat as research stage
                 "score": "review",
                 "confirmed": "review",
             }
@@ -3234,8 +3236,12 @@ try:
         if not status.get("can_advance"):
             raise HTTPException(400, "Cannot advance workflow: complete current step first")
 
-        stage_order = ["input", "strategy", "research", "review", "ai_review", "pipeline", "clusters", "calendar"]
+        # "strategy" stage is no longer a UI step — skip it automatically
+        stage_order = ["input", "research", "review", "ai_review", "pipeline", "clusters", "calendar"]
         current_stage = status.get("current_stage", "input")
+        # Map legacy "strategy" stage to "input" so advance goes to research
+        if current_stage == "strategy":
+            current_stage = "input"
         if current_stage not in stage_order:
             raise HTTPException(400, "Unknown workflow stage")
 
