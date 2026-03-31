@@ -198,6 +198,15 @@ def _db() -> sqlite3.Connection:
         "ALTER TABLE keyword_input_sessions ADD COLUMN business_intent TEXT DEFAULT 'mixed'",
         "ALTER TABLE keyword_input_sessions ADD COLUMN target_audience TEXT DEFAULT ''",
         "ALTER TABLE keyword_input_sessions ADD COLUMN geographic_focus TEXT DEFAULT 'India'",
+        # Step 2 Strategy form fields
+        "ALTER TABLE keyword_input_sessions ADD COLUMN business_type TEXT DEFAULT 'B2C'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN usp TEXT DEFAULT ''",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN products TEXT DEFAULT '[]'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN target_locations TEXT DEFAULT '[]'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN target_demographics TEXT DEFAULT '[]'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN languages_supported TEXT DEFAULT '[]'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN customer_review_areas TEXT DEFAULT '[]'",
+        "ALTER TABLE keyword_input_sessions ADD COLUMN seasonal_events TEXT DEFAULT '[]'",
     ]:
         try:
             con.execute(_sql)
