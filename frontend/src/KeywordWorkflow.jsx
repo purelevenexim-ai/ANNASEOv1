@@ -10,6 +10,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { useNotification } from "./store/notification"
 import useDebug from "./store/debug"
 import DebugPanel from "./components/DebugPanel"
+import OperationProgress from "./components/OperationProgress"
 import PillarConfirmation from "./components/PillarConfirmation"
 import UniverseConfirmation from "./components/UniverseConfirmation"
 import KeywordTreeConfirmation from "./components/KeywordTreeConfirmation"
@@ -937,19 +938,39 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
       <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 14 }}>
         Processing your business strategy. This step analyzes your inputs and prepares them for keyword discovery.
       </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+
+      {/* Progress bar for running strategy */}
+      {status === "running" && (
+        <OperationProgress
+          label="Analyzing business strategy, context, and intent for keyword targeting"
+          isRunning={true}
+          estimatedSeconds={45}
+        />
+      )}
+
+      {/* Completion message */}
+      {status === "completed" && (
+        <div style={{ padding: "12px", background: "#d1fae5", borderRadius: 6, marginBottom: 12, color: "#065f46", fontSize: 13 }}>
+          ✓ Strategy analysis complete. Ready to discover keywords.
+        </div>
+      )}
+
+      {/* Error message */}
+      {status === "failed" && (
+        <div style={{ padding: "12px", background: "#fee2e2", borderRadius: 6, marginBottom: 12, color: "#991b1b", fontSize: 13 }}>
+          ✗ Strategy processing failed: {error}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8 }}>
         <Btn onClick={onBack}>← Back</Btn>
-        <Btn variant="teal" disabled={status === "running"}>
+        <Btn variant="teal" disabled={status === "running"} onClick={startStrategy}>
           {status === "running" ? "Processing…" : status === "completed" ? "Completed ✓" : "Run Strategy Processing"}
         </Btn>
-        <Btn variant="default" onClick={() => onComplete({})} style={{ marginLeft: "auto" }}>
+        <Btn variant="default" onClick={() => onComplete({})} disabled={status === "failed"} style={{ marginLeft: "auto" }}>
           Continue to Research →
         </Btn>
       </div>
-      {status && <div style={{ marginBottom: 8, color: status === "failed" ? T.red : T.teal }}>
-        Status: {status}{jobId ? ` (job ${jobId})` : ""}
-      </div>}
-      {error && <div style={{ color: T.red, fontSize: 12 }}>{error}</div>}
     </Card>
   )
 }
@@ -1020,36 +1041,45 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
         )}
       </div>
 
-      {/* Progress */}
-      {status && (
-        <div style={{ marginBottom: 16 }}>
+      {/* Progress bar for running research */}
+      {status === "running" && (
+        <OperationProgress
+          label={`Discovering keywords from Google Autosuggest, competitor analysis, and AI classification${count > 0 ? ` — ${count} found` : ''}`}
+          isRunning={true}
+          estimatedSeconds={60}
+        />
+      )}
+
+      {/* Detailed source tracking */}
+      {status === "running" && (
+        <div style={{ marginBottom: 16, padding: "12px", background: T.grayLight, borderRadius: 8 }}>
+          <div style={{ fontSize: 11, color: T.textSoft, marginBottom: 8, fontWeight: 500 }}>Discovery sources:</div>
           {[
             { key: "autosuggest", label: "Google Autosuggest (P2_Enhanced)" },
             { key: "competitor_gap", label: "Competitor keyword gap" },
             { key: "site_crawl", label: "Site crawl (H1/H2/product pages)" },
           ].map(s => (
-            <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8,
-                                       padding: "6px 0", borderBottom: `1px solid ${T.border}` }}>
-              <span style={{ fontSize: 16 }}>
-                {sources.includes(s.key) ? "✅" : status === "running" ? "⏳" : "⬜"}
+            <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}>
+              <span style={{ fontSize: 16, minWidth: "20px" }}>
+                {sources.includes(s.key) ? "✅" : "⏳"}
               </span>
-              <span style={{ fontSize: 13 }}>{s.label}</span>
+              <span style={{ fontSize: 13, color: T.text }}>{s.label}</span>
             </div>
           ))}
-          {count > 0 && (
-            <div style={{ marginTop: 10, fontSize: 13, color: T.teal, fontWeight: 600 }}>
-              {count} keywords found so far
-            </div>
-          )}
-          {status === "completed" && (
-            <div style={{ marginTop: 10, padding: "8px 12px", background: T.greenLight,
-                          borderRadius: 8, fontSize: 13, color: T.green, fontWeight: 500 }}>
-              ✓ Research complete — {count} keywords added to review queue
-            </div>
-          )}
-          {status === "failed" && (
-            <div style={{ marginTop: 10, color: T.red, fontSize: 12 }}>{result?.error || "Research failed"}</div>
-          )}
+        </div>
+      )}
+
+      {/* Completion state */}
+      {status === "completed" && (
+        <div style={{ padding: "12px", background: "#d1fae5", borderRadius: 8, marginBottom: 12, color: "#065f46", fontSize: 13 }}>
+          ✓ Research complete — {count} keywords added to review queue
+        </div>
+      )}
+
+      {/* Error state */}
+      {status === "failed" && (
+        <div style={{ padding: "12px", background: "#fee2e2", borderRadius: 8, marginBottom: 12, color: "#991b1b", fontSize: 13 }}>
+          ✗ Research failed: {result?.error || "Unknown error"}
         </div>
       )}
 
@@ -2029,17 +2059,24 @@ function AIStageCard({ projectId, sessionId, stage, accepted_keywords, onDone, i
             )}
           </div>
 
+          {/* Progress bar while running */}
+          {running && (
+            <OperationProgress
+              label={`${stage.label} Review — Analyzing ${accepted_keywords.length} keywords for ${stage.subtitle}`}
+              isRunning={true}
+              estimatedSeconds={30}
+            />
+          )}
+
           {/* Run / Skip buttons */}
-          {!results && (
+          {!results && !running && (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <Btn variant="primary" onClick={runReview} disabled={running}>
-                {running ? <><Spinner /> Running {stage.label} review…</> : `▶ Run ${stage.label} Review`}
+                ▶ Run {stage.label} Review
               </Btn>
-              {!running && (
-                <Btn small onClick={onDone} style={{ color: T.textSoft }}>
-                  Skip this stage →
-                </Btn>
-              )}
+              <Btn small onClick={onDone} style={{ color: T.textSoft }}>
+                Skip this stage →
+              </Btn>
             </div>
           )}
 
@@ -3616,7 +3653,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto" }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      <ProgressBar step={step - 1} />
+      <OperationProgress step={step - 1} />
 
       {step === 1 && <StepInput projectId={projectId} onComplete={handleStep1Done} setPage={setPage} />}
       {step === 2 && (
