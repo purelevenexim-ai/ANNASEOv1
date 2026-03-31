@@ -3036,13 +3036,22 @@ try:
         }
 
     def _get_latest_ki_session(project_id: str):
-        db = _ki_db()
-        row = db.execute(
-            "SELECT * FROM keyword_input_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
-            (project_id,)
-        ).fetchone()
-        db.close()
-        return dict(row) if row else None
+        try:
+            db = _ki_db()
+            if not db:
+                log.warning(f"[main] _ki_db() returned None for project {project_id}")
+                return None
+            row = db.execute(
+                "SELECT * FROM keyword_input_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
+                (project_id,)
+            ).fetchone()
+            db.close()
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            log.error(f"[main] _get_latest_ki_session failed for {project_id}: {e}")
+            return None
 
     def _count_ki_keywords(session_id: str, status: str = None):
         db = _ki_db()
@@ -3074,86 +3083,134 @@ try:
 
     @app.get("/api/ki/{project_id}/workflow-status", tags=["KeywordInput"])
     def ki_workflow_status(project_id: str, user=Depends(current_user)):
-        session = _get_latest_ki_session(project_id)
-        if not session:
-            raise HTTPException(404, "No keyword input session found")
+        try:
+            session = _get_latest_ki_session(project_id)
+            if not session:
+                # Return default "input" stage if no session found yet
+                # This is expected on first load before Step 1 input is saved
+                return {
+                    "current_stage": "input",
+                    "stage_status": "pending",
+                    "can_advance": False,
+                    "accepted_count": 0,
+                    "total_keywords": 0,
+                    "ai_review_total": 0,
+                    "ai_review_pending": 0,
+                    "pipeline_completed_runs": 0,
+                    "clusters_count": 0,
+                    "message": "No session found - waiting for input"
+                }
+        except Exception as e:
+            log.error(f"[main] ki_workflow_status error: {e}", exc_info=True)
+            # Return safe default instead of erroring
+            return {
+                "current_stage": "input",
+                "stage_status": "error",
+                "can_advance": False,
+                "accepted_count": 0,
+                "total_keywords": 0,
+                "ai_review_total": 0,
+                "ai_review_pending": 0,
+                "pipeline_completed_runs": 0,
+                "clusters_count": 0,
+                "error": str(e)
+            }
 
-        session_id = session.get("session_id")
-        raw_stage = session.get("stage", "input")
-        stage_status = session.get("stage_status", "pending")
+        try:
+            session_id = session.get("session_id")
+            raw_stage = session.get("stage", "input")
+            stage_status = session.get("stage_status", "pending")
 
-        # Normalize internal KI stages to workflow stages
-        stage_map = {
-            "cross_multiply": "strategy",
-            "crawl_site": "strategy",
-            "crawl_competitors": "strategy",
-            "enrich": "strategy",
-            "assemble": "strategy",
-            "score": "review",
-            "confirmed": "review",
-        }
-        stage = stage_map.get(raw_stage, raw_stage)
+            # Normalize internal KI stages to workflow stages
+            stage_map = {
+                "cross_multiply": "strategy",
+                "crawl_site": "strategy",
+                "crawl_competitors": "strategy",
+                "enrich": "strategy",
+                "assemble": "strategy",
+                "score": "review",
+                "confirmed": "review",
+            }
+            stage = stage_map.get(raw_stage, raw_stage)
 
-        # Current counts
-        total_keywords = _count_ki_keywords(session_id)
-        accepted_count = _count_ki_keywords(session_id, "accepted")
-        ai_review_total = 0
-        ai_review_pending = 0
-        db = get_db()
-        ai_row = db.execute(
-            "SELECT COUNT(*) AS total, SUM(CASE WHEN user_decision='pending' THEN 1 ELSE 0 END) AS pending FROM ai_review_results WHERE project_id=? AND session_id=?",
-            (project_id, session_id)
-        ).fetchone()
-        if ai_row:
-            ai_review_total = ai_row["total"] or 0
-            ai_review_pending = ai_row["pending"] or 0
-        db.close()
-
-        pipeline_completed_runs = _count_pipeline_runs(project_id)
-        clusters_count = _count_clusters(project_id)
-
-        # Conditions for advancing
-        can_advance = False
-        if stage == "input":
-            # require at least one pillar or support from the current session
-            has_pillars = False
+            # Current counts
+            total_keywords = _count_ki_keywords(session_id) if session_id else 0
+            accepted_count = _count_ki_keywords(session_id, "accepted") if session_id else 0
+            ai_review_total = 0
+            ai_review_pending = 0
             try:
-                db = _ki_db()
-                if db:
-                    p_row = db.execute("SELECT COUNT(*) AS cnt FROM pillar_keywords WHERE project_id=?", (project_id,)).fetchone()
-                    has_pillars = (p_row and p_row["cnt"] > 0)
+                db = get_db()
+                ai_row = db.execute(
+                    "SELECT COUNT(*) AS total, SUM(CASE WHEN user_decision='pending' THEN 1 ELSE 0 END) AS pending FROM ai_review_results WHERE project_id=? AND session_id=?",
+                    (project_id, session_id)
+                ).fetchone()
+                if ai_row:
+                    ai_review_total = ai_row["total"] or 0
+                    ai_review_pending = ai_row["pending"] or 0
                 db.close()
-            except Exception:
-                has_pillars = False
-            can_advance = has_pillars
-        elif stage == "strategy":
-            can_advance = True  # Strategy step is optional; user can always continue
-        elif stage == "research":
-            can_advance = total_keywords > 0
-        elif stage == "review":
-            # Require a meaningful number of accepted keywords to proceed
-            REVIEW_ACCEPTED_THRESHOLD = 20
-            can_advance = accepted_count >= REVIEW_ACCEPTED_THRESHOLD
-        elif stage == "ai_review":
-            can_advance = (ai_review_total > 0 and ai_review_pending == 0)
-        elif stage == "pipeline":
-            can_advance = pipeline_completed_runs > 0
-        elif stage == "clusters":
-            can_advance = clusters_count > 0
-        elif stage == "calendar":
-            can_advance = True
+            except Exception as e:
+                log.debug(f"[main] Could not fetch AI review stats: {e}")
 
-        return {
-            "current_stage": stage,
-            "stage_status": stage_status,
-            "can_advance": can_advance,
-            "accepted_count": accepted_count,
-            "total_keywords": total_keywords,
-            "ai_review_total": ai_review_total,
-            "ai_review_pending": ai_review_pending,
-            "pipeline_completed_runs": pipeline_completed_runs,
-            "clusters_count": clusters_count,
-        }
+            pipeline_completed_runs = _count_pipeline_runs(project_id)
+            clusters_count = _count_clusters(project_id)
+
+            # Conditions for advancing
+            can_advance = False
+            if stage == "input":
+                # require at least one pillar or support from the current session
+                has_pillars = False
+                try:
+                    db = _ki_db()
+                    if db:
+                        p_row = db.execute("SELECT COUNT(*) AS cnt FROM pillar_keywords WHERE project_id=?", (project_id,)).fetchone()
+                        has_pillars = (p_row and p_row["cnt"] > 0)
+                    db.close()
+                except Exception:
+                    has_pillars = False
+                can_advance = has_pillars
+            elif stage == "strategy":
+                can_advance = True  # Strategy step is optional; user can always continue
+            elif stage == "research":
+                can_advance = total_keywords > 0
+            elif stage == "review":
+                # Require a meaningful number of accepted keywords to proceed
+                REVIEW_ACCEPTED_THRESHOLD = 20
+                can_advance = accepted_count >= REVIEW_ACCEPTED_THRESHOLD
+            elif stage == "ai_review":
+                can_advance = (ai_review_total > 0 and ai_review_pending == 0)
+            elif stage == "pipeline":
+                can_advance = pipeline_completed_runs > 0
+            elif stage == "clusters":
+                can_advance = clusters_count > 0
+            elif stage == "calendar":
+                can_advance = True
+
+            return {
+                "current_stage": stage,
+                "stage_status": stage_status,
+                "can_advance": can_advance,
+                "accepted_count": accepted_count,
+                "total_keywords": total_keywords,
+                "ai_review_total": ai_review_total,
+                "ai_review_pending": ai_review_pending,
+                "pipeline_completed_runs": pipeline_completed_runs,
+                "clusters_count": clusters_count,
+            }
+        except Exception as e:
+            log.error(f"[main] Error in workflow status calculation: {e}", exc_info=True)
+            # Return safe partial response
+            return {
+                "current_stage": session.get("stage", "input"),
+                "stage_status": "error",
+                "can_advance": False,
+                "accepted_count": 0,
+                "total_keywords": 0,
+                "ai_review_total": 0,
+                "ai_review_pending": 0,
+                "pipeline_completed_runs": 0,
+                "clusters_count": 0,
+                "error": str(e)
+            }
 
     @app.post("/api/ki/{project_id}/workflow/advance", tags=["KeywordInput"])
     def ki_workflow_advance(project_id: str, user=Depends(current_user)):
@@ -3953,6 +4010,56 @@ async def ki_research(
             "strategy_context": strategy_context
         }
     )
+
+    # Quick fallback: if a KI session has pre-seeded universe items and
+    # there are no live research sources (no customer_url / competitor_urls),
+    # return those as the research result immediately and record counts.
+    try:
+        from engines.annaseo_keyword_input import _db as _ki_db_fn
+        ki_db = _ki_db_fn()
+        if session_id:
+            existing_rows = ki_db.execute(
+                "SELECT keyword, pillar_keyword, source, intent, volume_estimate, difficulty, opportunity_score, status FROM keyword_universe_items WHERE session_id=?",
+                (session_id,)
+            ).fetchall()
+            fallback_count = len(existing_rows) if existing_rows else 0
+            if fallback_count and not body.get("customer_url") and not body.get("competitor_urls"):
+                keywords = []
+                for row in existing_rows:
+                    keywords.append({
+                        "keyword": row["keyword"],
+                        "source": row["source"] if "source" in row.keys() and row["source"] else "existing_universe",
+                        "intent": row["intent"] if "intent" in row.keys() and row["intent"] else "informational",
+                        "volume": row["volume_estimate"] if "volume_estimate" in row.keys() and row["volume_estimate"] is not None else 0,
+                        "difficulty": row["difficulty"] if "difficulty" in row.keys() and row["difficulty"] is not None else 50,
+                        "score": int(row["opportunity_score"]) if "opportunity_score" in row.keys() and row["opportunity_score"] is not None else 50,
+                        "confidence": 100,
+                        "pillar_keyword": row["pillar_keyword"] if "pillar_keyword" in row.keys() else "",
+                        "reasoning": "fallback_existing_universe",
+                    })
+
+                counts = {"fallback_existing_universe": len(keywords)}
+                # Update job tracker with a completed result payload consistent with other research flows
+                job_tracker.update_strategy_job(
+                    db, job_id,
+                    status="completed",
+                    progress=100,
+                    result_payload={
+                        "keywords": keywords,
+                        "total_count": len(keywords),
+                        "keyword_count": len(keywords),
+                        "by_source": {
+                            "user": len([k for k in keywords if k.get("source") == "user"]),
+                            "google": len([k for k in keywords if k.get("source") == "google"]),
+                        },
+                        "source_counts": counts,
+                    }
+                )
+                ki_db.close()
+                return {"job_id": job_id, "status": "completed", "keywords": keywords, "summary": {"total": len(keywords)}}
+        ki_db.close()
+    except Exception:
+        pass
 
     try:
         # Run research synchronously (fast: <5s per pillar)
