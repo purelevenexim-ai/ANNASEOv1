@@ -686,15 +686,34 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
     }
   }, [projectDataQuery])
 
+  // Track job progress and detect timeouts
+  const [jobDetail, setJobDetail] = useState(null)
+  const [timeoutWarning, setTimeoutWarning] = useState(false)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const jobStartTime = useRef(null)
+
   useEffect(() => {
     if (!jobId || status !== "running") return
+
+    jobStartTime.current = Date.now()
+    setTimeoutWarning(false)
+
     const interval = setInterval(async () => {
       try {
         const r = await apiCall(`/api/jobs/${jobId}`)
+        setJobDetail(r)
+
+        const elapsed = Math.floor((Date.now() - jobStartTime.current) / 1000)
+        setElapsedSeconds(elapsed)
+
+        // Warn if queued/stuck for >30 seconds
+        if ((r.status === "queued" || r.progress === 0) && elapsed > 30) {
+          setTimeoutWarning(true)
+        }
+
         if (r.status === "completed") {
           setStatus("completed")
           clearInterval(interval)
-          // Extract strategy_context from result_payload
           const strategyContext = r.result_payload?.strategy_context || r.result_payload?.data?.strategy_context
           if (onComplete) onComplete({ jobId, strategy_context: strategyContext })
         } else if (r.status === "failed") {
@@ -707,6 +726,7 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
         clearInterval(interval)
       }
     }, 1800)
+
     setPollId(interval)
     return () => clearInterval(interval)
   }, [jobId, status, projectId, onComplete])
@@ -741,6 +761,32 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
     } finally {
       setSaving(false)
     }
+  }
+
+  const handleCancelJob = async () => {
+    if (!jobId) return
+    try {
+      await apiCall(`/api/jobs/${jobId}/cancel`, "POST")
+      setStatus("cancelled")
+      setError("Strategy processing cancelled by user")
+    } catch (e) {
+      setError("Failed to cancel job: " + String(e))
+    }
+  }
+
+  const handleSkipStrategy = async () => {
+    // Skip strategy processing and continue to research
+    if (pollId) clearInterval(pollId)
+    setStatus("skipped")
+    if (onComplete) onComplete({ jobId, strategy_context: null })
+  }
+
+  const handleRetryStrategy = async () => {
+    setError("")
+    setTimeoutWarning(false)
+    setElapsedSeconds(0)
+    setJobDetail(null)
+    await startStrategy()
   }
 
   const startStrategy = async () => {
@@ -874,35 +920,112 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
         Processing your business strategy. This step analyzes your inputs and prepares them for keyword discovery.
       </div>
 
-      {/* Progress bar for running strategy */}
+      {/* Progress bar & detailed job status for running strategy */}
       {status === "running" && (
-        <OperationProgress
-          label="Analyzing business strategy, context, and intent for keyword targeting"
-          isRunning={true}
-          estimatedSeconds={45}
-        />
+        <>
+          <OperationProgress
+            label="Analyzing business strategy, context, and intent for keyword targeting"
+            isRunning={true}
+            estimatedSeconds={45}
+          />
+
+          {/* Detailed Job Status */}
+          {jobDetail && (
+            <div style={{ marginBottom: 16, padding: "12px", background: T.grayLight, borderRadius: 8, border: `1px solid ${T.border}` }}>
+              <div style={{ fontSize: 11, color: T.textSoft, fontWeight: 700, marginBottom: 8 }}>Backend Progress:</div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, fontSize: 11 }}>
+                <div>
+                  <span style={{ color: T.textSoft }}>Status:</span>
+                  <div style={{ fontWeight: 600, color: T.purple }}>
+                    {jobDetail.status === "queued" ? "⏳ Queued" : jobDetail.status === "running" ? "🔄 Running" : jobDetail.status === "retrying" ? "🔁 Retrying" : jobDetail.status}
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ color: T.textSoft }}>Progress:</span>
+                  <div style={{ fontWeight: 600 }}>{jobDetail.progress || 0}%</div>
+                </div>
+
+                <div>
+                  <span style={{ color: T.textSoft }}>Current Step:</span>
+                  <div style={{ fontWeight: 600 }}>{jobDetail.current_step_name || jobDetail.current_step || "Initializing"}</div>
+                </div>
+
+                <div>
+                  <span style={{ color: T.textSoft }}>Elapsed Time:</span>
+                  <div style={{ fontWeight: 600 }}>{elapsedSeconds}s</div>
+                </div>
+              </div>
+
+              {jobDetail.retry_count > 0 && (
+                <div style={{ marginTop: 8, padding: "6px", background: "#fef3c7", borderRadius: 4, fontSize: 10, color: "#92400e" }}>
+                  Retry attempt {jobDetail.retry_count} of {jobDetail.max_retries}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Timeout Warning & Controls */}
+          {timeoutWarning && (
+            <div style={{ marginBottom: 16, padding: "12px", background: "#fef3c7", borderRadius: 8, border: `1px solid #fcd34d`, color: "#92400e", fontSize: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 8 }}>⚠️ Processing is taking longer than expected</div>
+              <div style={{ fontSize: 11, marginBottom: 10 }}>
+                Job has been {jobDetail?.status === "queued" ? "queued" : "processing"} for {elapsedSeconds} seconds.
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <Btn small variant="default" onClick={handleRetryStrategy}>🔄 Retry</Btn>
+                <Btn small variant="default" onClick={handleSkipStrategy}>⏭️ Skip This Step</Btn>
+                <Btn small variant="danger" onClick={handleCancelJob}>✕ Cancel Job</Btn>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {/* Completion message */}
       {status === "completed" && (
         <div style={{ padding: "12px", background: "#d1fae5", borderRadius: 6, marginBottom: 12, color: "#065f46", fontSize: 13 }}>
           ✓ Strategy analysis complete. Ready to discover keywords.
+          {jobDetail?.result_payload && (
+            <div style={{ marginTop: 8, fontSize: 11, fontWeight: "normal" }}>
+              Analysis generated {Object.keys(jobDetail.result_payload).length} insights
+            </div>
+          )}
         </div>
       )}
 
       {/* Error message */}
       {status === "failed" && (
         <div style={{ padding: "12px", background: "#fee2e2", borderRadius: 6, marginBottom: 12, color: "#991b1b", fontSize: 13 }}>
-          ✗ Strategy processing failed: {error}
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>✗ Strategy processing failed</div>
+          <div style={{ fontSize: 12 }}>{error}</div>
+          {jobDetail?.error_type && (
+            <div style={{ fontSize: 11, marginTop: 4, opacity: 0.8 }}>Error type: {jobDetail.error_type}</div>
+          )}
+        </div>
+      )}
+
+      {/* Skipped state */}
+      {status === "skipped" && (
+        <div style={{ padding: "12px", background: "#dbeafe", borderRadius: 6, marginBottom: 12, color: "#1e40af", fontSize: 13 }}>
+          ⏭️ Strategy analysis skipped. You can continue to keyword research.
+        </div>
+      )}
+
+      {/* Cancelled state */}
+      {status === "cancelled" && (
+        <div style={{ padding: "12px", background: "#fee2e2", borderRadius: 6, marginBottom: 12, color: "#991b1b", fontSize: 13 }}>
+          ✕ Strategy processing cancelled
         </div>
       )}
 
       <div style={{ display: "flex", gap: 8 }}>
-        <Btn onClick={onBack}>← Back</Btn>
+        <Btn onClick={onBack} disabled={status === "running"}>← Back</Btn>
         <Btn variant="teal" disabled={status === "running"} onClick={startStrategy}>
-          {status === "running" ? "Processing…" : status === "completed" ? "Completed ✓" : "Run Strategy Processing"}
+          {status === "running" ? "Processing…" : status === "completed" || status === "skipped" ? "Done ✓" : "Run Strategy Processing"}
         </Btn>
-        <Btn variant="default" onClick={() => onComplete({})} disabled={status === "failed"} style={{ marginLeft: "auto" }}>
+        <Btn variant="default" onClick={() => onComplete({})} disabled={status === "running" || status === "failed"} style={{ marginLeft: "auto" }}>
           Continue to Research →
         </Btn>
       </div>
