@@ -131,10 +131,24 @@ class ResearchEngine:
             for s in scored
         ]
 
-        # Ensure minimum results (fallback if needed)
-        if len(results) < 10:
-            log.warning(f"[Research] Only {len(results)} results, adding fallback")
-            results.extend(self._generate_fallback_keywords(pillars, supporting_kws, business_intent))
+        # Ensure minimum 20+ results with fallback (CRITICAL GUARANTEE)
+        if len(results) < 20:
+            log.warning(f"[Research] Only {len(results)} results, adding fallback to reach 20+ guarantee")
+            fallback_results = self._generate_fallback_keywords(pillars, supporting_kws, business_intent)
+            results.extend(fallback_results)
+
+            # If still below 20 (e.g., no pillars), generate generic keywords
+            if len(results) < 20:
+                log.error(f"[Research] Still below 20 after fallback, generating emergency keywords")
+                results.extend(self._generate_emergency_keywords(business_intent, target_count=20 - len(results)))
+
+        # Deduplicate final results (case-insensitive)
+        final_results = {}
+        for r in results:
+            kw_lower = r.keyword.lower().strip()
+            if kw_lower not in final_results:
+                final_results[kw_lower] = r
+        results = list(final_results.values())
 
         # Sort by score descending
         results.sort(key=lambda x: x.total_score, reverse=True)
@@ -147,7 +161,13 @@ class ResearchEngine:
         session_id: str,
         project_id: str,
     ) -> Tuple[List[str], Dict[str, List[str]]]:
-        """Load pillars and supporting keywords from Step 1 session."""
+        """Load pillars and supporting keywords from Step 1 session.
+
+        The schema uses pillar_support_map JSON which maps pillar → [supporting_keywords].
+        Example: {"cinnamon": ["organic", "buy", "bulk"]}
+
+        Fallback: If pillar_support_map is empty, reads from pillar_keywords table.
+        """
         try:
             from engines.annaseo_keyword_input import _db as _ki_db_fn
             ki_db = _ki_db_fn()
@@ -157,8 +177,9 @@ class ResearchEngine:
 
         try:
             # Query keyword_input_sessions for this session
+            # The actual schema uses pillar_support_map, not pillars/supporting_keywords
             session = ki_db.execute(
-                "SELECT pillars, supporting_keywords FROM keyword_input_sessions WHERE session_id=?",
+                "SELECT project_id, pillar_support_map FROM keyword_input_sessions WHERE session_id=?",
                 (session_id,)
             ).fetchone()
 
@@ -166,16 +187,48 @@ class ResearchEngine:
                 log.warning(f"[Research] Session {session_id} not found")
                 return [], {}
 
-            pillars_json = session.get("pillars", "[]") if hasattr(session, 'get') else session[0]
-            supporting_json = session.get("supporting_keywords", "{}") if hasattr(session, 'get') else session[1]
+            # Extract pillar_support_map (could be dict from row factory or tuple)
+            psm_data = session.get("pillar_support_map", "{}") if hasattr(session, 'get') else session[1]
 
-            pillars = json.loads(pillars_json) if isinstance(pillars_json, str) else pillars_json or []
-            supporting = json.loads(supporting_json) if isinstance(supporting_json, str) else supporting_json or {}
+            # Parse JSON
+            pillar_support_map = {}
+            if psm_data:
+                try:
+                    pillar_support_map = json.loads(psm_data) if isinstance(psm_data, str) else (psm_data or {})
+                except (json.JSONDecodeError, ValueError) as je:
+                    log.warning(f"[Research] Could not parse pillar_support_map JSON: {je}")
+                    pillar_support_map = {}
 
+            # If pillar_support_map is empty, fallback to pillar_keywords table
+            if not pillar_support_map:
+                log.info(f"[Research] pillar_support_map is empty, falling back to pillar_keywords table for {project_id}")
+                # Get project_id from session if not already have it
+                proj_id = session.get("project_id") if hasattr(session, 'get') else project_id
+
+                # Query pillar_keywords table
+                pillar_rows = ki_db.execute(
+                    "SELECT keyword FROM pillar_keywords WHERE project_id=? ORDER BY priority ASC",
+                    (proj_id,)
+                ).fetchall()
+
+                if pillar_rows:
+                    # Build pillar_support_map from pillar_keywords
+                    # For now, each pillar has an empty supporting list
+                    # In the future, we could also query supporting_keywords table
+                    for p_row in pillar_rows:
+                        pillar_kw = p_row.get("keyword") if hasattr(p_row, 'get') else p_row[0]
+                        pillar_support_map[pillar_kw] = []
+                    log.info(f"[Research] Loaded {len(pillar_support_map)} pillars from fallback table")
+
+            # Extract pillars from keys
+            pillars = list(pillar_support_map.keys()) if pillar_support_map else []
+            supporting = pillar_support_map if pillar_support_map else {}
+
+            log.info(f"[Research] Loaded {len(pillars)} pillars, {sum(len(v) for v in supporting.values())} supporting from {session_id}")
             return pillars, supporting
 
         except Exception as e:
-            log.error(f"[Research] Load failed: {e}")
+            log.error(f"[Research] Load failed: {e}", exc_info=True)
             return [], {}
         finally:
             try:
@@ -238,6 +291,64 @@ class ResearchEngine:
 
         return list(seen.values())
 
+    def _generate_emergency_keywords(self, business_intent: str, target_count: int = 20) -> List[ResearchResult]:
+        """
+        Generate emergency keywords when NO pillars or sources available.
+        Guarantees minimum keywords for the given business intent.
+        """
+        emergency_keywords = {
+            "ecommerce": [
+                "buy online", "price comparison", "best deals", "free shipping",
+                "cash on delivery", "online shopping", "bulk discount",
+                "quality products", "authentic items", "trusted seller",
+                "customer reviews", "return policy", "warranty coverage",
+                "discount offer", "seasonal sale", "wholesale price",
+                "bulk buy", "compare products", "shop online", "save money",
+            ],
+            "content_blog": [
+                "how to guide", "tutorial video", "step by step", "tips and tricks",
+                "expert advice", "best practices", "frequently asked", "complete guide",
+                "latest news", "trending topics", "knowledge base", "learning resources",
+                "blog article", "industry insights", "case studies", "research findings",
+                "informative content", "educational material", "practical examples", "detailed explanation",
+            ],
+            "supplier": [
+                "wholesale supplier", "bulk pricing", "minimum order quantity",
+                "direct from manufacturer", "bulk export", "certified quality",
+                "food grade certified", "international shipping", "competitive pricing",
+                "fast delivery", "reliable supplier", "bulk discount pricing",
+                "quality assurance", "certifications available", "factory direct",
+                "custom orders", "batch orders", "sample available", "long term contract",
+            ],
+            "mixed": [
+                "buy online", "how to", "best", "reviews", "price", "quality",
+                "authentic", "trusted", "compare", "tips", "guide", "benefits",
+                "uses", "trending", "popular", "affordable", "reliable", "shipping",
+                "delivery", "warranty", "guarantee", "customer service",
+            ]
+        }
+
+        keywords_list = emergency_keywords.get(business_intent, emergency_keywords["mixed"])
+        results = []
+
+        for i, keyword in enumerate(keywords_list[:target_count]):
+            results.append(
+                ResearchResult(
+                    keyword=keyword,
+                    source="fallback_generation",
+                    intent="mixed",
+                    volume="medium",
+                    difficulty="medium",
+                    total_score=20 + (i % 10),  # Score 20-29
+                    confidence=35,
+                    pillar_keyword="emergency_fallback",
+                    reasoning="Emergency keyword generation when sources unavailable"
+                )
+            )
+
+        log.info(f"[Research] Emergency fallback generated {len(results)} keywords")
+        return results
+
     def _generate_fallback_keywords(
         self,
         pillars: List[str],
@@ -246,7 +357,91 @@ class ResearchEngine:
     ) -> List[ResearchResult]:
         """
         Generate fallback keywords if research returns too few.
-        Uses simple heuristics based on input.
+        GUARANTEES minimum 20 keywords using modifier combinations.
+
+        Strategy: For each pillar, combine with intent-specific modifiers to ensure
+        we always return at least 20 keywords even if all other sources fail.
+        Falls back to emergency generation if pillars are empty.
         """
-        # For now, return empty (full AI fallback added in Phase 2)
-        return []
+        # If no pillars, delegate to emergency keywords
+        if not pillars:
+            log.info(f"[Research] No pillars for fallback, using emergency keywords")
+            return self._generate_emergency_keywords(business_intent, target_count=20)
+
+        modifiers = {
+            "ecommerce": [
+                "buy", "price", "cost", "cheap", "bulk", "wholesale", "sale",
+                "discount", "online", "best", "reviews", "for sale", "vs",
+                "alternative", "where to buy", "how much", "quality", "authentic",
+                "organic", "natural", "pure", "benefits", "uses", "compare"
+            ],
+            "content_blog": [
+                "how to", "guide", "tutorial", "tips", "benefits", "what is",
+                "why", "uses", "vs", "comparison", "best", "top", "expert",
+                "meaning", "definition", "history", "types", "recipes",
+                "health benefits", "side effects", "information", "guide"
+            ],
+            "supplier": [
+                "bulk", "wholesale", "manufacturer", "supplier", "importer",
+                "specifications", "pricing", "MOQ", "certifications", "quality",
+                "industrial", "food grade", "organic", "fair trade", "export",
+                "direct", "cost", "minimum order", "delivery", "standard"
+            ],
+            "mixed": [
+                "buy", "price", "how to", "benefits", "what is", "reviews",
+                "vs", "best", "online", "bulk", "organic", "quality",
+                "guide", "tips", "information", "cost", "comparison",
+                "alternatives", "uses", "types", "meaning", "history"
+            ]
+        }
+
+        mod_list = modifiers.get(business_intent, modifiers["mixed"])
+        results = []
+
+        # Generate combinations of pillar + modifier
+        for pillar in pillars:
+            for i, modifier in enumerate(mod_list):
+                keyword_text = f"{pillar} {modifier}"
+                results.append(
+                    ResearchResult(
+                        keyword=keyword_text,
+                        source="fallback_generation",
+                        intent="mixed",  # Fallback doesn't classify intent
+                        volume="medium",
+                        difficulty="medium",
+                        total_score=30 + (i % 15),  # Score 30-44
+                        confidence=50,  # Low confidence for generated keywords
+                        pillar_keyword=pillar,
+                        reasoning="Fallback generation when primary sources empty"
+                    )
+                )
+
+                # Stop when we have enough
+                if len(results) >= 20:
+                    log.info(f"[Research] Fallback generated {len(results)} keywords")
+                    return results[:20]
+
+        # If we still don't have 20, add reverse combinations (modifier pillar)
+        if len(results) < 20:
+            for modifier in mod_list[:20 - len(results)]:
+                for pillar in pillars:
+                    keyword_text = f"{modifier} {pillar}"
+                    results.append(
+                        ResearchResult(
+                            keyword=keyword_text,
+                            source="fallback_generation",
+                            intent="mixed",
+                            volume="medium",
+                            difficulty="medium",
+                            total_score=25,
+                            confidence=40,
+                            pillar_keyword=pillar,
+                            reasoning="Fallback generation (reverse order)"
+                        )
+                    )
+                    if len(results) >= 20:
+                        log.info(f"[Research] Fallback generated {len(results)} keywords (reverse)")
+                        return results[:20]
+
+        log.warning(f"[Research] Fallback only generated {len(results)} keywords (target: 20)")
+        return results

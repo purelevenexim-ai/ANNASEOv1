@@ -2313,7 +2313,7 @@ function NewProjectPage() {
     onSuccess: (data) => {
       qclient.invalidateQueries(["projects"])
       setProject(data.project_id)
-      setPage("strategy")
+      setPage("keywords")
     }
   })
 

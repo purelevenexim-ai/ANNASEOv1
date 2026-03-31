@@ -409,7 +409,7 @@ function StepInput({ projectId, onComplete, setPage }) {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Btn variant='default' onClick={saveAll} disabled={loading}>{loading ? 'Saving...' : saved ? '✓ Saved' : 'Save Draft'}</Btn>
-            <Btn variant='teal' onClick={goToStrategy} disabled={loading}>Step 2 — Research Keywords →</Btn>
+            <Btn variant='teal' onClick={goToStrategy} disabled={loading}>Step 2 — Strategy AI Model →</Btn>
           </div>
         </div>
         <div style={{ marginBottom: 14 }}>
@@ -581,6 +581,20 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
   const [error, setError] = useState("")
   const [pollId, setPollId] = useState(null)
 
+  // Strategy form state
+  const [showForm, setShowForm] = useState(true)
+  const [formData, setFormData] = useState({
+    business_type: 'B2C',
+    usp: '',
+    products: [],
+    target_locations: [],
+    target_demographics: [],
+    languages_supported: [],
+    customer_review_areas: [],
+    seasonal_events: []
+  })
+  const [saving, setSaving] = useState(false)
+
   useEffect(() => {
     if (!jobId || status !== "running") return
     const interval = setInterval(async () => {
@@ -606,6 +620,38 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
     return () => clearInterval(interval)
   }, [jobId, status, projectId, onComplete])
 
+  const handleInputChange = (field, value) => {
+    setFormData(prev => ({...prev, [field]: value}))
+  }
+
+  const handleArrayInput = (field, value) => {
+    // Parse comma-separated values
+    const items = value.split(',').map(s => s.trim()).filter(s => s)
+    handleInputChange(field, items)
+  }
+
+  const handleSaveStrategy = async () => {
+    setSaving(true)
+    setError("")
+    try {
+      const response = await apiCall(`/api/ki/${projectId}/strategy-input`, "POST", {
+        session_id: sessionId,
+        ...formData
+      })
+      if (response.success) {
+        setShowForm(false)
+        // Now run strategy processing with collected data
+        startStrategy()
+      } else {
+        setError(response.error || "Failed to save strategy input")
+      }
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const startStrategy = async () => {
     setError("")
     try {
@@ -630,19 +676,215 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
     }
   }
 
+  // Render form if not saved yet
+  if (showForm) {
+    return (
+      <Card>
+        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2: Business Strategy Input</div>
+        <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 14 }}>
+          Tell us about your business strategy. This helps us better understand your context for keyword research.
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Business Type:
+          </label>
+          <select
+            value={formData.business_type}
+            onChange={e => handleInputChange('business_type', e.target.value)}
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit"
+            }}
+          >
+            <option value="B2C">B2C (Direct to Consumer)</option>
+            <option value="B2B">B2B (Business to Business)</option>
+            <option value="D2C">D2C (Direct to Consumer E-commerce)</option>
+            <option value="Service">Service Provider</option>
+            <option value="Marketplace">Marketplace/Multi-vendor</option>
+          </select>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            USP (Unique Selling Proposition):
+          </label>
+          <input
+            type="text"
+            value={formData.usp}
+            onChange={e => handleInputChange('usp', e.target.value)}
+            placeholder="e.g., organic, handcrafted, premium quality..."
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Products/Services (comma-separated):
+          </label>
+          <textarea
+            value={formData.products.join(', ')}
+            onChange={e => handleArrayInput('products', e.target.value)}
+            placeholder="Cinnamon, Cardamom, Cloves"
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              minHeight: "80px",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Target Locations (comma-separated):
+          </label>
+          <textarea
+            value={formData.target_locations.join(', ')}
+            onChange={e => handleArrayInput('target_locations', e.target.value)}
+            placeholder="USA, UK, Canada"
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              minHeight: "80px",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Target Demographics (comma-separated):
+          </label>
+          <textarea
+            value={formData.target_demographics.join(', ')}
+            onChange={e => handleArrayInput('target_demographics', e.target.value)}
+            placeholder="health-conscious, eco-friendly, budget-conscious"
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              minHeight: "80px",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Languages Supported:
+          </label>
+          <textarea
+            value={formData.languages_supported.join(', ')}
+            onChange={e => handleArrayInput('languages_supported', e.target.value)}
+            placeholder="English, Spanish, French"
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              minHeight: "60px",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Customer Review Areas (optional, comma-separated):
+          </label>
+          <textarea
+            value={formData.customer_review_areas.join(', ')}
+            onChange={e => handleArrayInput('customer_review_areas', e.target.value)}
+            placeholder="Quality, Authenticity, Taste, Packaging"
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              minHeight: "60px",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
+            Seasonal Events (optional, comma-separated):
+          </label>
+          <textarea
+            value={formData.seasonal_events.join(', ')}
+            onChange={e => handleArrayInput('seasonal_events', e.target.value)}
+            placeholder="Christmas, Thanksgiving, Diwali"
+            style={{
+              width: "100%",
+              padding: "8px 12px",
+              border: `1px solid ${T.border}`,
+              borderRadius: 6,
+              fontSize: 13,
+              fontFamily: "inherit",
+              minHeight: "60px",
+              boxSizing: "border-box"
+            }}
+          />
+        </div>
+
+        {error && <div style={{ color: T.red, fontSize: 12, marginBottom: 12 }}>{error}</div>}
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <Btn onClick={onBack}>← Back</Btn>
+          <Btn variant='teal' onClick={handleSaveStrategy} disabled={saving}>
+            {saving ? 'Saving...' : 'Save Strategy & Continue'}
+          </Btn>
+          <Btn variant="default" onClick={onComplete} style={{ marginLeft: "auto" }}>
+            Skip to Research →
+          </Btn>
+        </div>
+      </Card>
+    )
+  }
+
+  // Render processing UI after form is saved
   return (
     <Card>
       <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2 — Strategy Processing</div>
       <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 14 }}>
-        Validate and score your keywords using AI. This step analyzes your inputs and prepares them for discovery. Optional: you can skip to discover new keywords instead.
+        Processing your business strategy. This step analyzes your inputs and prepares them for keyword discovery.
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <Btn onClick={onBack}>← Back</Btn>
-        <Btn variant="teal" onClick={startStrategy} disabled={!projectId || status === "running"}>
-          {status === "running" ? "Processing…" : "Run Strategy Processing"}
+        <Btn variant="teal" disabled={status === "running"}>
+          {status === "running" ? "Processing…" : status === "completed" ? "Completed ✓" : "Run Strategy Processing"}
         </Btn>
         <Btn variant="default" onClick={onComplete} style={{ marginLeft: "auto" }}>
-          Skip to Research →
+          Continue to Research →
         </Btn>
       </div>
       {status && <div style={{ marginBottom: 8, color: status === "failed" ? T.red : T.teal }}>
@@ -694,8 +936,8 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
     return () => clearInterval(pollRef.current)
   }, [jobId, status])
 
-  const sources = result?.sources_done || []
-  const count = result?.keyword_count || 0
+  const sources = result?.result_payload?.sources_done || []
+  const count = result?.result_payload?.total_count || 0
 
   return (
     <Card>
