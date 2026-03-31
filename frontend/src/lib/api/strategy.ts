@@ -1,5 +1,5 @@
 const API = import.meta.env.VITE_API_URL || "";
-import fetchDebug from "../lib/fetchDebug"
+import fetchDebug from "../fetchDebug"
 
 export async function enrichKeyword(keyword: string) {
   const { res, parsed } = await fetchDebug(`${API}/api/enrich?keyword=${encodeURIComponent(keyword)}`, {
