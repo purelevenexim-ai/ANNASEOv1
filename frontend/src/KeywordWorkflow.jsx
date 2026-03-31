@@ -3548,11 +3548,15 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
     }
     if (s === allowedStep + 1 && !workflowStatus.can_advance) {
       if (s === 3) {
-        notify("Complete Step 2 before Step 3", "warning")
+        notify("Complete Step 2 (Strategy) before advancing to Step 3 (Research)", "warning")
+      } else if (s === 4) {
+        notify("Step 3 (Research) must complete with ≥20 keywords before Step 4 (Review). Run research or skip step.", "warning")
       } else if (s === 5) {
-        notify("Run AI review before pipeline", "warning")
+        notify("Step 4 (Review) must be completed with ≥20 accepted keywords before Step 5 (AI Check)", "warning")
+      } else if (s === 6) {
+        notify("Step 5 (AI Check) must be completed before Step 6 (Pipeline). You can skip AI check.", "warning")
       } else {
-        notify("Complete the current step before advancing", "warning")
+        notify("Complete the current step before advancing to the next step", "warning")
       }
       return
     }
