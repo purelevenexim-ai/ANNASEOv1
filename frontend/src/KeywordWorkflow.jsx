@@ -7,6 +7,9 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { useNotification } from "./store/notification"
+import useDebug from "./store/debug"
+import DebugPanel from "./components/DebugPanel"
 import PillarConfirmation from "./components/PillarConfirmation"
 import UniverseConfirmation from "./components/UniverseConfirmation"
 import KeywordTreeConfirmation from "./components/KeywordTreeConfirmation"
@@ -16,16 +19,72 @@ import ContentStrategy from "./components/ContentStrategy"
 
 const API = import.meta.env.VITE_API_URL || ""
 
-function apiCall(path, method = "GET", body = null) {
+// Debug-aware fetch helper
+async function fetchDebug(url, opts = {}) {
+  const start = Date.now()
+  try {
+    const res = await fetch(url, opts)
+    const parsed = await res.json().catch(() => ({}))
+    const duration = Date.now() - start
+    const debugStore = useDebug.getState()
+
+    if (debugStore.enabled) {
+      const reqBody = opts.body ? JSON.parse(opts.body) : null
+      debugStore.pushLog({
+        method: opts.method || "GET",
+        path: url.replace(API, ""),
+        status: res.status,
+        ok: res.ok,
+        duration,
+        reqBody: reqBody ? JSON.stringify(reqBody).slice(0, 100) : null,
+        resSnippet: JSON.stringify(parsed).slice(0, 100),
+        ts: Date.now(),
+      })
+    }
+
+    return { res, parsed }
+  } catch (e) {
+    const duration = Date.now() - start
+    const debugStore = useDebug.getState()
+    if (debugStore.enabled) {
+      debugStore.pushLog({
+        method: opts.method || "GET",
+        path: url.replace(API, ""),
+        error: e.message,
+        duration,
+        ts: Date.now(),
+      })
+    }
+    throw e
+  }
+}
+
+async function apiCall(path, method = "GET", body = null) {
   const token = localStorage.getItem("annaseo_token")
-  return fetch(`${API}${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  }).then(r => r.json())
+  const url = `${API}${path}`
+  const start = Date.now()
+  try {
+    const { res, parsed: data } = await fetchDebug(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+    const duration = Date.now() - start
+    const ok = !!res.ok
+
+    if (!ok) {
+      const msg = data?.detail || data?.error || `API ${method} ${path} failed (${res.status})`
+      throw new Error(msg)
+    }
+    return data
+  } catch (e) {
+    const duration = Date.now() - start
+    // fetchDebug already logs errors when debug is enabled
+    throw e
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -863,7 +922,7 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
           <Btn variant='teal' onClick={handleSaveStrategy} disabled={saving}>
             {saving ? 'Saving...' : 'Save Strategy & Continue'}
           </Btn>
-          <Btn variant="default" onClick={onComplete} style={{ marginLeft: "auto" }}>
+          <Btn variant="default" onClick={() => onComplete({})} style={{ marginLeft: "auto" }}>
             Skip to Research →
           </Btn>
         </div>
@@ -883,7 +942,7 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
         <Btn variant="teal" disabled={status === "running"}>
           {status === "running" ? "Processing…" : status === "completed" ? "Completed ✓" : "Run Strategy Processing"}
         </Btn>
-        <Btn variant="default" onClick={onComplete} style={{ marginLeft: "auto" }}>
+        <Btn variant="default" onClick={() => onComplete({})} style={{ marginLeft: "auto" }}>
           Continue to Research →
         </Btn>
       </div>
@@ -896,6 +955,7 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
 }
 
 function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, businessIntent, strategyContext, onComplete, onBack }) {
+  const notify = useNotification(s => s.notify)
   const [jobId, setJobId]     = useState(null)
   const [status, setStatus]   = useState(null)  // null | running | completed | failed
   const [result, setResult]   = useState(null)
@@ -931,7 +991,11 @@ function StepResearch({ projectId, sessionId, customerUrl, competitorUrls, busin
           setStatus(r.status)
           clearInterval(pollRef.current)
         }
-      } catch (e) {}
+      } catch (e) {
+        setError("Research polling failed: " + (e?.message || String(e)))
+        setStatus("failed")
+        clearInterval(pollRef.current)
+      }
     }, 2000)
     return () => clearInterval(pollRef.current)
   }, [jobId, status])
@@ -1243,6 +1307,7 @@ const sourceLabel = (src) => {
 }
 
 function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }) {
+  const notify = useNotification(s => s.notify)
   const [filterPillar, setFilterPillar] = useState("all")
   const [filterStatus, setFilterStatus] = useState("all")
   const [filterIntent, setFilterIntent] = useState("all")
@@ -1258,6 +1323,7 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
   const [aiCleanMessage, setAiCleanMessage] = useState("")
   const [top100Status, setTop100Status] = useState("")
   const [editModal, setEditModal]       = useState(null)
+  const [reviewError, setReviewError]   = useState("")
   const [movePillarModal, setMovePillarModal] = useState(null)
   const PAGE_SIZE = 40
   const queryClient = useQueryClient()
@@ -1304,7 +1370,11 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
             queryClient.invalidateQueries(["ki-review"])
           }
         }
-      } catch { clearInterval(iv) }
+      } catch (e) {
+        setScoreProgress(prev => ({ ...prev, status: "failed" }))
+        setReviewError("Score calculation failed: " + (e?.message || String(e)))
+        clearInterval(iv)
+      }
     }, 2000)
     return () => clearInterval(iv)
   }, [scoreJobId])
@@ -1359,7 +1429,7 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
       setScoreJobId(r.job_id)
       setScoreProgress({ scored: 0, total: r.total, status: "running" })
     } catch (e) {
-      alert("Scoring failed to start: " + e)
+      notify("Scoring failed to start: " + (e?.message || String(e)), "error")
     }
   }
 
@@ -1397,13 +1467,13 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
     })
   }
 
-  const toggleAll = (checked) => {
-    setSelected(checked ? new Set(keywords.map(k => k.item_id)) : new Set())
-  }
-
   // ── Derived data ───────────────────────────────────────────────────────────
 
   const keywords  = data?.keywords || []
+
+  const toggleAll = (checked) => {
+    setSelected(checked ? new Set(keywords.map(k => k.item_id)) : new Set())
+  }
   const total     = data?.total || 0
   const stats     = data?.stats || {}
   const pillars   = pillarData?.pillars || []
@@ -1790,7 +1860,7 @@ function StepReview({ projectId, sessionId, onComplete, onBack, workflowStatus }
                 const lines = document.getElementById("editTextarea").value
                   .split("\n").map(l => l.trim()).filter(Boolean)
                 if (lines.length !== editModal.items.length) {
-                  alert(`Line count mismatch: expected ${editModal.items.length}, got ${lines.length}`)
+                  notify(`Line count mismatch: expected ${editModal.items.length}, got ${lines.length}`, "warning")
                   return
                 }
                 await Promise.all(editModal.items.map((item, i) =>
@@ -2038,6 +2108,7 @@ function AIStageCard({ projectId, sessionId, stage, accepted_keywords, onDone, i
 }
 
 function StepAIReview({ projectId, sessionId, onComplete, onBack }) {
+  const notify = useNotification(s => s.notify)
   const [activeStage, setActiveStage] = useState(0)
   const [doneStages, setDoneStages]   = useState(0)
 
@@ -2910,6 +2981,7 @@ function PillarPhaseCard({ run, events, awaitingPhase, currentPhase, onNext, pha
 }
 
 function StepPipeline({ projectId, onComplete, onBack }) {
+  const notify = useNotification(s => s.notify)
   const [mode, setMode]       = useState("select") // select | running | done
   const [error, setError]     = useState("")
   const [runs, setRuns]       = useState([])        // [{run_id, seed, status}]
@@ -3223,6 +3295,7 @@ function StepPipeline({ projectId, onComplete, onBack }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function StepClusters({ projectId, onComplete, onBack }) {
+  const notify = useNotification(s => s.notify)
   const [expanded, setExpanded] = useState({})
   const [renames, setRenames]   = useState({})
   const [genPillar, setGenPillar] = useState("")
@@ -3380,11 +3453,12 @@ function StepCalendar({ projectId, onGoToCalendar, onBack }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) {
+  const notify = useNotification(s => s.notify)
   const [step, setStep]                 = useState(1)
   const [sessionId, setSessionId]       = useState(null)
   const [customerUrl, setCustomerUrl]   = useState("")
   const [competitorUrls, setCompetitorUrls] = useState([])
-  const [businessIntent, setBusinessIntent] = useState("mixed")  // Task 6
+  const [businessIntent, setBusinessIntent] = useState(["mixed"])  // Task 6 — array to match StepInput
   const [strategyContext, setStrategyContext] = useState(null)  // From Step 2
   const [skipDashboard, setSkipDashboard] = useState(false)
 
@@ -3428,24 +3502,24 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
 
   const handleAdvance = async (targetStep) => {
     if (!workflowStatus) {
-      alert("Workflow status not available yet")
+      notify("Workflow status not available yet", "warning")
       return
     }
 
     const allowedStep = stageToStep[workflowStatus.current_stage] || 1
     if (targetStep > allowedStep + 1) {
-      alert("Complete previous steps before moving forward")
+      notify("Complete previous steps before moving forward", "warning")
       return
     }
     if (targetStep === allowedStep + 1 && !workflowStatus.can_advance) {
       if (targetStep === 2) {
-        alert("Generate strategy before research")
+        notify("Generate strategy before research", "warning")
       } else if (targetStep === 3) {
-        alert("Complete strategy before research")
+        notify("Complete strategy before research", "warning")
       } else if (targetStep === 6) {
-        alert("Run AI review before pipeline")
+        notify("Run AI review before pipeline", "warning")
       } else {
-        alert("Complete current step before advancing")
+        notify("Complete current step before advancing", "warning")
       }
       return
     }
@@ -3457,7 +3531,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
       setStep(nextStep)
     } catch (e) {
       const errMsg = e?.message || e?.detail || String(e)
-      alert("Workflow advance failed: " + errMsg)
+      notify("Workflow advance failed: " + errMsg, "error")
     }
   }
 
@@ -3469,16 +3543,16 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
     }
     const allowedStep = stageToStep[workflowStatus.current_stage] || 1
     if (s > allowedStep + 1) {
-      alert("Please complete previous step(s) first")
+      notify("Please complete previous step(s) first", "warning")
       return
     }
     if (s === allowedStep + 1 && !workflowStatus.can_advance) {
       if (s === 3) {
-        alert("Complete Step 2 before Step 3")
+        notify("Complete Step 2 before Step 3", "warning")
       } else if (s === 5) {
-        alert("Run AI review before pipeline")
+        notify("Run AI review before pipeline", "warning")
       } else {
-        alert("Complete the current step before advancing")
+        notify("Complete the current step before advancing", "warning")
       }
       return
     }
@@ -3582,6 +3656,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
           onGoToCalendar={onGoToCalendar || (() => {})}
           onBack={() => setStep(7)} />
       )}
+      <DebugPanel />
     </div>
   )
 }

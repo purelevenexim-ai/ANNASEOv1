@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './FinalStrategyConfirmation.css'
+import fetchDebug from '../lib/fetchDebug'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -23,9 +24,8 @@ export default function FinalStrategyConfirmation({ runId, onConfirmed, onCancel
   const fetchStrategy = async () => {
     try {
       setLoading(true)
-      const response = await fetch(`${API}/api/runs/${runId}/gate-5`)
-      if (!response.ok) throw new Error('Failed to load final strategy')
-      const data = await response.json()
+      const { res, parsed: data } = await fetchDebug(`${API}/api/runs/${runId}/gate-5`)
+      if (!res.ok) throw new Error('Failed to load final strategy')
       setStrategy(data.strategy || {})
       setError('')
     } catch (err) {
@@ -53,15 +53,14 @@ export default function FinalStrategyConfirmation({ runId, onConfirmed, onCancel
         notes: ''
       }
 
-      const response = await fetch(`${API}/api/runs/${runId}/gate-5`, {
+      const { res, parsed } = await fetchDebug(`${API}/api/runs/${runId}/gate-5`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
 
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.detail || 'Confirmation failed')
+      if (!res.ok) {
+        throw new Error(parsed?.detail || 'Confirmation failed')
       }
 
       setSuccess('Strategy confirmed! Ready for content generation.')

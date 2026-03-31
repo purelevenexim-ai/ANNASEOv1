@@ -2782,11 +2782,14 @@ try:
             rm.edit(item_id=iid, session_id=session_id, new_keyword=body.new_keyword)
         elif action == "move_pillar" and body.new_pillar:
             _ki_db_conn = _ki_db()
-            _ki_db_conn.execute(
-                "UPDATE keyword_universe_items SET pillar_keyword=? WHERE item_id=?",
-                (body.new_pillar.lower(), iid)
-            )
-            _ki_db_conn.commit()
+            try:
+                _ki_db_conn.execute(
+                    "UPDATE keyword_universe_items SET pillar_keyword=? WHERE item_id=?",
+                    (body.new_pillar.lower(), iid)
+                )
+                _ki_db_conn.commit()
+            finally:
+                _ki_db_conn.close()
         else:
             ok = False
         return {"ok": ok, "item_id": iid, "action": action}
@@ -3075,11 +3078,11 @@ try:
 
         # Normalize internal KI stages to workflow stages
         stage_map = {
-            "cross_multiply": "research",
-            "crawl_site": "research",
-            "crawl_competitors": "research",
-            "enrich": "research",
-            "assemble": "research",
+            "cross_multiply": "strategy",
+            "crawl_site": "strategy",
+            "crawl_competitors": "strategy",
+            "enrich": "strategy",
+            "assemble": "strategy",
             "score": "review",
             "confirmed": "review",
         }
@@ -3117,6 +3120,8 @@ try:
             except Exception:
                 has_pillars = False
             can_advance = has_pillars
+        elif stage == "strategy":
+            can_advance = True  # Strategy step is optional; user can always continue
         elif stage == "research":
             can_advance = total_keywords > 0
         elif stage == "review":
@@ -3154,7 +3159,7 @@ try:
         if not status.get("can_advance"):
             raise HTTPException(400, "Cannot advance workflow: complete current step first")
 
-        stage_order = ["input", "research", "review", "ai_review", "pipeline", "clusters", "calendar"]
+        stage_order = ["input", "strategy", "research", "review", "ai_review", "pipeline", "clusters", "calendar"]
         current_stage = status.get("current_stage", "input")
         if current_stage not in stage_order:
             raise HTTPException(400, "Unknown workflow stage")
@@ -3283,7 +3288,7 @@ try:
         return {"ok": True, "ai_flags": updated_flags}
 
     @app.get("/api/ki/{project_id}/pipeline/metrics", tags=["KeywordInput"])
-    def ki_pipeline_metrics(project_id: str, session_id: str, user=Depends(current_user)):
+    def ki_pipeline_metrics(project_id: str, session_id: str = Query(..., description="Session ID"), user=Depends(current_user)):
         """Return pipeline metrics: coverage + cluster health + top100 buckets."""
         db = _ki_db()
 
@@ -3340,7 +3345,7 @@ try:
         }
 
     @app.get("/api/ki/{project_id}/pipeline/report", tags=["KeywordInput"])
-    def ki_pipeline_report(project_id: str, session_id: str, user=Depends(current_user)):
+    def ki_pipeline_report(project_id: str, session_id: str = Query(..., description="Session ID"), user=Depends(current_user)):
         """Consolidated pipeline report across P4..P10 metrics."""
         metrics = ki_pipeline_metrics(project_id, session_id, user)
         top100 = ki_top100(project_id, session_id, user)
@@ -3434,9 +3439,9 @@ try:
             _pipeline_health["last_run"] = start_ts.isoformat()
             _pipeline_health["last_duration_seconds"] = round(duration, 2)
 
-    @app.get("/api/ki/{project_id}/pipeline/report", tags=["KeywordInput"])
-    def ki_pipeline_report(project_id: str, session_id: str, level: str = "basic", user=Depends(current_user)):
-        """Consolidated pipeline report across P4..P10 metrics."""
+    @app.get("/api/ki/{project_id}/pipeline/report/v2", tags=["KeywordInput"])
+    def ki_pipeline_report_v2(project_id: str, session_id: str = Query(..., description="Session ID"), level: str = "basic", user=Depends(current_user)):
+        """Consolidated pipeline report across P4..P10 metrics (v2 with level param)."""
         base = ki_pipeline_metrics(project_id, session_id, user)
         top100 = ki_top100(project_id, session_id, user)
         summary = ki_top100_summary(project_id, session_id, user)
@@ -3780,11 +3785,12 @@ def _run_research_job(job_id: str, project_id: str, session_id: str,
 
         # Save to keyword_universe_items with source prefix "research_*"
         # These live in the KI engine's own SQLite (ki_db), not main DB
-        save_db = ki_db if ki_db is not None else main_db
+        if ki_db is None:
+            raise HTTPException(500, "Keyword database unavailable - cannot save research results")
         if session_id and deduped:
             for item in deduped:
                 try:
-                    save_db.execute(
+                    ki_db.execute(
                         """INSERT OR IGNORE INTO keyword_universe_items
                            (session_id, keyword, pillar_keyword, source, intent,
                             volume_estimate, difficulty, opportunity_score, status)
@@ -3796,7 +3802,7 @@ def _run_research_job(job_id: str, project_id: str, session_id: str,
                     )
                 except Exception:
                     pass
-            save_db.commit()
+            ki_db.commit()
         # Add counts and friendly reasons when no keywords were produced
         counts = {
             "autosuggest": autosuggest_count,
@@ -3970,24 +3976,25 @@ async def ki_research(
             for r in results
         ]
 
-        # Save to research_results table
+        # Save to keyword_universe_items so Step 4 Review can see them
         try:
-            from annaseo_wiring import _db as wiring_db_fn
-            research_db = wiring_db_fn()
+            from engines.annaseo_keyword_input import _db as _ki_db_fn
+            ki_db = _ki_db_fn()
             for kw in keywords:
-                kw_id = hashlib.md5(f"{job_id}_{kw['keyword']}".encode()).hexdigest()
-                research_db.execute(
-                    """INSERT OR IGNORE INTO research_results
-                       (result_id, session_id, keyword, source, intent, volume, difficulty, score, confidence, pillar_keyword)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (kw_id, session_id, kw["keyword"], kw["source"], kw["intent"],
-                     kw["volume"], kw["difficulty"], kw["score"], kw["confidence"],
-                     kw["pillar_keyword"])
+                ki_db.execute(
+                    """INSERT OR IGNORE INTO keyword_universe_items
+                       (project_id, session_id, keyword, pillar_keyword, source, intent, status, relevance_score, opportunity_score)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (project_id, session_id, kw["keyword"], kw["pillar_keyword"],
+                     kw["source"], kw["intent"], "discovered",
+                     int(kw["score"]) if isinstance(kw["score"], (int, float)) else 50,
+                     int(kw["score"]) if isinstance(kw["score"], (int, float)) else 50)
                 )
-            research_db.commit()
-            research_db.close()
+            ki_db.commit()
+            ki_db.close()
+            log.info(f"[research] Saved {len(keywords)} keywords to keyword_universe_items")
         except Exception as e:
-            log.warning(f"[research] Could not save results: {e}")
+            log.warning(f"[research] Could not save to keyword_universe_items: {e}")
 
         # Update job_tracker
         job_tracker.update_strategy_job(
@@ -4425,6 +4432,7 @@ async def ki_score_start(project_id: str, session_id: str,
     if total == 0:
         raise HTTPException(404, "No keywords found for this session")
 
+    db = get_db()
     job_id = f"score_{uuid.uuid4().hex[:12]}"
     job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="score", input_payload={"project_id": project_id, "session_id": session_id, "total": total})
     score_queue.enqueue(run_score_job, job_id, job_timeout=600, retry=3)
@@ -4551,7 +4559,10 @@ async def ki_ai_review(project_id: str, body: dict = Body(...),
 
         elif stage == "claude":
             from engines.ruflo_strategy_dev_engine import AI
-            raw = AI.deepseek(filled, system="Claude fallback mode", temperature=0.2)
+            raw, _tokens = AI.claude(
+                system="You are an expert SEO keyword reviewer. Analyze each keyword and return JSON array.",
+                prompt=filled, max_tokens=4096
+            )
 
         else:
             raise HTTPException(400, f"Unknown stage: {stage}")
@@ -4735,6 +4746,68 @@ def ki_supporting_suggestions(project_id: str, pillar: Optional[str] = None, use
         combined.sort(key=lambda x: (0 if prefix in x else 1, x))
 
     return {"suggestions": combined}
+
+
+@app.post("/api/ki/{project_id}/strategy-input")
+async def ki_strategy_input(
+    project_id: str,
+    body: dict = Body(default={}),
+    user=Depends(current_user)
+):
+    """Step 2: Save strategy input (business type, USP, products, etc.)"""
+    from engines.annaseo_keyword_input import _db as _ki_db_fn
+
+    ki_db = _ki_db_fn()
+    session_id = body.get("session_id")
+
+    if not session_id:
+        return {"success": False, "error": "session_id required"}
+
+    try:
+        # Verify session exists
+        session = ki_db.execute(
+            "SELECT * FROM keyword_input_sessions WHERE session_id=?",
+            (session_id,)
+        ).fetchone()
+
+        if not session:
+            return {"success": False, "error": "session not found"}
+
+        # UPDATE with strategy input
+        ki_db.execute("""
+            UPDATE keyword_input_sessions SET
+                business_type = ?,
+                usp = ?,
+                products = ?,
+                target_locations = ?,
+                target_demographics = ?,
+                languages_supported = ?,
+                customer_review_areas = ?,
+                seasonal_events = ?
+            WHERE session_id = ?
+        """, (
+            body.get("business_type", "B2C"),
+            body.get("usp", ""),
+            json.dumps(body.get("products", [])),
+            json.dumps(body.get("target_locations", [])),
+            json.dumps(body.get("target_demographics", [])),
+            json.dumps(body.get("languages_supported", [])),
+            json.dumps(body.get("customer_review_areas", [])),
+            json.dumps(body.get("seasonal_events", [])),
+            session_id
+        ))
+        ki_db.commit()
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "strategy_input_saved": True
+        }
+    except Exception as e:
+        ki_db.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        ki_db.close()
 
 
 @app.get("/api/ki/{project_id}/pillar-status")

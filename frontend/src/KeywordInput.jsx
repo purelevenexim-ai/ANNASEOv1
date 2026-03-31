@@ -5,6 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import fetchDebug from "./lib/fetchDebug"
 
 const API = import.meta.env.VITE_API_URL || ""
 
@@ -12,16 +13,13 @@ const API = import.meta.env.VITE_API_URL || ""
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-function apiCall(path, method = "GET", body = null) {
+async function apiCall(path, method = "GET", body = null) {
   const token = localStorage.getItem("annaseo_token")
-  return fetch(`${API}${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  }).then(r => r.json())
+  const url = `${API}${path}`
+  const opts = { method, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } }
+  if (body) opts.body = JSON.stringify(body)
+  const { res, parsed } = await fetchDebug(url, opts)
+  return parsed
 }
 
 // Design tokens (matching App.jsx)

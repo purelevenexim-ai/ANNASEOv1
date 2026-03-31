@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './ContentStrategy.css'
+import fetchDebug from '../lib/fetchDebug'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -70,15 +71,14 @@ export default function ContentStrategy({ projectId, runId, onConfirmed, onCance
         ? `${API}/api/runs/${runId}/content-strategy`
         : `${API}/api/projects/${projectId}/content-strategy`
 
-      const response = await fetch(endpoint, {
+      const { res, parsed } = await fetchDebug(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
 
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.detail || 'Strategy confirmation failed')
+      if (!res.ok) {
+        throw new Error(parsed?.detail || 'Strategy confirmation failed')
       }
 
       setSuccess('Content strategy confirmed!')

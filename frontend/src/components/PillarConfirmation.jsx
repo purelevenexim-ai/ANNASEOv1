@@ -4,19 +4,17 @@
 // ============================================================================
 
 import { useState, useEffect } from "react"
+import fetchDebug from "../lib/fetchDebug"
 
 const API = import.meta.env.VITE_API_URL || ""
 
-function apiCall(path, method = "GET", body = null) {
+async function apiCall(path, method = "GET", body = null) {
   const token = localStorage.getItem("annaseo_token")
-  return fetch(`${API}${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  }).then(r => r.json())
+  const url = `${API}${path}`
+  const opts = { method, headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) } }
+  if (body) opts.body = JSON.stringify(body)
+  const { res, parsed } = await fetchDebug(url, opts)
+  return parsed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

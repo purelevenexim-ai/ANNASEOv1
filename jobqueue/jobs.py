@@ -623,10 +623,13 @@ def run_single_call_job(job_id: str):
                         ).fetchone()
                         if session_row:
                             session_data = dict(session_row)
-                            user_keywords = [
-                                {"keyword": kw, "source": "user_input"}
-                                for kw in (session_data.get("pillars") or [])
-                            ]
+                            # Load from pillar_support_map (the correct schema), not "pillars" (which doesn't exist)
+                            psm = json.loads(session_data.get("pillar_support_map") or "{}")
+                            user_keywords = []
+                            for pillar, supports in psm.items():
+                                user_keywords.append({"keyword": pillar, "source": "user_input"})
+                                for support in (supports or []):
+                                    user_keywords.append({"keyword": support, "source": "user_input"})
                         ki_db.close()
                     except Exception as e:
                         log = logging.getLogger("strategy")

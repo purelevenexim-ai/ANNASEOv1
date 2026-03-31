@@ -13,6 +13,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "modules"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "quality"))
 
 import pytest
+import engines.annaseo_keyword_input as ki_module
+
+
+@pytest.fixture(autouse=True)
+def isolated_test_db(monkeypatch, tmp_path):
+    """Each test gets its own fresh SQLite database — no shared state, no lock contention.
+
+    The `DB_PATH` in annaseo_keyword_input is a module-level variable that's normally
+    set to "./annaseo.db" (the production database). This causes all tests to write to
+    the shared production database, which causes corruption when tests run in parallel
+    with a running server.
+
+    By using monkeypatch.setattr to override DB_PATH per-test, we give each test its own
+    isolated temporary database file. Pytest's tmp_path automatically deletes it after the test.
+    """
+    test_db = tmp_path / "test_annaseo.db"
+    monkeypatch.setattr(ki_module, "DB_PATH", test_db)
+    yield test_db
+    # tmp_path is automatically cleaned up by pytest after the test
 
 
 @pytest.fixture(autouse=True)

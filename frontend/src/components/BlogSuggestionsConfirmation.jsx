@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './BlogSuggestionsConfirmation.css'
+import fetchDebug from '../lib/fetchDebug'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -19,9 +20,8 @@ export default function BlogSuggestionsConfirmation({ runId, onConfirmed, onCanc
   const fetchArticles = async () => {
     try {
       setLoading(true)
-      const response = await fetch(`${API}/api/runs/${runId}/gate-4`)
-      if (!response.ok) throw new Error('Failed to load blog suggestions')
-      const data = await response.json()
+      const { res, parsed: data } = await fetchDebug(`${API}/api/runs/${runId}/gate-4`)
+      if (!res.ok) throw new Error('Failed to load blog suggestions')
       setArticles(data.articles || [])
       setSelectedArticles(new Set(data.articles.map((_, i) => i)))
       setError('')
@@ -66,15 +66,14 @@ export default function BlogSuggestionsConfirmation({ runId, onConfirmed, onCanc
         notes: ''
       }
 
-      const response = await fetch(`${API}/api/runs/${runId}/gate-4`, {
+      const { res, parsed } = await fetchDebug(`${API}/api/runs/${runId}/gate-4`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
 
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.detail || 'Confirmation failed')
+      if (!res.ok) {
+        throw new Error(parsed?.detail || 'Confirmation failed')
       }
 
       setSuccess('Blog strategy confirmed!')

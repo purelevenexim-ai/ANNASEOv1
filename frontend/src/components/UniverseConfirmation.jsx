@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import './UniverseConfirmation.css'
+import fetchDebug from '../lib/fetchDebug'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -26,9 +27,8 @@ export default function UniverseConfirmation({ runId, onConfirmed, onCancel }) {
   const fetchKeywords = async () => {
     try {
       setLoading(true)
-      const response = await fetch(`${API}/api/runs/${runId}/gate-1`)
-      if (!response.ok) throw new Error('Failed to load keywords')
-      const data = await response.json()
+      const { res, parsed: data } = await fetchDebug(`${API}/api/runs/${runId}/gate-1`)
+      if (!res.ok) throw new Error('Failed to load keywords')
       setKeywords(data.keywords || [])
       setError('')
     } catch (err) {
@@ -87,15 +87,14 @@ export default function UniverseConfirmation({ runId, onConfirmed, onCancel }) {
         notes: ''
       }
 
-      const response = await fetch(`${API}/api/runs/${runId}/gate-1`, {
+      const { res, parsed } = await fetchDebug(`${API}/api/runs/${runId}/gate-1`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       })
 
-      if (!response.ok) {
-        const err = await response.json()
-        throw new Error(err.detail || 'Confirmation failed')
+      if (!res.ok) {
+        throw new Error(parsed?.detail || 'Confirmation failed')
       }
 
       setSuccess('Keywords confirmed!')

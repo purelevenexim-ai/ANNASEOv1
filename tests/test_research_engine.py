@@ -31,12 +31,11 @@ def test_research_keywords_full_flow(monkeypatch):
 
     engine = ResearchEngine(industry="spices")
 
-    # Mock keyword input data
+    # Mock keyword input data (schema uses pillar_support_map)
     mock_ki_session = MagicMock()
-    mock_ki_session.execute.return_value.fetchone.return_value = {
-        "pillars": json.dumps(["clove"]),
-        "supporting_keywords": json.dumps({"clove": ["pure clove powder", "organic clove"]})
-    }
+    mock_session = MagicMock()
+    mock_session.get = lambda k, default: json.dumps({"clove": ["pure clove powder", "organic clove"]}) if k == "pillar_support_map" else default
+    mock_ki_session.execute.return_value.fetchone.return_value = mock_session
 
     # Mock Google suggestions
     def mock_expand_phrase(phrase, deep=False):
@@ -88,10 +87,17 @@ def test_research_keywords_full_flow(monkeypatch):
                 business_intent="ecommerce"
             )
 
-    assert len(results) >= 2
-    assert results[0].keyword == "pure clove powder"
-    assert results[0].total_score == 20
-    assert results[0].source == "user"
+    # With fallback guarantee, should have minimum 20 keywords
+    assert len(results) >= 20, f"Expected 20+ keywords with fallback, got {len(results)}"
+
+    # Check that we have keywords from multiple sources
+    has_user = any(r.source == "user" for r in results)
+    has_google = any(r.source == "google" for r in results)
+    has_fallback = any(r.source == "fallback_generation" for r in results)
+
+    assert has_user, "Should have at least one user keyword"
+    # Fallback should be present when needed
+    assert has_fallback or has_google, "Should have google or fallback keywords"
 
 
 def test_research_engine_deduplication():

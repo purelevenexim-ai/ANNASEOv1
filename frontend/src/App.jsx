@@ -15,6 +15,9 @@ import KeywordInputPage from "./KeywordInput"
 import KeywordWorkflow from "./KeywordWorkflow"
 import StrategyPage from "./StrategyPage"
 import Notification from "./components/Notification"
+import DebugPanel from "./components/DebugPanel"
+import useDebug from "./store/debug"
+import fetchDebug from "./lib/fetchDebug"
 
 const API = import.meta.env.VITE_API_URL || ""
 const qc  = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } })
@@ -47,41 +50,50 @@ const useStore = create((set, get) => ({
 const api = {
   get: async (path) => {
     const token = useStore.getState().token
-    const r = await fetch(`${API}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-    if (r.status === 401) { useStore.getState().logout(); return null }
-    return r.json()
+    const url = `${API}${path}`
+    const start = Date.now()
+    const { res, parsed } = await fetchDebug(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+    const duration = Date.now() - start
+    if (res.status === 401) { useStore.getState().logout(); return null }
+    return parsed
   },
   post: async (path, body) => {
     const token = useStore.getState().token
-    const r = await fetch(`${API}${path}`, {
+    const url = `${API}${path}`
+    const start = Date.now()
+    const { res, parsed } = await fetchDebug(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(body),
     })
-    if (r.status === 401) { useStore.getState().logout(); return null }
-    const text = await r.text()
-    try { return text ? JSON.parse(text) : {} } catch { return { error: text } }
+    const duration = Date.now() - start
+    if (res.status === 401) { useStore.getState().logout(); return null }
+    return parsed
   },
   put: async (path, body) => {
     const token = useStore.getState().token
-    const r = await fetch(`${API}${path}`, {
+    const url = `${API}${path}`
+    const start = Date.now()
+    const { res, parsed } = await fetchDebug(url, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(body),
     })
-    if (r.status === 401) { useStore.getState().logout(); return null }
-    const text = await r.text()
-    try { return text ? JSON.parse(text) : {} } catch { return { error: text } }
+    const duration = Date.now() - start
+    if (res.status === 401) { useStore.getState().logout(); return null }
+    return parsed
   },
   delete: async (path) => {
     const token = useStore.getState().token
-    const r = await fetch(`${API}${path}`, {
+    const url = `${API}${path}`
+    const start = Date.now()
+    const { res, parsed } = await fetchDebug(url, {
       method: "DELETE",
       headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     })
-    if (r.status === 401) { useStore.getState().logout(); return null }
-    const text = await r.text()
-    try { return text ? JSON.parse(text) : {} } catch { return { error: text } }
+    const duration = Date.now() - start
+    if (res.status === 401) { useStore.getState().logout(); return null }
+    return parsed
   },
 }
 
@@ -101,6 +113,9 @@ const T = {
   greenLight: "#EAF3DE",
   gray: "#888780",
   grayLight: "#F1EFE8",
+  border: "rgba(0,0,0,0.09)",
+  text: "#111827",
+  textSoft: "#6b7280",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -375,9 +390,8 @@ function LoginPage() {
     if (mode === "login") {
       const fd = new FormData()
       fd.append("username", email); fd.append("password", pw)
-      const r = await fetch(`${API}/api/auth/login`, { method: "POST", body: fd })
-      if (!r.ok) { setErr("Invalid credentials"); return }
-      const data = await r.json()
+      const { res, parsed: data } = await fetchDebug(`${API}/api/auth/login`, { method: "POST", body: fd })
+      if (!res.ok) { setErr("Invalid credentials"); return }
       setToken(data.access_token)
       setUser({ email, user_id: data.user_id, role: data.role })
       setPage("dashboard")
@@ -3340,8 +3354,8 @@ function QueueDashboard() {
   const fetchData = async () => {
     setLoading(true)
     try {
-      const m = await (await fetch(`${apiBase}/api/queue/metrics`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).json()
-      const j = await (await fetch(`${apiBase}/api/queue/jobs`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })).json()
+      const { res: _mRes, parsed: m } = await fetchDebug(`${apiBase}/api/queue/metrics`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      const { res: _jRes, parsed: j } = await fetchDebug(`${apiBase}/api/queue/jobs`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       setMetrics(m)
       setJobs(j)
     } catch (e) {
@@ -3358,10 +3372,7 @@ function QueueDashboard() {
   }, [token])
 
   const action = async (jobId, type) => {
-    await fetch(`${apiBase}/api/jobs/${jobId}/${type}`, {
-      method: "POST",
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    await fetchDebug(`${apiBase}/api/jobs/${jobId}/${type}`, { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {} })
     fetchData()
   }
 
@@ -3428,8 +3439,7 @@ function ErrorsDashboard() {
   const fetchErrors = async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${apiBase}/api/errors/realtime?limit=200`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-      const json = await res.json()
+      const { res, parsed: json } = await fetchDebug(`${apiBase}/api/errors/realtime?limit=200`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       setErrors(json.errors || [])
     } catch (err) {
       console.error('fetchErrors', err)
@@ -3551,6 +3561,7 @@ export default function Root() {
   return (
     <QueryClientProvider client={qc}>
       <Notification />
+      <DebugPanel />
       <App/>
     </QueryClientProvider>
   )
