@@ -4066,12 +4066,18 @@ async def ki_research(
         from engines.research_engine import ResearchEngine
         engine = ResearchEngine(industry=industry)
 
-        results = engine.research_keywords(
-            project_id=project_id,
-            session_id=session_id,
-            business_intent=business_intent,
-            language="en"
-        )
+        try:
+            results = engine.research_keywords(
+                project_id=project_id,
+                session_id=session_id,
+                business_intent=business_intent,
+                language="en"
+            )
+        except Exception as ollama_err:
+            log.warning(f"[research] ResearchEngine/Ollama failed: {ollama_err}")
+            log.info("[research] Falling back to emergency keyword generation")
+            # Fallback: generate emergency keywords matching business intent
+            results = engine._generate_emergency_keywords(business_intent, target_count=25)
 
         # Convert to dict format
         keywords = [
