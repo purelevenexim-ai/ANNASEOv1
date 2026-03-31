@@ -325,10 +325,9 @@ function StepInput({ projectId, onComplete, setPage }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [saved, setSaved] = useState(false)
-  // Task 6: Business intent fields for research engine (now multi-select)
+  const [isSubmitting, setIsSubmitting] = useState(false)  // 🔒 PREVENT DOUBLE SUBMIT
   const [businessIntent, setBusinessIntent] = useState(["ecommerce"])
-  const [targetAudience, setTargetAudience] = useState("")
-  const [geographicFocus, setGeographicFocus] = useState("India")
+  const [projectData, setProjectData] = useState(null)  // Fetch project context
   const inStyle = { width: '100%', padding: '7px 10px', borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: 'border-box' }
 
   const { data: existingPillars } = useQuery({
@@ -344,6 +343,20 @@ function StepInput({ projectId, onComplete, setPage }) {
     enabled: !!projectId,
     retry: false,
   })
+
+  // Fetch project data to display context and pre-fill customer_url, competitor_urls
+  const { data: projectDataQuery } = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => apiCall(`/api/projects/${projectId}`),
+    enabled: !!projectId,
+    retry: false,
+  })
+
+  useEffect(() => {
+    if (projectDataQuery) {
+      setProjectData(projectDataQuery)
+    }
+  }, [projectDataQuery])
 
   useEffect(() => {
     if (existingPillars && existingPillars.pillars) {
@@ -370,14 +383,23 @@ function StepInput({ projectId, onComplete, setPage }) {
     if (latestSession.intent_focus) setIntentFocus(latestSession.intent_focus)
     if (latestSession.customer_url) setCustomerUrl(latestSession.customer_url)
     if (Array.isArray(latestSession.competitor_urls)) setCompetitorUrls(latestSession.competitor_urls)
-    // Task 6: Load business intent fields (handle both string and array)
+    // Load business intent fields (handle both string and array)
     if (latestSession.business_intent) {
       const bi = latestSession.business_intent
       setBusinessIntent(Array.isArray(bi) ? bi : [bi])
     }
-    if (latestSession.target_audience) setTargetAudience(latestSession.target_audience)
-    if (latestSession.geographic_focus) setGeographicFocus(latestSession.geographic_focus)
   }, [latestSession])
+
+  // Pre-fill customer_url and competitor_urls from project data if not already set in session
+  useEffect(() => {
+    if (!projectData) return
+    if (!customerUrl && projectData.customer_url) {
+      setCustomerUrl(projectData.customer_url)
+    }
+    if (competitorUrls.length === 0 && Array.isArray(projectData.competitor_urls)) {
+      setCompetitorUrls(projectData.competitor_urls)
+    }
+  }, [projectData, customerUrl, competitorUrls])
 
   const addSupport = () => {
     const kw = supportInput.trim()
@@ -422,8 +444,15 @@ function StepInput({ projectId, onComplete, setPage }) {
   }
 
   const saveAll = async () => {
+    // 🔒 PREVENT DOUBLE SUBMIT: Lock if already submitting
+    if (isSubmitting) return null
+
     if (!pillars.length) { setError('Add at least one pillar to continue'); return null }
-    setLoading(true); setError('')
+
+    setIsSubmitting(true)  // Lock
+    setLoading(true)
+    setError('')
+
     try {
       const pillarSupportMap = pillars.reduce((acc, p) => { acc[p.keyword] = p.supports || []; return acc }, {})
       const r = await apiCall(`/api/ki/${projectId}/input`, 'POST', {
@@ -433,28 +462,33 @@ function StepInput({ projectId, onComplete, setPage }) {
         intent_focus: intentFocus,
         customer_url: customerUrl,
         competitor_urls: competitorUrls,
-        // Task 6: Include business intent fields
         business_intent: businessIntent,
-        target_audience: targetAudience,
-        geographic_focus: geographicFocus,
       })
+
       setLoading(false)
+
       if (r?.session_id) {
         setSaved(true)
         setTimeout(() => setSaved(false), 2200)
-        return { sessionId: r.session_id, pillars, supports: globalSupports, customerUrl, competitorUrls, businessIntent, targetAudience, geographicFocus }
+        setIsSubmitting(false)  // Unlock
+        return { sessionId: r.session_id, pillars, supports: globalSupports, customerUrl, competitorUrls, businessIntent }
       }
+
       setError(typeof r?.detail === 'string' ? r.detail : Array.isArray(r?.detail) ? r.detail.map(e=>e.msg||String(e)).join('; ') : 'Save failed')
+      setIsSubmitting(false)  // Unlock
       return null
     } catch(e) {
       setLoading(false)
       setError(String(e))
+      setIsSubmitting(false)  // Unlock
       return null
     }
   }
 
   const goToStrategy = async () => {
-    const result = await saveAll(); if (result && onComplete) onComplete(result)
+    if (isSubmitting) return  // Prevent double click
+    const result = await saveAll()
+    if (result && onComplete) onComplete(result)
   }
 
   if (!projectId) return <div style={{ color: T.gray, fontSize: 13 }}>Select a project first.</div>
@@ -468,8 +502,8 @@ function StepInput({ projectId, onComplete, setPage }) {
             <div style={{ fontSize: 12, color: T.textSoft }}>Global supports auto-apply to each pillar by default.</div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <Btn variant='default' onClick={saveAll} disabled={loading}>{loading ? 'Saving...' : saved ? '✓ Saved' : 'Save Draft'}</Btn>
-            <Btn variant='teal' onClick={goToStrategy} disabled={loading}>Step 2 — Strategy AI Model →</Btn>
+            <Btn variant='default' onClick={saveAll} disabled={loading || isSubmitting}>{loading ? 'Saving...' : saved ? '✓ Saved' : 'Save Draft'}</Btn>
+            <Btn variant='teal' onClick={goToStrategy} disabled={loading || isSubmitting}>{isSubmitting ? 'Processing...' : 'Step 2 — Strategy AI Model →'}</Btn>
           </div>
         </div>
         <div style={{ marginBottom: 14 }}>
@@ -564,11 +598,11 @@ function StepInput({ projectId, onComplete, setPage }) {
           </div>
         </div>
 
-        {/* Task 6: Business Intent Questions */}
+        {/* Business Intent & Project Context Summary */}
         <div style={{ background: T.purpleLight, borderRadius: 12, padding: 12, marginBottom: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Business Intent (Select Multiple)</div>
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 6 }}>Select all applicable business intents:</label>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>Business Intent</div>
+          <div>
+            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 6 }}>Select applicable business intents:</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {[
                 { value: 'ecommerce', label: 'E-commerce (selling products)' },
@@ -595,27 +629,14 @@ function StepInput({ projectId, onComplete, setPage }) {
               ))}
             </div>
           </div>
-          <div style={{ marginBottom: 8 }}>
-            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>Target audience (optional)</label>
-            <input
-              value={targetAudience}
-              onChange={e => setTargetAudience(e.target.value)}
-              placeholder="e.g., health-conscious, budget-buyers, enterprise"
-              style={{ ...inStyle }}
-            />
-          </div>
-          <div>
-            <label style={{ fontSize: 11, color: T.textSoft, display: 'block', marginBottom: 4 }}>Geographic focus</label>
-            <select value={geographicFocus} onChange={e => setGeographicFocus(e.target.value)} style={{ ...inStyle }}>
-              <option value="India">India</option>
-              <option value="global">Global</option>
-              <option value="north_india">North India</option>
-              <option value="south_india">South India</option>
-              <option value="usa">USA</option>
-              <option value="uk">UK</option>
-              <option value="eu">Europe</option>
-            </select>
-          </div>
+          {projectData && (
+            <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid rgba(0,0,0,0.1)`, fontSize: 11 }}>
+              <div style={{ color: T.textSoft, marginBottom: 6 }}>From project profile:</div>
+              {projectData.business_type && <div>• Business type: <strong>{projectData.business_type}</strong></div>}
+              {projectData.target_locations && <div>• Locations: <strong>{Array.isArray(projectData.target_locations) ? projectData.target_locations.join(', ') : projectData.target_locations}</strong></div>}
+              {projectData.target_languages && <div>• Languages: <strong>{Array.isArray(projectData.target_languages) ? projectData.target_languages.join(', ') : projectData.target_languages}</strong></div>}
+            </div>
+          )}
         </div>
 
         <div style={{ background: T.grayLight, borderRadius: 12, padding: 12 }}>
@@ -641,19 +662,29 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
   const [error, setError] = useState("")
   const [pollId, setPollId] = useState(null)
 
-  // Strategy form state
+  // Strategy form state - simplified to only workflow-specific fields
   const [showForm, setShowForm] = useState(true)
   const [formData, setFormData] = useState({
-    business_type: 'B2C',
-    usp: '',
     products: [],
-    target_locations: [],
-    target_demographics: [],
-    languages_supported: [],
     customer_review_areas: [],
     seasonal_events: []
   })
   const [saving, setSaving] = useState(false)
+  const [projectData, setProjectData] = useState(null)
+
+  // Fetch project data to display context
+  const { data: projectDataQuery } = useQuery({
+    queryKey: ['project-strategy', projectId],
+    queryFn: () => apiCall(`/api/projects/${projectId}`),
+    enabled: !!projectId,
+    retry: false,
+  })
+
+  useEffect(() => {
+    if (projectDataQuery) {
+      setProjectData(projectDataQuery)
+    }
+  }, [projectDataQuery])
 
   useEffect(() => {
     if (!jobId || status !== "running") return
@@ -740,55 +771,21 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
   if (showForm) {
     return (
       <Card>
-        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2: Business Strategy Input</div>
+        <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Step 2: Strategy Details</div>
         <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 14 }}>
-          Tell us about your business strategy. This helps us better understand your context for keyword research.
+          Provide key strategy details: products, customer feedback areas, and seasonal events. Your business profile is displayed below for reference.
         </div>
 
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
-            Business Type:
-          </label>
-          <select
-            value={formData.business_type}
-            onChange={e => handleInputChange('business_type', e.target.value)}
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: `1px solid ${T.border}`,
-              borderRadius: 6,
-              fontSize: 13,
-              fontFamily: "inherit"
-            }}
-          >
-            <option value="B2C">B2C (Direct to Consumer)</option>
-            <option value="B2B">B2B (Business to Business)</option>
-            <option value="D2C">D2C (Direct to Consumer E-commerce)</option>
-            <option value="Service">Service Provider</option>
-            <option value="Marketplace">Marketplace/Multi-vendor</option>
-          </select>
-        </div>
-
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
-            USP (Unique Selling Proposition):
-          </label>
-          <input
-            type="text"
-            value={formData.usp}
-            onChange={e => handleInputChange('usp', e.target.value)}
-            placeholder="e.g., organic, handcrafted, premium quality..."
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: `1px solid ${T.border}`,
-              borderRadius: 6,
-              fontSize: 13,
-              fontFamily: "inherit",
-              boxSizing: "border-box"
-            }}
-          />
-        </div>
+        {/* Project Context Summary */}
+        {projectData && (
+          <div style={{ background: T.grayLight, borderRadius: 8, padding: "12px", marginBottom: 16 }}>
+            <div style={{ fontSize: 11, color: T.textSoft, fontWeight: 700, marginBottom: 6 }}>Your project profile (set during project creation):</div>
+            {projectData.business_type && <div style={{ fontSize: 11, marginBottom: 3 }}>• Business type: <strong>{projectData.business_type}</strong></div>}
+            {projectData.usp && <div style={{ fontSize: 11, marginBottom: 3 }}>• USP: <strong>{projectData.usp}</strong></div>}
+            {projectData.target_locations && <div style={{ fontSize: 11, marginBottom: 3 }}>• Locations: <strong>{Array.isArray(projectData.target_locations) ? projectData.target_locations.join(', ') : projectData.target_locations}</strong></div>}
+            {projectData.target_languages && <div style={{ fontSize: 11 }}>• Languages: <strong>{Array.isArray(projectData.target_languages) ? projectData.target_languages.join(', ') : projectData.target_languages}</strong></div>}
+          </div>
+        )}
 
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
@@ -811,68 +808,6 @@ function StepStrategy({ projectId, sessionId, customerUrl, competitorUrls, busin
           />
         </div>
 
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
-            Target Locations (comma-separated):
-          </label>
-          <textarea
-            value={formData.target_locations.join(', ')}
-            onChange={e => handleArrayInput('target_locations', e.target.value)}
-            placeholder="USA, UK, Canada"
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: `1px solid ${T.border}`,
-              borderRadius: 6,
-              fontSize: 13,
-              fontFamily: "inherit",
-              minHeight: "80px",
-              boxSizing: "border-box"
-            }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
-            Target Demographics (comma-separated):
-          </label>
-          <textarea
-            value={formData.target_demographics.join(', ')}
-            onChange={e => handleArrayInput('target_demographics', e.target.value)}
-            placeholder="health-conscious, eco-friendly, budget-conscious"
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: `1px solid ${T.border}`,
-              borderRadius: 6,
-              fontSize: 13,
-              fontFamily: "inherit",
-              minHeight: "80px",
-              boxSizing: "border-box"
-            }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 16 }}>
-          <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>
-            Languages Supported:
-          </label>
-          <textarea
-            value={formData.languages_supported.join(', ')}
-            onChange={e => handleArrayInput('languages_supported', e.target.value)}
-            placeholder="English, Spanish, French"
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              border: `1px solid ${T.border}`,
-              borderRadius: 6,
-              fontSize: 13,
-              fontFamily: "inherit",
-              minHeight: "60px",
-              boxSizing: "border-box"
-            }}
-          />
-        </div>
 
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "block", marginBottom: 4, fontSize: 13, fontWeight: 500 }}>

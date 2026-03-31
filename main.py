@@ -2620,11 +2620,23 @@ try:
                 geographic_focus=body.geographic_focus,
             )
 
+            # 💾 Save customer_url and competitor_urls to projects table for persistence
+            try:
+                db = get_db()
+                db.execute(
+                    "UPDATE projects SET customer_url=?, competitor_urls=? WHERE project_id=?",
+                    (body.customer_url or "", json.dumps(body.competitor_urls or []), project_id)
+                )
+                db.commit()
+                db.close()
+            except Exception as e:
+                log.warning(f"[main] Failed to persist URLs to projects table: {e}")
+
             # Trigger cross_multiply immediately in background so review queue has items
             bg.add_task(_kie.generate_universe, project_id=project_id, session_id=sid,
                         customer_url=body.customer_url or "",
                         competitor_urls=body.competitor_urls or [])
-            return {"session_id": sid, "status": "saved", "business_intent": bi_str, "target_audience": body.target_audience, "geographic_focus": body.geographic_focus}
+            return {"session_id": sid, "status": "saved", "business_intent": bi_str}
 
         except sqlite3.IntegrityError as e:
             log.warning(f"[main] ki_save_input integrity error for {project_id}: {e}")
