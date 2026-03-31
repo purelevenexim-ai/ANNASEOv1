@@ -2599,10 +2599,16 @@ try:
             bi_str = ",".join(bi) if bi else "mixed"
         else:
             bi_str = bi or "mixed"
+
+        # Convert pillars from List[str] to List[dict] for save_customer_input
+        pillars_as_dicts = [{"keyword": p, "intent": "transactional", "priority": 1}
+                           if isinstance(p, str) else p
+                           for p in (body.pillars or [])]
+
         try:
             sid = _kie.save_customer_input(
                 project_id=project_id,
-                pillars=body.pillars,
+                pillars=pillars_as_dicts,
                 supporting=body.supporting,
                 pillar_support_map=body.pillar_support_map or {},
                 intent_focus=body.intent_focus,
