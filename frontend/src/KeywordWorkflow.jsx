@@ -3588,7 +3588,6 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
   return (
     <div style={{ maxWidth: 900, margin: "0 auto" }}>
       <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-      <OperationProgress step={step - 1} />
 
       {step === 1 && <StepInput projectId={projectId} onComplete={handleStep1Done} setPage={setPage} />}
       {step === 2 && (
