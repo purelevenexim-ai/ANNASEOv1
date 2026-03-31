@@ -1,4 +1,5 @@
 from jobqueue.connection import redis_conn, pipeline_queue
+from rq import Retry as RQRetry
 from workers.error_worker import process_error_log
 from annaseo_product_growth import WebhookEngine
 import os
@@ -7,7 +8,7 @@ import os
 def log_error_async(payload: dict):
     if pipeline_queue is not None:
         try:
-            pipeline_queue.enqueue(process_error_log, payload, job_timeout=60, retry=2)
+            pipeline_queue.enqueue(process_error_log, payload, job_timeout=60, retry=RQRetry(max=2))
             return
         except Exception:
             pass

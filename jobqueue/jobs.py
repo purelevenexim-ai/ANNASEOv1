@@ -8,6 +8,7 @@ except ModuleNotFoundError:
     sentry_sdk = None
 
 from jobqueue.connection import redis_conn, pipeline_queue
+from rq import Retry as RQRetry
 from jobqueue.locks import acquire_job_lock, release_job_lock
 from services import job_tracker
 from services.checkpoint import should_run_step, mark_step_start, mark_step_complete
@@ -717,4 +718,4 @@ def enqueue_pipeline_job(job_id: str):
     if not project_id or not seed:
         return
 
-    pipeline_queue.enqueue(run_pipeline_job, job_id, project_id, seed, job_timeout=7200, retry=2)
+    pipeline_queue.enqueue(run_pipeline_job, job_id, project_id, seed, job_timeout=7200, retry=RQRetry(max=2))

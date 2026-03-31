@@ -36,6 +36,7 @@ from services.rank_predictor import predict_ranking
 from services.ws_manager import ws_manager
 from core.gsc_analytics_pipeline import ingest_gsc, ingest_ga4, sync_to_experiments
 from jobqueue.connection import research_queue, score_queue, pipeline_queue, redis_conn
+from rq import Retry as RQRetry
 from jobqueue.jobs import run_research_job, run_score_job, run_pipeline_job, run_develop_job, run_final_job, run_single_call_job, run_seo_sync_job
 
 from core.log_setup import setup_logging, get_logger, bind_context
@@ -4183,7 +4184,7 @@ async def ki_run(project_id: str, background_tasks: BackgroundTasks, body: dict 
         if pipeline_queue is None:
             raise HTTPException(status_code=503, detail="Queue unavailable")
         try:
-            pipeline_queue.enqueue(run_single_call_job, job_id, job_timeout=7200, retry=2)
+            pipeline_queue.enqueue(run_single_call_job, job_id, job_timeout=7200, retry=RQRetry(max=2))
             enqueued = True
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"Failed to enqueue single_call job: {e}")
@@ -4192,7 +4193,7 @@ async def ki_run(project_id: str, background_tasks: BackgroundTasks, body: dict 
         if pipeline_queue is None:
             raise HTTPException(status_code=503, detail="Queue unavailable")
         try:
-            pipeline_queue.enqueue(run_pipeline_job, job_id, project_id, body.get("pillar", ""), job_timeout=7200, retry=2)
+            pipeline_queue.enqueue(run_pipeline_job, job_id, project_id, body.get("pillar", ""), job_timeout=7200, retry=RQRetry(max=2))
             enqueued = True
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline job: {e}")
@@ -4429,7 +4430,7 @@ def seo_sync(body: Dict, bg: BackgroundTasks = None, user=Depends(current_user))
     enqueued = False
     if pipeline_queue is not None:
         try:
-            pipeline_queue.enqueue(run_seo_sync_job, job_id, project_id, gsc_rows, ga4_rows, job_timeout=1800, retry=2)
+            pipeline_queue.enqueue(run_seo_sync_job, job_id, project_id, gsc_rows, ga4_rows, job_timeout=1800, retry=RQRetry(max=2))
             enqueued = True
             job_tracker.update_strategy_job(db, job_id, status="queued")
         except Exception:
@@ -4485,7 +4486,7 @@ def autonomy_execute(body: Dict, bg: BackgroundTasks = None, user=Depends(curren
     enqueued = False
     if pipeline_queue is not None:
         try:
-            pipeline_queue.enqueue(run_pipeline_job, job_id, project_id, body.get("pillar", ""), body.get("language", "english"), body.get("region", "india"), job_timeout=7200, retry=3)
+            pipeline_queue.enqueue(run_pipeline_job, job_id, project_id, body.get("pillar", ""), body.get("language", "english"), body.get("region", "india"), job_timeout=7200, retry=RQRetry(max=3))
             enqueued = True
             job_tracker.update_strategy_job(db, job_id, status="queued")
         except Exception:
@@ -4553,7 +4554,7 @@ async def ki_score_start(project_id: str, session_id: str,
     db = get_db()
     job_id = f"score_{uuid.uuid4().hex[:12]}"
     job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="score", input_payload={"project_id": project_id, "session_id": session_id, "total": total})
-    score_queue.enqueue(run_score_job, job_id, job_timeout=600, retry=3)
+    score_queue.enqueue(run_score_job, job_id, job_timeout=600, retry=RQRetry(max=3))
     return {"job_id": job_id, "total": total, "enqueued": True}
 
 
@@ -5029,7 +5030,7 @@ async def ki_run_pipeline(project_id: str, background_tasks: BackgroundTasks,
 
     for item in run_ids:
         try:
-            pipeline_queue.enqueue(run_pipeline_job, item["run_id"], project_id, item["pillar"], language, region, sequential, job_timeout=7200, retry=2)
+            pipeline_queue.enqueue(run_pipeline_job, item["run_id"], project_id, item["pillar"], language, region, sequential, job_timeout=7200, retry=RQRetry(max=2))
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline run {item['run_id']}: {e}")
 
@@ -5624,7 +5625,7 @@ def strategy_develop(project_id: str, body: _StrategyDevelopBody, bg: Background
         raise HTTPException(503, "StrategyDevelopmentEngine not available — check Ollama/Gemini config")
     job_id = f"job_{hashlib.md5(f'{project_id}{time.time()}'.encode()).hexdigest()[:12]}"
     job_tracker.create_strategy_job(get_db(), job_id, project_id=project_id, job_type="develop", input_payload=body.dict())
-    pipeline_queue.enqueue(run_develop_job, job_id, project_id, body.dict(), job_timeout=1200, retry=3)
+    pipeline_queue.enqueue(run_develop_job, job_id, project_id, body.dict(), job_timeout=1200, retry=RQRetry(max=3))
     return {"job_id": job_id, "status": "queued", "enqueued": True}
 
 
@@ -6103,7 +6104,7 @@ def strategy_final(project_id: str, bg: BackgroundTasks, user=Depends(current_us
     project = dict(project_row) if project_row else {}
     job_id = f"fj_{hashlib.md5(f'{project_id}{time.time()}'.encode()).hexdigest()[:12]}"
     job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="final", input_payload={"universe_result": universe_result})
-    pipeline_queue.enqueue(run_final_job, job_id, project_id, universe_result, project, job_timeout=1800, retry=3)
+    pipeline_queue.enqueue(run_final_job, job_id, project_id, universe_result, project, job_timeout=1800, retry=RQRetry(max=3))
     return {"job_id": job_id, "status": "queued", "enqueued": True}
 
 
