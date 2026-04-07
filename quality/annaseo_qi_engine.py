@@ -87,7 +87,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 DB_PATH      = Path(os.getenv("ANNASEO_DB",     "./annaseo.db"))
 ENGINES_DIR  = Path(os.getenv("ENGINES_DIR",    "./"))
 VERSIONS_DIR = Path(os.getenv("VERSIONS_DIR",   "./rsd_versions"))
-OLLAMA_URL   = os.getenv("OLLAMA_URL",           "http://localhost:11434")
+OLLAMA_URL   = os.getenv("OLLAMA_URL",           "http://172.235.16.165:11434")
 GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
 

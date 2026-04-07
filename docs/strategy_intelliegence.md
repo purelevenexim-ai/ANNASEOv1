@@ -1,4 +1,21 @@
-when you complete each phase respect below: update
+STEP 3 — SEO/AEO STRATEGY
+Build a plan to reach Top 5 in Google Search + AI search (ChatGPT, Gemini, Perplexity)
+✓
+Business Profile
+2
+AI Generation
+3
+Strategy Plan
+Generating SEO/AEO Strategy
+DeepSeek AI is analysing your keywords and building a personalised Top-5 ranking strategy.
+Generating strategy…
+→ Strategy engine starting…
+→ Loaded profile: B2C · food_spices · south_india
+→ Audience profile saved
+→ Analysing discovered keywords from Step 2…
+→ Found 4132 keywords across 12 pillars
+→ Added 14 crawl-discovered pillars to strategy
+→ Building SEO/AEO strategy with AI (30-90s)…when you complete each phase respect below: update
 
 1. code completion.
 2. ask question when in doubt,

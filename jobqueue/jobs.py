@@ -343,91 +343,47 @@ def _run_pipeline_step(job, step, db=None, job_id=None):
     return {}
 
 
-def run_pipeline_job(job_id: str, project_id: str, seed: str, language: str = "english", region: str = "india", sequential: bool = False):
+def run_pipeline_job(job_id: str, project_id: str, seed: str, language: str = "english", region: str = "india", sequential: bool = False, execution_mode: str = "continuous", max_phase: str = "P14"):
+    """RQ worker entry-point: delegates to main._trigger_pipeline_run which handles
+    the full WiredRufloOrchestrator pipeline and updates the `runs` table correctly."""
     main = _main_module()
     db = main.get_db()
+
+    # Check if the run itself was cancelled (e.g. by a newer run superseding it)
+    run_row = db.execute("SELECT status FROM runs WHERE run_id=?", (job_id,)).fetchone()
+    if run_row and run_row["status"] in ("cancelled", "error"):
+        db.close()
+        return
+
+    # Guard: check job exists and is not cancelled
     job = job_tracker.get_strategy_job(db, job_id)
     if not job:
+        # Strategy job missing (lock_key dedup race) — create one so pipeline can proceed
+        job_tracker.create_strategy_job(db, job_id, project_id=project_id, job_type="pipeline", input_payload={"seed": seed})
+        job = job_tracker.get_strategy_job(db, job_id)
+    db.close()
+    if not job:
         return
-
+    if job.get("status") in ("cancelled", "superseded"):
+        return
     if job.get("cancel_requested") or job.get("control_state") == "cancelling":
-        job_tracker.update_strategy_job(db, job_id, status="cancelled", control_state="cancelled")
+        db2 = main.get_db()
+        job_tracker.update_strategy_job(db2, job_id, status="cancelled", control_state="cancelled")
+        db2.close()
         return
 
-    try:
-        check_control_state(job, db)
-    except PauseExecution:
-        return
-    except Exception:
-        return
-
-    if not _acquire_locks(db, job_id):
-        return
-
-    _logger = get_logger("jobqueue.pipeline")
-    if hasattr(_logger, 'bind'):
-        log = _logger.bind(job_id=job_id, project_id=project_id)
-    else:
-        log = _logger
-    if jobs_total is not None:
-        jobs_total.inc()
-    start_ts = time.time()
-
-    if sentry_sdk is not None:
-        sentry_sdk.set_context("job", {"job_id": job_id, "project_id": project_id})
-    try:
-        while True:
-            job = job_tracker.get_strategy_job(db, job_id)
-            step = get_next_step(job)
-
-            if step is None:
-                job_tracker.update_strategy_job(db, job_id, status="completed", progress=100, current_step="completed", last_completed_step=len(STEPS))
-                return
-
-            if not should_run_step(job, step):
-                job_tracker.update_strategy_job(db, job_id, current_step=step, last_heartbeat=_now())
-                continue
-
-            mark_step_start(db, job_id, step)
-            step_start = time.time()
-            try:
-                output = _run_pipeline_step(job, step, db=db, job_id=job_id)
-                _save_step_output(db, job_id, step, output)
-
-                progress = STEP_PROGRESS.get(step, job.get("progress", 0))
-                mark_step_complete(db, job_id, step, progress=progress)
-                _check_post_step_control(db, job_id)
-            except PauseExecution:
-                _log_info(log, "job_paused")
-                return
-            except Exception as exc:
-                if jobs_failed is not None:
-                    jobs_failed.inc()
-                current_retry = (job.get("retry_count", 0) or 0) + 1
-                _log_error(log, "step_failed", step=step, error=str(exc), retry=current_retry)
-                job_tracker.update_strategy_job(db, job_id, retry_count=current_retry, status="retrying", error_message=str(exc), error_type="pipeline_error", failed_step=step, last_heartbeat=_now())
-                if current_retry > (job.get("max_retries", 2) or 2):
-                    job_tracker.update_strategy_job(db, job_id, status="failed", error_message=str(exc), error_type="pipeline_error", failed_step=step, completed_at=_now(), last_heartbeat=_now())
-                    return
-                backoff = min(30, 2 ** current_retry)
-                time.sleep(backoff)
-                continue
-            finally:
-                duration = time.time() - step_start
-                if step_duration_seconds is not None:
-                    step_duration_seconds.labels(step=step).observe(duration)
-                _log_info(log, "step_complete", step=step, duration_seconds=duration)
-    except Exception as exc:
-        if jobs_failed is not None:
-            jobs_failed.inc()
-        _log_error(log, "job_failed", error=str(exc))
-        job_tracker.update_strategy_job(db, job_id, status="failed", error_message=str(exc), error_type="pipeline_error", completed_at=_now())
-    finally:
-        duration = time.time() - start_ts
-        if job_duration_seconds is not None:
-            job_duration_seconds.observe(duration)
-        _log_info(log, "job_finished", duration_seconds=duration, status=job_tracker.get_strategy_job(db, job_id).get("status", "unknown"))
-        _release_locks(db, job_id)
+    # Delegate to the main pipeline which uses WiredRufloOrchestrator and updates `runs`
+    main._trigger_pipeline_run(
+        run_id=job_id,
+        project_id=project_id,
+        seed=seed,
+        language=language,
+        region=region,
+        loop=None,  # No SSE available in worker process
+        sequential=sequential,
+        execution_mode=execution_mode,
+        max_phase=max_phase,
+    )
 
 
 def run_seo_sync_job(job_id: str, project_id: str, gsc_rows: list, ga4_rows: list):
@@ -682,10 +638,15 @@ def run_single_call_job(job_id: str):
             except Exception as exc:
                 retry_count += 1
                 err_type = "provider_error"
-                if isinstance(exc, ValueError):
-                    if str(exc).startswith("parse_error"):
+                exc_str = str(exc)
+                if exc_str.startswith("parse_error"):
+                    err_type = "parse_error"
+                elif exc_str.startswith("schema_error"):
+                    err_type = "schema_error"
+                elif isinstance(exc, ValueError):
+                    if exc_str.startswith("parse_error"):
                         err_type = "parse_error"
-                    elif str(exc).startswith("schema_error"):
+                    elif exc_str.startswith("schema_error"):
                         err_type = "schema_error"
 
                 if retry_count > max_retries:

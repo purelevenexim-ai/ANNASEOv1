@@ -157,12 +157,13 @@ class BrandVoice:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Cfg:
-    OLLAMA_URL    = os.getenv("OLLAMA_URL",     "http://localhost:11434")
+    OLLAMA_URL    = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
     OLLAMA_MODEL  = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
-    GEMINI_KEY    = os.getenv("GEMINI_API_KEY", "")
+    # Content generation uses paid Gemini key when available
+    GEMINI_KEY    = os.getenv("GEMINI_PAID_API_KEY") or os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL  = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
     GEMINI_RATE   = float(os.getenv("GEMINI_RATE", "4.0"))
-    ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_KEY = os.getenv("ANTHROPIC_PAID_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL  = os.getenv("CLAUDE_MODEL",   "claude-sonnet-4-6")
     ARTICLE_DIR   = Path(os.getenv("RUFLO_DIR","./ruflo_data")) / "articles"
     SCORE_PASS    = 75    # minimum score to publish without revision
@@ -194,17 +195,16 @@ class AI:
     @staticmethod
     def deepseek(prompt: str, system: str = "", temperature: float = 0.1) -> str:
         try:
-            r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
+            sys_part = system or "You are an SEO expert."
+            combined = f"{sys_part}\n\n{prompt}"
+            r = _req.post(f"{Cfg.OLLAMA_URL}/api/generate", json={
                 "model": Cfg.OLLAMA_MODEL, "stream": False,
                 "options": {"temperature": temperature},
-                "messages": [{"role":"system","content":system or "You are an SEO expert."},
-                             {"role":"user","content":prompt}]
-            }, timeout=120)
+                "prompt": combined
+            }, timeout=30)
             r.raise_for_status()
             data = r.json()
-            t = AI._extract_ollama_text(data)
-            if not t:
-                t = (data.get("response") or data.get("text") or "").strip()
+            t = data.get("response", "").strip()
             return re.sub(r"<think>.*?</think>","",t,flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"[AI] DeepSeek: {e}")

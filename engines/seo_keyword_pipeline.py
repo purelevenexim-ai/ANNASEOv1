@@ -13,6 +13,22 @@ log = logging.getLogger("seo.keyword.pipeline")
 LLM_CACHE_MAX = int(os.getenv("LLM_CACHE_MAX", "1024"))
 LLM_CACHE: "OrderedDict[str, dict]" = OrderedDict()
 
+
+def _llm_cache_get(key: str):
+    """Get from LRU cache, moving accessed key to end (most-recently-used)."""
+    if key in LLM_CACHE:
+        LLM_CACHE.move_to_end(key)
+        return LLM_CACHE[key]
+    return None
+
+
+def _llm_cache_set(key: str, value):
+    """Set in LRU cache, evicting oldest entry if at capacity."""
+    LLM_CACHE[key] = value
+    LLM_CACHE.move_to_end(key)
+    while len(LLM_CACHE) > LLM_CACHE_MAX:
+        LLM_CACHE.popitem(last=False)
+
 # -----------------------------------------
 # P4: Entity Cleaning & Normalization
 # -----------------------------------------
@@ -121,13 +137,10 @@ def validate_keywords_by_seed(keywords: List[str], seed: str) -> List[str]:
 def llm_call(prompt: str, data: dict, seed: str = "") -> dict:
     """Try Groq first, then DeepSeek fallback (seed-aware cache)."""
     cache_key = f"{seed.lower()}#{hashlib.md5((prompt + json.dumps(data, sort_keys=True)).encode()).hexdigest()}"
-    if cache_key in LLM_CACHE:
-        try:
-            LLM_CACHE.move_to_end(cache_key)
-        except Exception:
-            pass
+    cached = _llm_cache_get(cache_key)
+    if cached is not None:
         log.debug(f"[LLMCache] hit for seed={seed}")
-        return LLM_CACHE[cache_key]
+        return cached
 
     payload_text = prompt + "\n\nINPUT:\n" + json.dumps(data, sort_keys=True)
     groq_key = os.getenv("GROQ_API_KEY") or getattr(Cfg, "GROQ_KEY", "")
@@ -147,7 +160,7 @@ def llm_call(prompt: str, data: dict, seed: str = "") -> dict:
                     "temperature": 0.2,
                     "max_tokens": 1200
                 },
-                timeout=120
+                timeout=30
             )
             r.raise_for_status()
             rsp = r.json()
@@ -162,20 +175,7 @@ def llm_call(prompt: str, data: dict, seed: str = "") -> dict:
             log.error(f"DeepSeek fallback failed: {e}")
             rsp = {"error": str(e)}
 
-    # Insert into LRU; evict oldest when exceeding capacity
-    try:
-        if cache_key in LLM_CACHE:
-            LLM_CACHE.move_to_end(cache_key)
-            LLM_CACHE[cache_key] = rsp
-        else:
-            if len(LLM_CACHE) >= LLM_CACHE_MAX:
-                try:
-                    LLM_CACHE.popitem(last=False)
-                except Exception:
-                    LLM_CACHE.pop(next(iter(LLM_CACHE)))
-            LLM_CACHE[cache_key] = rsp
-    except Exception:
-        LLM_CACHE[cache_key] = rsp
+    _llm_cache_set(cache_key, rsp)
     return rsp
 
 # -----------------------------------------

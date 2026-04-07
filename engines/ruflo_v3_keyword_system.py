@@ -47,7 +47,7 @@ logging.basicConfig(level=logging.INFO,
 
 class Cfg:
     DB_URL          = os.getenv("DATABASE_URL",    "sqlite:///./ruflo.db")
-    OLLAMA_URL      = os.getenv("OLLAMA_URL",      "http://localhost:11434")
+    OLLAMA_URL      = os.getenv("OLLAMA_URL",      "http://172.235.16.165:11434")
     OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "deepseek-r1:7b")
     OLLAMA_EMBED    = os.getenv("OLLAMA_EMBED",    "nomic-embed-text")
     GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY",  "")
@@ -257,19 +257,17 @@ class AI:
     @staticmethod
     def deepseek(prompt: str, system: str = "You are a keyword research assistant.",
                   temperature: float = 0.1) -> str:
-        """Local DeepSeek — ALL keyword classification/scoring/naming tasks."""
-        r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
+        """Local Ollama — ALL keyword classification/scoring/naming tasks."""
+        combined = f"{system}\n\n{prompt}" if system else prompt
+        r = _req.post(f"{Cfg.OLLAMA_URL}/api/generate", json={
             "model": Cfg.OLLAMA_MODEL, "stream": False,
             "options": {"temperature": temperature},
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user",   "content": prompt}]
-        }, timeout=120)
+            "prompt": combined
+        }, timeout=30)
         r.raise_for_status()
         data = r.json()
-        text = AI._extract_ollama_text(data)
-        if not text:
-            text = (data.get("response") or data.get("text") or "").strip()
-        # Strip DeepSeek's <think>...</think> reasoning wrapper
+        text = data.get("response", "").strip()
+        # Strip <think>...</think> reasoning wrapper
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
         return text
 

@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.INFO,
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Cfg:
-    OLLAMA_URL      = os.getenv("OLLAMA_URL",     "http://localhost:11434")
+    OLLAMA_URL      = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
     OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
     OLLAMA_EMBED    = os.getenv("OLLAMA_EMBED",   "nomic-embed-text")
     GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
@@ -224,64 +224,28 @@ import requests as _req
 
 class AI:
     _embed_model = None
-    _last_gemini = 0.0
-
-    @staticmethod
-    def _extract_ollama_text(data: Any) -> str:
-        if not isinstance(data, dict):
-            return ""
-        if isinstance(data.get("response"), str) and data.get("response").strip():
-            return data["response"].strip()
-        msg = data.get("message")
-        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
-            return msg["content"].strip()
-        choices = data.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
-                    return first["message"]["content"].strip()
-                if isinstance(first.get("text"), str):
-                    return first["text"].strip()
-        if isinstance(data.get("text"), str):
-            return data["text"].strip()
-        return ""
 
     @staticmethod
     def deepseek(prompt: str, system: str = "You are a keyword research expert.",
                   temperature: float = 0.1) -> str:
-        r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
-            "model": Cfg.OLLAMA_MODEL, "stream": False,
-            "options": {"temperature": temperature},
-            "messages": [{"role":"system","content":system},
-                         {"role":"user","content":prompt}]
-        }, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        text = AI._extract_ollama_text(data)
-        if not text:
-            text = (data.get("response") or data.get("text") or "").strip()
-        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        """Ollama/DeepSeek via central AIRouter — no retry."""
+        try:
+            from core.ai_config import AIRouter
+            return AIRouter._call_ollama(prompt, system, temperature)
+        except ImportError:
+            pass
+        return ""
 
     @classmethod
     def gemini(cls, prompt: str, temperature: float = 0.3) -> str:
-        if not Cfg.GEMINI_API_KEY:
-            return cls.deepseek(prompt, temperature=temperature)
-        elapsed = time.time() - cls._last_gemini
-        if elapsed < Cfg.GEMINI_RATE:
-            time.sleep(Cfg.GEMINI_RATE - elapsed)
+        """Routes through central AIRouter (Groq → Ollama → Gemini, no retry)."""
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=Cfg.GEMINI_API_KEY)
-            model = genai.GenerativeModel(Cfg.GEMINI_MODEL)
-            resp  = model.generate_content(
-                prompt, generation_config=genai.GenerationConfig(temperature=temperature)
-            )
-            cls._last_gemini = time.time()
-            return resp.text.strip()
-        except Exception as e:
-            log.warning(f"Gemini error: {e} — falling back to DeepSeek")
-            return cls.deepseek(prompt, temperature=temperature)
+            from core.ai_config import AIRouter
+            text, _ = AIRouter.call(prompt, temperature=temperature)
+            return text
+        except ImportError:
+            pass
+        return ""
 
     @classmethod
     def embed(cls, texts: List[str]) -> List[List[float]]:

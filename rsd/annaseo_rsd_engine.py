@@ -117,7 +117,7 @@ class RSDConfig:
     ANTHROPIC_KEY         = os.getenv("ANTHROPIC_API_KEY","")
     GEMINI_KEY            = os.getenv("GEMINI_API_KEY","")
     GROQ_KEY              = os.getenv("GROQ_API_KEY","")
-    OLLAMA_URL            = os.getenv("OLLAMA_URL","http://localhost:11434")
+    OLLAMA_URL            = os.getenv("OLLAMA_URL","http://172.235.16.165:11434")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

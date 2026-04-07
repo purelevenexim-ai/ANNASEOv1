@@ -361,7 +361,7 @@ class UpdatePlanGenerator:
         """DeepSeek writes the exact content addition."""
         try:
             r = _req.post(
-                f"{os.getenv('OLLAMA_URL','http://localhost:11434')}/api/generate",
+                f"{os.getenv('OLLAMA_URL','http://172.235.16.165:11434')}/api/generate",
                 json={"model": "deepseek-r1:7b",
                       "prompt": (
                           f"Write content for an SEO article update.\n"

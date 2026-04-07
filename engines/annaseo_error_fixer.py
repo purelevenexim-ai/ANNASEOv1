@@ -54,7 +54,7 @@ def _call_ollama(prompt: str, max_tokens: int = 800) -> str:
     """Fallback: call local Ollama DeepSeek."""
     try:
         import requests
-        url = f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/generate"
+        url = f"{os.getenv('OLLAMA_URL', 'http://172.235.16.165:11434')}/api/generate"
         r = requests.post(url, json={
             "model": os.getenv("OLLAMA_MODEL", "deepseek-r1:7b"),
             "prompt": prompt,

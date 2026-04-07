@@ -11,11 +11,11 @@ from engines.research_ai_scorer import AIScorer
 def test_ai_scorer_initialization():
     """Test AIScorer initializes with correct configuration."""
     scorer = AIScorer(
-        ollama_url="http://localhost:11434",
+        ollama_url="http://172.235.16.165:11434",
         model="deepseek-r1:7b",
         industry="spices"
     )
-    assert scorer.ollama_url == "http://localhost:11434"
+    assert scorer.ollama_url == "http://172.235.16.165:11434"
     assert scorer.model == "deepseek-r1:7b"
     assert scorer.industry == "spices"
 

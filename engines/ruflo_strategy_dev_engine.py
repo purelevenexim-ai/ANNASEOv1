@@ -88,7 +88,7 @@ class GeoLevel(str, Enum):
 
 
 class Cfg:
-    OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://localhost:11434")
+    OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
     OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
@@ -143,94 +143,39 @@ class UserInput:
 
 class AI:
     _embed_model = None
-    _last_gemini = 0.0
-
-    @staticmethod
-    def _extract_ollama_text(data: Any) -> str:
-        if not isinstance(data, dict):
-            return ""
-        if isinstance(data.get("response"), str) and data.get("response").strip():
-            return data["response"].strip()
-        msg = data.get("message")
-        if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
-            return msg["content"].strip()
-        choices = data.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
-                    return first["message"]["content"].strip()
-                if isinstance(first.get("text"), str):
-                    return first["text"].strip()
-        if isinstance(data.get("text"), str):
-            return data["text"].strip()
-        return ""
 
     @staticmethod
     def deepseek(prompt: str, system: str = "You are a strategic marketing expert.",
                   temperature: float = 0.2) -> str:
+        """Ollama/DeepSeek via central AIRouter — no retry."""
         try:
-            r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
-                "model": Cfg.OLLAMA_MODEL, "stream": False,
-                "options": {"temperature": temperature},
-                "messages": [{"role":"system","content":system},
-                             {"role":"user","content":prompt}]
-            }, timeout=120)
-            r.raise_for_status()
-            data = r.json()
-            t = AI._extract_ollama_text(data)
-            if not t:
-                t = (data.get("response") or data.get("text") or "").strip()
-            return re.sub(r"<think>.*?</think>","",t,flags=re.DOTALL).strip()
-        except Exception as e:
-            log.warning(f"DeepSeek error: {e}")
-            return ""
+            from core.ai_config import AIRouter
+            return AIRouter._call_ollama(prompt, system, temperature)
+        except ImportError:
+            pass
+        return ""
 
-    @classmethod
-    def gemini(cls, prompt: str, temperature: float = 0.4) -> str:
-        if not Cfg.GEMINI_API_KEY:
-            return cls.deepseek(prompt, temperature=temperature)
-        elapsed = time.time() - cls._last_gemini
-        if elapsed < Cfg.GEMINI_RATE:
-            time.sleep(Cfg.GEMINI_RATE - elapsed)
+    @staticmethod
+    def gemini(prompt: str, temperature: float = 0.4) -> str:
+        """Routes through central AIRouter (Groq → Ollama → Gemini, no retry)."""
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=Cfg.GEMINI_API_KEY)
-            model = genai.GenerativeModel(Cfg.GEMINI_MODEL)
-            resp  = model.generate_content(
-                prompt,
-                generation_config=genai.GenerationConfig(temperature=temperature)
-            )
-            cls._last_gemini = time.time()
-            return resp.text.strip()
-        except Exception as e:
-            log.warning(f"Gemini error: {e}")
-            return cls.deepseek(prompt, temperature=temperature)
+            from core.ai_config import AIRouter
+            text, _ = AIRouter.call(prompt, temperature=temperature)
+            return text
+        except ImportError:
+            pass
+        return ""
 
     @staticmethod
     def groq(prompt: str, temperature: float = 0.25) -> str:
-        if not Cfg.GROQ_API_KEY:
-            return AI.gemini(prompt, temperature=temperature)
+        """Routes through central AIRouter (Groq → Ollama → Gemini, no retry)."""
         try:
-            r = _req.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {Cfg.GROQ_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": Cfg.GROQ_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": temperature,
-                    "max_tokens": 3000,
-                },
-                timeout=120
-            )
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            log.warning(f"Groq error: {e}")
-            return AI.gemini(prompt, temperature=temperature)
+            from core.ai_config import AIRouter
+            text, _ = AIRouter.call(prompt, temperature=temperature)
+            return text
+        except ImportError:
+            pass
+        return ""
 
     @staticmethod
     def claude(system: str, prompt: str, max_tokens: int = 3000) -> Tuple[str, int]:

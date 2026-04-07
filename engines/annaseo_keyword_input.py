@@ -83,9 +83,52 @@ INFORMATIONAL_SIGNALS = [
     "nutrition", "side effects", "dosage",
 ]
 
+# Words that indicate a scraped n-gram is garbage, not a real keyword
+GARBAGE_WORDS = {
+    "the", "a", "an", "of", "in", "for", "and", "or", "to", "is", "are",
+    "was", "were", "be", "been", "being", "have", "has", "had", "do", "does",
+    "did", "will", "would", "should", "could", "may", "might", "shall",
+    "at", "by", "from", "up", "out", "on", "off", "into", "through",
+    "with", "our", "your", "their", "this", "that", "which", "can",
+    "its", "it", "we", "they", "he", "she", "you", "i", "me", "my",
+    "not", "but", "so", "if", "as", "no", "nor", "also", "than",
+    "more", "most", "very", "just", "about", "like", "some",
+    "nailed", "introduces", "content", "july", "posted", "share",
+    "read", "click", "here", "back", "next", "previous", "menu",
+    "home", "cart", "login", "signup", "subscribe", "footer", "header",
+}
+
+def _is_quality_keyword(phrase: str) -> bool:
+    """Return True only if the phrase looks like a real search query."""
+    words = phrase.strip().split()
+    if len(words) < 2:
+        return False
+    # Reject if starts or ends with a garbage word
+    if words[0] in GARBAGE_WORDS or words[-1] in GARBAGE_WORDS:
+        return False
+    # Reject if >50% garbage words
+    garbage_count = sum(1 for w in words if w in GARBAGE_WORDS)
+    if garbage_count / len(words) > 0.4:
+        return False
+    # Reject year prefixes like "2025kerala" or "2026kerala"
+    if re.match(r'^\d{4}', words[0]):
+        return False
+    # Reject if any word is a year-glued token
+    if any(re.match(r'^\d{4}\w', w) for w in words):
+        return False
+    # Reject pure number tokens
+    if all(w.isdigit() for w in words):
+        return False
+    # Must be at least 5 chars total
+    if len(phrase.replace(' ', '')) < 5:
+        return False
+    return True
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATABASE SETUP
+# SQLite with WAL mode: connections are lightweight (~0.1ms to open).
+# Each caller is responsible for closing via con.close() in a finally block.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _db() -> sqlite3.Connection:
@@ -178,6 +221,21 @@ def _db() -> sqlite3.Connection:
         keywords    TEXT NOT NULL,
         created_at  TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS keyword_strategy_briefs (
+        brief_id    TEXT PRIMARY KEY,
+        project_id  TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        pillar_count INTEGER DEFAULT 0,
+        total_keywords INTEGER DEFAULT 0,
+        pillars_json TEXT DEFAULT '[]',
+        keywords_json TEXT DEFAULT '{}',
+        context_json TEXT DEFAULT '{}',
+        brief_text  TEXT DEFAULT '',
+        sent_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at  TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS ix_ksb_project ON keyword_strategy_briefs(project_id);
     """)
     con.commit()
     # Migration: add columns introduced after initial schema
@@ -192,6 +250,7 @@ def _db() -> sqlite3.Connection:
         "ALTER TABLE keyword_universe_items ADD COLUMN score_signals TEXT DEFAULT '{}'",
         "ALTER TABLE keyword_universe_items ADD COLUMN final_score REAL DEFAULT 0.0",
         "ALTER TABLE keyword_universe_items ADD COLUMN category TEXT DEFAULT 'informational'",
+        "ALTER TABLE keyword_universe_items ADD COLUMN keyword_type TEXT DEFAULT 'long_tail'",
         "ALTER TABLE keyword_input_sessions ADD COLUMN seed_keyword TEXT DEFAULT ''",
         "ALTER TABLE keyword_input_sessions ADD COLUMN pillar_support_map TEXT DEFAULT '{}'",
         "ALTER TABLE keyword_input_sessions ADD COLUMN intent_focus TEXT DEFAULT 'both'",
@@ -214,6 +273,21 @@ def _db() -> sqlite3.Connection:
         except Exception:
             pass  # column already exists
     return con
+
+
+from contextlib import contextmanager as _contextmanager
+
+@_contextmanager
+def ki_db_session():
+    """Context manager for keyword-input DB ensuring cleanup."""
+    con = _db()
+    try:
+        yield con
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -533,31 +607,45 @@ class WebsiteKeywordExtractor:
 
     def _slug_to_keywords(self, slug: str, pillars: List[str], label: str) -> List[dict]:
         words = re.sub(r"[^a-z0-9\s]", " ", slug.lower()).split()
+        # Filter out year tokens and garbage words from slug
+        words = [w for w in words if w not in GARBAGE_WORDS and not re.match(r'^\d{4}$', w)]
         if not words or len(words) < 2: return []
         kw = " ".join(words[:6]).strip()
-        if len(kw) < 5: return []
+        if len(kw) < 5 or not _is_quality_keyword(kw): return []
         pillar = self._nearest_pillar(kw, pillars)
         if not pillar: return []
         return [{"keyword": kw, "pillar_keyword": pillar, "source": label,
-                 "intent": "informational", "relevance_score": 70,
+                 "intent": self._infer_intent(kw), "relevance_score": 70,
                  "volume_estimate": 0, "difficulty": 45, "opportunity_score": 0}]
 
     def _text_to_keywords(self, text: str, pillars: List[str],
                             label: str, source_type: str) -> List[dict]:
+        # Clean text: remove dates, URLs, navigation artifacts
+        text = re.sub(r'https?://\S+', '', text)
+        text = re.sub(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b', '', text)
+        text = re.sub(r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\s*,?\s*\d{4}\b', '', text, flags=re.I)
         words = re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+        # Strip garbage tokens
+        words = [w for w in words if w not in GARBAGE_WORDS and not re.match(r'^\d{4}\w', w)]
         results = []
+        seen = set()
         for n in (2, 3, 4):
             for i in range(len(words) - n + 1):
                 phrase = " ".join(words[i:i+n])
-                if any(p in phrase for p in pillars):
+                if phrase in seen:
+                    continue
+                seen.add(phrase)
+                # Must contain a pillar word AND pass quality check
+                if any(p in phrase for p in pillars) and _is_quality_keyword(phrase):
                     pillar = self._nearest_pillar(phrase, pillars)
-                    results.append({
-                        "keyword": phrase, "pillar_keyword": pillar,
-                        "source": label,
-                        "intent": self._infer_intent(phrase),
-                        "relevance_score": 65,
-                        "volume_estimate": 0, "difficulty": 45, "opportunity_score": 0,
-                    })
+                    if pillar:
+                        results.append({
+                            "keyword": phrase, "pillar_keyword": pillar,
+                            "source": label,
+                            "intent": self._infer_intent(phrase),
+                            "relevance_score": 65,
+                            "volume_estimate": 0, "difficulty": 45, "opportunity_score": 0,
+                        })
         return results
 
     def _nearest_pillar(self, kw: str, pillars: List[str]) -> str:
@@ -1011,12 +1099,68 @@ class ReviewManager:
         self._log(session_id, item_id, "move_pillar", old_value=old_pillar, new_value=new_pillar)
 
     def accept_all(self, session_id: str):
+        """Accept pending keywords that pass quality checks; auto-reject garbage."""
         con = _db()
-        con.execute("""
-            UPDATE keyword_universe_items SET status='accepted', reviewed_at=?
-            WHERE session_id=? AND status='pending'
-        """, (datetime.utcnow().isoformat(), session_id))
+        pending = con.execute(
+            "SELECT item_id, keyword FROM keyword_universe_items WHERE session_id=? AND status='pending'",
+            (session_id,)
+        ).fetchall()
+        now = datetime.utcnow().isoformat()
+        accepted = 0
+        rejected = 0
+        for row in pending:
+            kw = row["keyword"] if hasattr(row, 'keys') else row[1]
+            item_id = row["item_id"] if hasattr(row, 'keys') else row[0]
+            if self._is_quality_keyword(kw):
+                con.execute(
+                    "UPDATE keyword_universe_items SET status='accepted', reviewed_at=? WHERE item_id=?",
+                    (now, item_id)
+                )
+                accepted += 1
+            else:
+                con.execute(
+                    "UPDATE keyword_universe_items SET status='rejected', reviewed_at=? WHERE item_id=?",
+                    (now, item_id)
+                )
+                rejected += 1
         con.commit()
+        log.info(f"[ReviewManager] accept_all: {accepted} accepted, {rejected} rejected (quality gate)")
+
+    @staticmethod
+    def _is_quality_keyword(kw: str) -> bool:
+        """Check if keyword looks like a real search query."""
+        if not kw or not kw.strip():
+            return False
+        kw = kw.strip().lower()
+        words = kw.split()
+        # Reject single words (too broad)
+        if len(words) < 2:
+            return False
+        # Reject year-prefixed garbage
+        if any(re.match(r'^\d{4}\w', w) for w in words):
+            return False
+        # Common stopwords that indicate sentence fragments
+        fragment_words = {'the','a','an','of','in','for','and','or','to','is','are',
+                          'was','were','with','our','your','their','this','that','which',
+                          'can','its','it','we','they','not','but','so','if','as'}
+        # Reject if starts or ends with fragment word
+        if words[0] in fragment_words or words[-1] in fragment_words:
+            return False
+        # Reject if >40% fragment words
+        frag_count = sum(1 for w in words if w in fragment_words)
+        if len(words) > 2 and frag_count / len(words) > 0.4:
+            return False
+        # Reject garbage text patterns
+        garbage_tokens = {'nailed','introduces','posted','share','click','menu',
+                          'footer','header','cart','login','signup','subscribe',
+                          'january','february','march','april','july','august',
+                          'september','october','november','december'}
+        if any(w in garbage_tokens for w in words):
+            return False
+        # Must have at least 5 non-space chars
+        if len(kw.replace(' ', '')) < 5:
+            return False
+        return True
 
     def get_stats(self, session_id: str) -> dict:
         con = _db()
@@ -1028,6 +1172,8 @@ class ReviewManager:
 
     def get_review_queue(self, session_id: str, pillar: str = None,
                           status: str = None, intent: str = None,
+                          source: str = None,
+                          keyword_type: str = None,
                           review_method: str = None,
                           sort_by: str = "opp_desc",
                           limit: int = 100, offset: int = 0) -> List[dict]:
@@ -1043,15 +1189,24 @@ class ReviewManager:
         if intent:
             q += " AND intent=?"
             p.append(intent)
+        if source and source != "all":
+            q += " AND source=?"
+            p.append(source)
+        if keyword_type and keyword_type != "all":
+            q += " AND keyword_type=?"
+            p.append(keyword_type)
         if review_method == "method1":
             q += " AND source IN ('cross_multiply','site_crawl','competitor_crawl')"
         elif review_method == "method2":
             q += " AND source IN ('research_autosuggest','research_competitor_gap','research_site_crawl','strategy')"
         sort_map = {
             "opp_desc": "opportunity_score DESC, relevance_score DESC",
+            "score_desc": "relevance_score DESC, opportunity_score DESC",
             "kd_asc":   "difficulty ASC",
             "vol_desc":  "volume_estimate DESC",
+            "volume_desc": "volume_estimate DESC",
             "kw_asc":    "keyword ASC",
+            "alpha":     "keyword ASC",
         }
         q += f" ORDER BY {sort_map.get(sort_by, 'opportunity_score DESC')} LIMIT ? OFFSET ?"
         p += [limit, offset]

@@ -38,7 +38,9 @@ from bs4 import BeautifulSoup
 
 log = logging.getLogger("annaseo.competitor_gap")
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+def _GEMINI_URL() -> str:
+    model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -319,7 +321,7 @@ class AttackPlanGenerator:
                               for g in gaps[:10])
         try:
             r = _req.post(
-                f"{GEMINI_URL}?key={key}",
+                f"{_GEMINI_URL()}?key={key}",
                 json={"contents":[{"parts":[{"text":
                     f"SEO gap analysis for {business or 'business'} in '{seed}' niche.\n\n"
                     f"Competitor keywords we're missing:\n{gap_text}\n\n"
@@ -341,7 +343,7 @@ class AttackPlanGenerator:
     def _deepseek_brief(self, gap: KeywordGap, seed: str) -> dict:
         try:
             r = _req.post(
-                f"{os.getenv('OLLAMA_URL','http://localhost:11434')}/api/generate",
+                f"{os.getenv('OLLAMA_URL','http://172.235.16.165:11434')}/api/generate",
                 json={"model": "deepseek-r1:7b",
                       "prompt": (
                           f"Write a content brief for this SEO gap keyword: '{gap.keyword}'\n"

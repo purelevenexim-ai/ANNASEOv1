@@ -1001,7 +1001,7 @@ class TargetedTuningApplicator:
     Uses same manual approval gate as all other tunings.
     DeepSeek writes the code change. Claude verifies.
     """
-    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://172.235.16.165:11434")
 
     def __init__(self):
         self._db = LineageDB()

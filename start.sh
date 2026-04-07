@@ -88,34 +88,23 @@ start_frontend() {
     npm run dev
 }
 
-# Function to check Ollama
+# Function to check Ollama (remote server)
 check_ollama() {
     echo -e "${BLUE}═══════════════════════════════════════${NC}"
-    echo -e "${BLUE}Checking Ollama Service${NC}"
+    echo -e "${BLUE}Checking Remote Ollama Server${NC}"
     echo -e "${BLUE}═══════════════════════════════════════${NC}"
     
-    if systemctl is-active --quiet ollama; then
-        echo -e "${GREEN}✓ Ollama is running${NC}"
-        
-        # Check if model is available
-        if curl -s http://localhost:$OLLAMA_PORT/api/tags | grep -q "deepseek-r1"; then
-            echo -e "${GREEN}✓ DeepSeek-R1 model is available${NC}"
+    REMOTE_OLLAMA="${OLLAMA_URL:-http://172.235.16.165:11434}"
+    if curl -s --max-time 5 "$REMOTE_OLLAMA/api/version" > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ Remote Ollama is reachable at $REMOTE_OLLAMA${NC}"
+        if curl -s --max-time 5 "$REMOTE_OLLAMA/api/tags" | grep -q "qwen2.5"; then
+            echo -e "${GREEN}✓ qwen2.5 model is available${NC}"
         else
-            echo -e "${YELLOW}⚠ DeepSeek-R1 model not found, downloading...${NC}"
-            ollama pull deepseek-r1:7b
+            echo -e "${YELLOW}⚠ Default model may not be loaded on remote${NC}"
         fi
     else
-        echo -e "${YELLOW}⚠ Ollama is not running${NC}"
-        echo -e "${YELLOW}Starting Ollama service...${NC}"
-        sudo systemctl start ollama
-        sleep 3
-        
-        if systemctl is-active --quiet ollama; then
-            echo -e "${GREEN}✓ Ollama started successfully${NC}"
-        else
-            echo -e "${RED}✗ Failed to start Ollama${NC}"
-            return 1
-        fi
+        echo -e "${RED}✗ Remote Ollama server unreachable at $REMOTE_OLLAMA${NC}"
+        return 1
     fi
 }
 
@@ -149,7 +138,7 @@ Then open: http://localhost:5173
 Environment:
     Backend:  http://localhost:8000
     Frontend: http://localhost:5173
-    Ollama:   http://localhost:11434
+    Ollama:   http://172.235.16.165:11434 (remote)
 
     API Docs: http://localhost:8000/docs
     ReDoc:    http://localhost:8000/redoc

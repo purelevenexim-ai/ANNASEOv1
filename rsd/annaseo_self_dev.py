@@ -1224,7 +1224,7 @@ Return only Python pytest code."""}]},
     def _deepseek_implement(self, gap: KnowledgeGap, engine_code: str,
                              spec: dict) -> str:
         """DeepSeek writes the actual implementation."""
-        ollama_url = os.getenv("OLLAMA_URL","http://localhost:11434")
+        ollama_url = os.getenv("OLLAMA_URL","http://172.235.16.165:11434")
         changes_text = "\n".join(f"- {c}" for c in spec.get("changes",[])[:5])
         imports_text = "\n".join(spec.get("imports",[]))
 

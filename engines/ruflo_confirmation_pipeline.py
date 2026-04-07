@@ -140,7 +140,7 @@ class PipelineJob:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Cfg:
-    OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://localhost:11434")
+    OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
     OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
     OLLAMA_EMBED   = os.getenv("OLLAMA_EMBED",   "nomic-embed-text")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -182,17 +182,15 @@ class AI:
     def deepseek(prompt: str, system: str = "You are an SEO expert.",
                   temperature: float = 0.1) -> str:
         try:
-            r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
+            combined = f"{system}\n\n{prompt}" if system else prompt
+            r = _req.post(f"{Cfg.OLLAMA_URL}/api/generate", json={
                 "model": Cfg.OLLAMA_MODEL, "stream": False,
                 "options": {"temperature": temperature},
-                "messages": [{"role":"system","content":system},
-                             {"role":"user","content":prompt}]
-            }, timeout=120)
+                "prompt": combined
+            }, timeout=30)
             r.raise_for_status()
             data = r.json()
-            t = AI._extract_ollama_text(data)
-            if not t:
-                t = (data.get("response") or data.get("text") or "").strip()
+            t = data.get("response", "").strip()
             return re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"DeepSeek error: {e}")

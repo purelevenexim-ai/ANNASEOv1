@@ -593,7 +593,7 @@ class TuningGenerator:
     DeepSeek writes the actual tuning code/prompt change.
     Claude verifies it before it goes to the approval gate.
     """
-    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://172.235.16.165:11434")
     GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
     # What each tuning_type means

@@ -14,8 +14,15 @@ That way the original engine stays clean and testable on its own.
 """
 
 from __future__ import annotations
-import sys, os, logging, json, sqlite3, time, psutil
+import sys, os, logging, json, sqlite3, time, gc
 from pathlib import Path
+from dataclasses import asdict, is_dataclass
+
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 
 # Ensure all folders on path
 sys.path.insert(0, str(Path(__file__).parent.parent / "quality"))
@@ -26,6 +33,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ruflo_20phase_engine import RufloOrchestrator, ContentPace, Seed
 
 log = logging.getLogger("annaseo.wired_20phase")
+
+
+def _safe_asdict(obj):
+    """Safely convert dataclass to dict, handling nested dataclasses."""
+    if is_dataclass(obj):
+        return asdict(obj)
+    elif hasattr(obj, '__dict__'):
+        return obj.__dict__
+    else:
+        return str(obj) if obj else {}
 
 
 class WiredRufloOrchestrator(RufloOrchestrator):
@@ -173,16 +190,26 @@ class WiredRufloOrchestrator(RufloOrchestrator):
         
         # Track timing and memory
         t0 = time.time()
-        process = psutil.Process()
-        mem0 = process.memory_info().rss / (1024 * 1024)  # MB
+        mem0 = 0
+        if _HAS_PSUTIL:
+            try:
+                process = psutil.Process()
+                mem0 = process.memory_info().rss / (1024 * 1024)  # MB
+            except Exception:
+                pass
         
         # Run phase
         try:
             result = super()._run_phase(name, fn, *args, **kwargs)
         except Exception as e:
             elapsed = round(time.time() - t0, 1)
-            mem1 = process.memory_info().rss / (1024 * 1024)
-            delta_mem = round(mem1 - mem0, 1)
+            delta_mem = 0
+            if _HAS_PSUTIL:
+                try:
+                    mem1 = psutil.Process().memory_info().rss / (1024 * 1024)
+                    delta_mem = round(mem1 - mem0, 1)
+                except Exception:
+                    pass
             
             # Emit error event
             if self._emit_fn:
@@ -201,8 +228,17 @@ class WiredRufloOrchestrator(RufloOrchestrator):
         
         # Calculate metrics
         elapsed = round(time.time() - t0, 1)
-        mem1 = process.memory_info().rss / (1024 * 1024)
-        delta_mem = round(mem1 - mem0, 1)
+        delta_mem = 0
+        if _HAS_PSUTIL:
+            try:
+                mem1 = psutil.Process().memory_info().rss / (1024 * 1024)
+                delta_mem = round(mem1 - mem0, 1)
+            except Exception:
+                pass
+
+        # GC after heavy phases to reclaim memory
+        if name in ("P2", "P3", "P6", "P8", "P9", "P10", "P14"):
+            gc.collect()
         
         # Determine output count
         output_count = None
@@ -267,6 +303,62 @@ class WiredRufloOrchestrator(RufloOrchestrator):
                 except Exception:
                     pass
 
+                # ── Structured result_summary per phase (for split-view UI) ──
+                try:
+                    summary = {}
+                    if name == "P1" and result:
+                        kw = result.keyword if hasattr(result, 'keyword') else str(result)
+                        summary = {"seed_keyword": kw, "validated": True}
+                    elif name == "P2" and isinstance(result, list):
+                        summary = {"expanded_count": len(result), "sample": [str(k) for k in result[:10]]}
+                    elif name == "P3" and isinstance(result, list):
+                        summary = {"normalized_count": len(result)}
+                    elif name == "P4" and isinstance(result, dict):
+                        summary = {"entity_count": len(result)}
+                    elif name == "P5" and isinstance(result, dict):
+                        intents = {}
+                        for v in result.values():
+                            intent = v if isinstance(v, str) else str(v)
+                            intents[intent] = intents.get(intent, 0) + 1
+                        summary = {"classified_count": len(result), "intent_distribution": dict(list(intents.items())[:8])}
+                    elif name == "P6" and isinstance(result, dict):
+                        summary = {"serp_analyzed_count": len(result)}
+                    elif name == "P7" and isinstance(result, dict):
+                        scores_list = [v for v in result.values() if isinstance(v, (int, float))]
+                        avg_score = round(sum(scores_list) / len(scores_list), 1) if scores_list else 0
+                        top_5 = sorted(result.items(), key=lambda x: x[1] if isinstance(x[1], (int, float)) else 0, reverse=True)[:5]
+                        summary = {"scored_count": len(result), "avg_score": avg_score, "top_5_keywords": [str(k) for k, _ in top_5]}
+                    elif name == "P8" and isinstance(result, dict):
+                        topics = [{"name": str(k), "size": len(v) if isinstance(v, (list, dict)) else 1} for k, v in list(result.items())[:20]]
+                        summary = {"topic_count": len(result), "topics": topics}
+                    elif name == "P9" and isinstance(result, dict):
+                        clusters = [{"name": str(k), "keyword_count": len(v) if isinstance(v, list) else 1} for k, v in list(result.items())[:20]]
+                        summary = {"cluster_count": len(result), "clusters": clusters}
+                    elif name == "P10" and isinstance(result, dict):
+                        pillar_list = []
+                        for k, v in list(result.items())[:20]:
+                            pk = v.get("pillar_keyword", k) if isinstance(v, dict) else str(k)
+                            cc = len(v.get("clusters", [])) if isinstance(v, dict) else 0
+                            kc = v.get("keyword_count", 0) if isinstance(v, dict) else 0
+                            pillar_list.append({"name": pk, "cluster_count": cc, "keyword_count": kc})
+                        summary = {"pillar_count": len(result), "pillars": pillar_list}
+                    elif name == "P11" and isinstance(result, dict):
+                        summary = {"graph_nodes": len(result)}
+                    elif name == "P12" and isinstance(result, dict):
+                        summary = {"link_count": len(result)}
+                    elif name == "P13" and isinstance(result, list):
+                        dates = [a.get("scheduled_date", "") for a in result if isinstance(a, dict)]
+                        dates = sorted([d for d in dates if d])
+                        date_range = f"{dates[0]}..{dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else "")
+                        summary = {"calendar_entries": len(result), "date_range": date_range}
+                    elif name == "P14" and isinstance(result, list):
+                        summary = {"deduplicated_count": len(result)}
+
+                    if summary:
+                        payload["result_summary"] = summary
+                except Exception:
+                    pass
+
                 self._emit_fn("phase_log", payload)
             except Exception:
                 pass
@@ -282,17 +374,61 @@ class WiredRufloOrchestrator(RufloOrchestrator):
                   publish: bool = False,
                   gate_callback=None,
                   project_id: str = "",
-                  run_id: str = "") -> dict:
+                  run_id: str = "",
+                  max_phase: str = "P14",
+                  execution_mode: str = "continuous",
+                  group_gate_callback=None,
+                  business_locations: list = None,
+                  target_locations: list = None) -> dict:
         """
         Full 20-phase pipeline with all wiring enabled.
         Extra kwargs: project_id, run_id (for QI + domain context).
+        max_phase: Stop after this phase (default P14). Use "P20" for content gen.
+        execution_mode: "continuous" (no pauses) or "step_by_step" (pause between groups).
+        group_gate_callback: Called between phase groups in step_by_step mode.
+                             Receives (group_name, group_phases, result_so_far).
+                             Must return True to continue, None/False to stop.
         """
+        # Phase groups for step-by-step mode
+        # P10 is in Scoring so user reviews pillars before graph is built
+        _phase_groups = [
+            ("Collection", ["P1", "P2", "P3"]),
+            ("Analysis", ["P4", "P5", "P6"]),
+            ("Scoring", ["P7", "P8", "P9", "P10"]),
+            ("Structure", ["P11", "P12"]),
+            ("Planning", ["P13", "P14"]),
+        ]
+        _max_phase_num = int(max_phase[1:]) if max_phase.startswith("P") else 14
+
+        def _should_pause_after(phase_name):
+            """Check if we should pause after this phase (end of a group in step_by_step mode)."""
+            if execution_mode != "step_by_step" or not group_gate_callback:
+                return False
+            for group_name, phases in _phase_groups:
+                if phase_name == phases[-1]:
+                    return True
+            return False
+
+        def _emit_group_pause(group_name):
+            """Emit SSE event for group pause and wait for callback."""
+            if self._emit_fn:
+                try:
+                    self._emit_fn("phase_log", {
+                        "phase": f"GROUP_{group_name.upper()}",
+                        "status": "paused",
+                        "color": "yellow",
+                        "description": f"{group_name} group complete",
+                        "msg": f"⏸ {group_name} group complete — waiting for continue...",
+                    })
+                except Exception:
+                    pass
         pid = project_id or self._project_id
         rid = run_id     or self._run_id
         pace = pace or ContentPace()
 
         # ── P1 Seed ──────────────────────────────────────────────────────────
-        seed = self._run_phase("P1", self.p1.run, keyword, language, region, product_url)
+        seed = self._run_phase("P1", self.p1.run, keyword, language, region, product_url,
+                               business_locations or [], target_locations or [])
         if not seed:
             return {"error": "P1 failed"}
 
@@ -428,133 +564,237 @@ class WiredRufloOrchestrator(RufloOrchestrator):
                 kws = confirmed_kws
             # else: keep original kws (guard against dict/string being passed)
 
-        # ── P4–P9 (unchanged from base class) ────────────────────────────────
-        with self._observe("P4_EntityDetection"):
-            entities = self._run_phase("P4", self.p4.run, seed, kws) or {}
-
-        with self._observe("P5_IntentClassification"):
-            intent_map = self._run_phase("P5", self.p5.run, seed, kws) or {}
-
-        with self._observe("P6_SERPIntelligence"):
-            serp_map = self._run_phase("P6", self.p6.run, seed, kws) or {}
-
-        with self._observe("P7_OpportunityScoring"):
-            scores = self._run_phase("P7", self.p7.run, seed, kws, intent_map, serp_map) or {k: 50.0 for k in kws}
-
-        with self._observe("P8_TopicDetection"):
-            topic_map = self._run_phase("P8", self.p8.run, seed, kws, scores) or {}
-        print(f"  P8: {len(topic_map)} topics detected")
-
-        # ── CHECK: Resume from Gate 2 (skip P9-P10 if confirmed) ──────────────
-        confirmed_pillars, gate2_confirmed = self._load_confirmed_pillars_from_db(rid)
-        
-        if gate2_confirmed and confirmed_pillars:
-            # Gate 2 already confirmed — use stored pillars and skip P9-P10
-            pillars = confirmed_pillars
-            clusters = {}  # Not strictly needed after this point, but keep empty for consistency
-            
-            msg = f"[Gate 2 Resume] Loaded {len(pillars)} confirmed pillars from DB, skipping P9-P10"
-            print(f"  {msg}")
-            log.info(msg)
-            if self._emit_fn:
-                try:
-                    self._emit_fn("phase_log", {"phase": "Gate2Resume", "msg": msg})
-                except Exception:
-                    pass
+        # ── Step-by-step pause: Collection group (P1-P3) complete ─────────
+        if _should_pause_after("P3"):
+            _emit_group_pause("Collection")
+            gate_action = group_gate_callback("Collection", ["P1", "P2", "P3"], {"keyword_count": len(kws)})
+            if gate_action == "stop" or gate_action is False:
+                return {"status": "stopped_after_collection", "keyword_count": len(kws)}
+            # "skip" means skip Analysis group (P4-P6), go straight to Scoring
+            _skip_analysis = (gate_action == "skip")
         else:
-            # Normal flow: Run P9-P10 to generate pillars
-            with self._observe("P9_ClusterFormation"):
-                clusters = self._run_phase("P9", self.p9.run, seed, topic_map) or {}
-            print(f"  P9: {len(clusters)} clusters formed")
+            _skip_analysis = False
 
-            # ✦ Record P9 clusters
-            self._record("P9_ClusterFormation", rid, pid,
-                         {"count": len(clusters)},
-                         [(name, "cluster", {"topics": topics[:5]})
-                          for name, topics in clusters.items()])
+        # ── P4–P6: Analysis group ────────────────────────────────────────────
+        entities = {}
+        intent_map = {}
+        serp_map = {}
+        if not _skip_analysis:
+            with self._observe("P4_EntityDetection"):
+                entities = self._run_phase("P4", self.p4.run, seed, kws) or {}
 
-            # ── GATE B: Pillars confirmed ─────────────────────────────────────────
-            if gate_callback:
-                confirmed = gate_callback("pillars", {"clusters": list(clusters.keys())})
-                if confirmed is None:
-                    return {"status": "stopped_at_gate_B"}
-                removed = confirmed.get("removed_clusters", [])
-                clusters = {k: v for k, v in clusters.items() if k not in removed}
+            with self._observe("P5_IntentClassification"):
+                intent_map = self._run_phase("P5", self.p5.run, seed, kws, entities) or {}
 
-            # ── P10 Pillar Identification ─────────────────────────────────────────
-            with self._observe("P10_PillarIdentification"):
-                pillars = self._run_phase("P10", self.p10.run, seed, clusters) or {}
+            with self._observe("P6_SERPIntelligence"):
+                serp_map = self._run_phase("P6", self.p6.run, seed, kws, emit_fn=self._emit_fn) or {}
+        else:
+            if self._emit_fn:
+                self._emit_fn("phase_log", {"phase": "GROUP_ANALYSIS", "status": "skipped", "color": "grey", "msg": "⏭ Analysis group skipped by user"})
 
-            # ✦ Domain Context — validate pillars (project-isolated)
-            if self._dce and pid and pillars:
-                valid_pillars, rejected_pillars = self._dce.validate_pillars(pillars, pid)
-                if rejected_pillars:
-                    msg = f"[DomainCtx] {len(rejected_pillars)} pillars rejected by domain filter"
-                    print(f"  {msg}")
-                    for rp in rejected_pillars:
-                        print(f"    ✗ {rp['pillar_keyword']} — {rp['reason'][:60]}")
-                    pillars = valid_pillars
-                    if self._emit_fn:
-                        try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg})
-                        except Exception: pass
-                msg2 = f"[DomainCtx] {len(pillars)} pillars validated for project {pid}"
-                print(f"  {msg2}")
+        # ── Step-by-step pause: Analysis group (P4-P6) complete ───────────
+        if not _skip_analysis and _should_pause_after("P6"):
+            _emit_group_pause("Analysis")
+            gate_action = group_gate_callback("Analysis", ["P4", "P5", "P6"], {"entity_count": len(entities), "intent_count": len(intent_map), "serp_count": len(serp_map)})
+            if gate_action == "stop" or gate_action is False:
+                return {"status": "stopped_after_analysis", "keyword_count": len(kws), "entity_count": len(entities)}
+            _skip_scoring = (gate_action == "skip")
+        else:
+            _skip_scoring = False
+
+        # ── P7-P10: Scoring group ────────────────────────────────────────────
+        scores = {}
+        topic_map = {}
+        clusters = {}
+        pillars = {}
+        if not _skip_scoring:
+            with self._observe("P7_OpportunityScoring"):
+                scores = self._run_phase("P7", self.p7.run, seed, kws, intent_map, serp_map, entities) or {k: 50.0 for k in kws}
+
+            with self._observe("P8_TopicDetection"):
+                topic_map = self._run_phase("P8", self.p8.run, seed, kws, scores, intent_map, emit_fn=self._emit_fn) or {}
+            print(f"  P8: {len(topic_map)} topics detected")
+
+            # ── CHECK: Resume from Gate 2 (skip P9-P10 if confirmed) ──────────────
+            confirmed_pillars, gate2_confirmed = self._load_confirmed_pillars_from_db(rid)
+        
+            if gate2_confirmed and confirmed_pillars:
+                # Gate 2 already confirmed — use stored pillars and skip P9-P10
+                pillars = confirmed_pillars
+                # Build clusters dict from pillar topics so P11 has context
+                clusters = {}
+                for cname, pdata in pillars.items():
+                    clusters[cname] = pdata.get("topics", [])
+                msg = f"[Gate 2 Resume] Loaded {len(pillars)} confirmed pillars from DB, skipping P9-P10"
+                print(f"  {msg}")
+                log.info(msg)
                 if self._emit_fn:
-                    try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg2})
+                    try:
+                        self._emit_fn("phase_log", {"phase": "Gate2Resume", "msg": msg})
+                    except Exception:
+                        pass
+            else:
+                # Normal flow: Run P9-P10 to generate pillars
+                with self._observe("P9_ClusterFormation"):
+                    clusters = self._run_phase("P9", self.p9.run, seed, topic_map, project_id=pid) or {}
+                print(f"  P9: {len(clusters)} clusters formed")
+
+                # ✦ Record P9 clusters
+                self._record("P9_ClusterFormation", rid, pid,
+                             {"count": len(clusters)},
+                             [(name, "cluster", {"topics": topics[:5]})
+                              for name, topics in clusters.items()])
+
+                # ── GATE B: Pillars confirmed ─────────────────────────────────────
+                if gate_callback:
+                    confirmed = gate_callback("pillars", {"clusters": list(clusters.keys())})
+                    if confirmed is None:
+                        return {"status": "stopped_at_gate_B"}
+                    removed = confirmed.get("removed_clusters", [])
+                    clusters = {k: v for k, v in clusters.items() if k not in removed}
+
+                # ── P10 Pillar Identification ─────────────────────────────────────
+                with self._observe("P10_PillarIdentification"):
+                    pillars = self._run_phase("P10", self.p10.run, seed, clusters,
+                                              scores=scores, topic_map=topic_map, project_id=pid) or {}
+
+                # ✦ Domain Context — validate pillars (project-isolated)
+                if self._dce and pid and pillars:
+                    valid_pillars, rejected_pillars = self._dce.validate_pillars(pillars, pid)
+                    if rejected_pillars:
+                        msg = f"[DomainCtx] {len(rejected_pillars)} pillars rejected by domain filter"
+                        print(f"  {msg}")
+                        for rp in rejected_pillars:
+                            print(f"    ✗ {rp['pillar_keyword']} — {rp['reason'][:60]}")
+                        pillars = valid_pillars
+                        if self._emit_fn:
+                            try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg})
+                            except Exception: pass
+                    msg2 = f"[DomainCtx] {len(pillars)} pillars validated for project {pid}"
+                    print(f"  {msg2}")
+                    if self._emit_fn:
+                        try: self._emit_fn("phase_log", {"phase": "P10_DomainCtx", "msg": msg2})
+                        except Exception: pass
+
+                # ✦ Record P10 pillars
+                self._record("P10_PillarIdentification", rid, pid,
+                             {"count": len(pillars)},
+                             [(v.get("pillar_keyword", k), "pillar", v)
+                              for k, v in pillars.items()])
+        else:
+            if self._emit_fn:
+                self._emit_fn("phase_log", {"phase": "GROUP_SCORING", "status": "skipped", "color": "grey", "msg": "⏭ Scoring group skipped by user"})
+
+        # ── Step-by-step pause: Scoring group (P7-P10) complete ───────────
+        if _should_pause_after("P10"):
+            _emit_group_pause("Scoring")
+            gate_action = group_gate_callback("Scoring", ["P7", "P8", "P9", "P10"], {"topic_count": len(topic_map), "cluster_count": len(clusters), "pillar_count": len(pillars)})
+            if gate_action == "stop" or gate_action is False:
+                return {"status": "stopped_after_scoring", "keyword_count": len(kws), "topic_count": len(topic_map), "cluster_count": len(clusters), "pillar_count": len(pillars)}
+            _skip_structure = (gate_action == "skip")
+        else:
+            _skip_structure = False
+
+        # ── P11–P12: Structure group ──────────────────────────────────────────
+        graph = None
+        link_map = {}
+        if not _skip_structure:
+            graph = self._run_phase("P11", self.p11.run, seed, pillars,
+                                     topic_map, intent_map, scores)
+            if not graph:
+                log.warning("[Pipeline] P11 failed — building minimal graph from pillars")
+                if self._emit_fn:
+                    try: self._emit_fn("phase_log", {"phase": "P11", "status": "error", "color": "red", "msg": "✗ P11 Knowledge Graph failed — using minimal fallback"})
                     except Exception: pass
+                # Build minimal KnowledgeGraph so P12-P14 can still work
+                from engines.ruflo_20phase_engine import KnowledgeGraph as KG
+                graph = KG(seed=seed.keyword)
+                for cname, pdata in pillars.items():
+                    graph.pillars[cname] = {
+                        "title": pdata.get("pillar_title", cname),
+                        "keyword": pdata.get("pillar_keyword", cname),
+                        "clusters": {cname: {}}
+                    }
 
-            # ✦ Record P10 pillars
-            self._record("P10_PillarIdentification", rid, pid,
-                         {"count": len(pillars)},
-                         [(v.get("pillar_keyword", k), "pillar", v)
-                          for k, v in pillars.items()])
+            link_map = self._run_phase("P12", self.p12.run, seed, graph, intent_map, scores) or {}
+        else:
+            if self._emit_fn:
+                self._emit_fn("phase_log", {"phase": "GROUP_STRUCTURE", "status": "skipped", "color": "grey", "msg": "⏭ Structure group skipped by user"})
 
-        # ── P11–P14 (unchanged from base) ─────────────────────────────────────
-        graph = self._run_phase("P11", self.p11.run, seed, pillars,
-                                 topic_map, intent_map, scores)
-        if not graph:
-            return {"error": "P11 failed"}
+        # ── Step-by-step pause: Structure group (P11-P12) complete ────────
+        if not _skip_structure and _should_pause_after("P12"):
+            _emit_group_pause("Structure")
+            gate_action = group_gate_callback("Structure", ["P11", "P12"], {"pillar_count": len(pillars), "graph_nodes": len(graph) if graph else 0, "link_count": len(link_map)})
+            if gate_action == "stop" or gate_action is False:
+                return {"status": "stopped_after_structure", "keyword_count": len(kws), "pillar_count": len(pillars)}
+            _skip_planning = (gate_action == "skip")
+        else:
+            _skip_planning = False
 
-        link_map = self._run_phase("P12", self.p12.run, seed, graph) or {}
-        calendar = self._run_phase("P13", self.p13.run, seed, graph, scores, pace) or []
-        print(f"  P13: {len(calendar)} articles scheduled")
-        cost_preview = pace.summary(len(calendar))
-        print(f"  💰 {cost_preview['estimated_cost']} | ⏱ {cost_preview['estimated_time']}")
+        # ── P13-P14: Planning group ───────────────────────────────────────────
+        calendar = []
+        cost_preview = pace.summary(0) if pace else {}
+        if not _skip_planning and graph:
+            calendar = self._run_phase("P13", self.p13.run, seed, graph, scores, pace) or []
+            print(f"  P13: {len(calendar)} articles scheduled")
+            cost_preview = pace.summary(len(calendar))
+            print(f"  💰 {cost_preview['estimated_cost']} | ⏱ {cost_preview['estimated_time']}")
 
-        # ── GATE C ────────────────────────────────────────────────────────────
-        if gate_callback:
-            confirmed = gate_callback("content_calendar", {
-                "total": len(calendar), "pace": cost_preview, "first_10": calendar[:10]
-            })
-            if confirmed is None:
-                return {"status": "stopped_at_gate_C"}
-            if confirmed.get("new_pace"):
-                new_pace = ContentPace(**confirmed["new_pace"])
-                calendar = self._run_phase("P13", self.p13.run, seed, graph,
-                                            scores, new_pace) or calendar
+            # ── GATE C ────────────────────────────────────────────────────────
+            if gate_callback:
+                confirmed = gate_callback("content_calendar", {
+                    "total": len(calendar), "pace": cost_preview, "first_10": calendar[:10]
+                })
+                if confirmed is None:
+                    return {"status": "stopped_at_gate_C"}
+                if confirmed.get("new_pace"):
+                    new_pace = ContentPace(**confirmed["new_pace"])
+                    calendar = self._run_phase("P13", self.p13.run, seed, graph,
+                                                scores, new_pace) or calendar
 
-        calendar = self._run_phase("P14", self.p14.run, seed, calendar,
-                                    existing_articles) or calendar
-        print(f"  P14: {len(calendar)} articles after dedup")
+            # Load existing article titles from DB for P14 dedup
+            _existing = existing_articles or []
+            if not _existing and pid:
+                try:
+                    import sqlite3 as _s3
+                    _content_db = _s3.connect(str(Path(__file__).parent.parent / "annaseo.db"), check_same_thread=False)
+                    _content_db.row_factory = _s3.Row
+                    _existing_rows = _content_db.execute(
+                        "SELECT keyword FROM content_articles WHERE project_id=? AND status IN ('published','complete','generated')",
+                        (pid,)
+                    ).fetchall()
+                    _existing = [r["keyword"] for r in _existing_rows if r["keyword"]]
+                    _content_db.close()
+                    if _existing:
+                        log.info(f"[P14] Loaded {len(_existing)} existing articles for dedup")
+                except Exception as _e:
+                    log.warning(f"[P14] Failed to load existing articles: {_e}")
+
+            calendar = self._run_phase("P14", self.p14.run, seed, calendar,
+                                        _existing) or calendar
+            print(f"  P14: {len(calendar)} articles after dedup")
+        else:
+            if self._emit_fn and _skip_planning:
+                self._emit_fn("phase_log", {"phase": "GROUP_PLANNING", "status": "skipped", "color": "grey", "msg": "⏭ Planning group skipped by user"})
 
         result = {
             "seed":             seed.__dict__ if hasattr(seed, "__dict__") else str(seed),
-            "keyword_count":    len(kws),
-            "cluster_count":    len(clusters),
-            "topic_count":      len(topic_map),
-            "pillar_count":     len(pillars),
-            "calendar_count":   len(calendar),
-            "calendar_preview": calendar[:5],
+            "keyword_count":    len(kws) if kws else 0,
+            "cluster_count":    len(clusters) if clusters else 0,
+            "topic_count":      len(topic_map) if topic_map else 0,
+            "pillar_count":     len(pillars) if pillars else 0,
+            "calendar_count":   len(calendar) if calendar else 0,
+            "calendar_preview": (calendar or [])[:5],
             "cost_preview":     cost_preview,
-            "_graph":           graph,
-            "_link_map":        link_map,
-            "_calendar":        calendar,
-            "_entities":        entities,
-            "_intent_map":      intent_map,
+            "_graph":           _safe_asdict(graph) if graph and (is_dataclass(graph) or hasattr(graph, '__dataclass_fields__')) else (graph or {}),
+            "_link_map":        link_map or {},
+            "_calendar":        calendar or [],
+            "_entities":        entities or {},
+            "_intent_map":      intent_map or {},
         }
 
-        # ── Content generation (optional) ─────────────────────────────────────
-        if generate_articles:
+        # ── Content generation (optional, only if max_phase allows) ─────────
+        if generate_articles and _max_phase_num >= 15:
             import json as _json
             print(f"\n  Starting content generation for {len(calendar)} articles...")
             generated = []

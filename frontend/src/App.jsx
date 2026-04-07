@@ -14,10 +14,16 @@ import { useQuery, useMutation, useQueryClient, QueryClient, QueryClientProvider
 import KeywordInputPage from "./KeywordInput"
 import KeywordWorkflow from "./KeywordWorkflow"
 import StrategyPage from "./StrategyPage"
+import StrategyIntelligenceHub from "./StrategyIntelligenceHub"
+import DashboardPage from "./DashboardPage"
+import ContentPage from "./ContentPage"
+import PromptEditorPage from "./PromptEditorPage"
+import KwPage from "./kw2/KwPage"
 import Notification from "./components/Notification"
 import DebugPanel from "./components/DebugPanel"
 import useDebug from "./store/debug"
 import fetchDebug from "./lib/fetchDebug"
+import useWorkflowContext from "./store/workflowContext"
 
 const API = import.meta.env.VITE_API_URL || ""
 const qc  = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000 } } })
@@ -34,7 +40,15 @@ const useStore = create((set, get) => ({
 
   setUser:    (u)  => set({ user: u }),
   setToken:   (t)  => { localStorage.setItem("annaseo_token", t || ""); set({ token: t }) },
-  setProject: (id) => { localStorage.setItem("annaseo_project", id || ""); set({ activeProject: id }) },
+  setProject: (id) => {
+    const current = get().activeProject
+    localStorage.setItem("annaseo_project", id || "")
+    set({ activeProject: id })
+    // Reset workflow context when switching to a different project to prevent data bleed
+    if (id !== current) {
+      try { useWorkflowContext.getState().reset() } catch (_) {}
+    }
+  },
   setPage:    (p)  => set({ currentPage: p }),
   toggleSidebar: () => set(s => ({ sidebarOpen: !s.sidebarOpen })),
   logout: () => {
@@ -101,21 +115,37 @@ const api = {
 // DESIGN TOKENS
 // ─────────────────────────────────────────────────────────────────────────────
 const T = {
-  purple: "#7F77DD",
-  purpleLight: "#EEEDFE",
-  purpleDark: "#534AB7",
-  teal: "#1D9E75",
-  tealLight: "#E1F5EE",
-  red: "#E24B4A",
-  amber: "#BA7517",
-  amberLight: "#FAEEDA",
-  green: "#639922",
-  greenLight: "#EAF3DE",
-  gray: "#888780",
-  grayLight: "#F1EFE8",
-  border: "rgba(0,0,0,0.09)",
-  text: "#111827",
-  textSoft: "#6b7280",
+  // Apple System Blue as primary accent
+  purple: "#007AFF",
+  purpleLight: "rgba(0,122,255,0.1)",
+  purpleDark: "#0040DD",
+  // Apple Green
+  teal: "#34C759",
+  tealLight: "rgba(52,199,89,0.1)",
+  // Apple Red
+  red: "#FF3B30",
+  // Apple Orange
+  amber: "#FF9500",
+  amberLight: "rgba(255,149,0,0.1)",
+  // Same as teal
+  green: "#34C759",
+  greenLight: "rgba(52,199,89,0.1)",
+  // Apple neutral scale
+  gray: "#8E8E93",
+  grayLight: "#F2F2F7",
+  border: "rgba(60,60,67,0.12)",
+  text: "#000000",
+  textSoft: "rgba(60,60,67,0.55)",
+  // Sidebar — clean white
+  sidebarBg: "#FFFFFF",
+  sidebarText: "rgba(60,60,67,0.75)",
+  sidebarActive: "#007AFF",
+  sidebarHover: "rgba(0,0,0,0.04)",
+  // Meta
+  cardShadow: "0 1px 2px rgba(0,0,0,0.05), 0 0 0 0.5px rgba(0,0,0,0.07)",
+  displayFont: "-apple-system, BlinkMacSystemFont, 'Plus Jakarta Sans', 'Helvetica Neue', sans-serif",
+  bodyFont:    "-apple-system, BlinkMacSystemFont, 'Plus Jakarta Sans', 'Helvetica Neue', sans-serif",
+  articleFont: "'Lora', Georgia, serif",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,20 +154,21 @@ const T = {
 
 function Badge({ children, color = "purple", size = "sm" }) {
   const colors = {
-    purple: { bg: T.purpleLight, text: T.purpleDark },
-    green:  { bg: T.greenLight,  text: T.green },
-    red:    { bg: "#FCEBEB",     text: T.red },
-    amber:  { bg: T.amberLight,  text: T.amber },
-    teal:   { bg: T.tealLight,   text: T.teal },
-    gray:   { bg: T.grayLight,   text: T.gray },
+    purple: { bg: "rgba(0,122,255,0.1)",    text: "#007AFF" },
+    green:  { bg: "rgba(52,199,89,0.1)",    text: "#34C759" },
+    red:    { bg: "rgba(255,59,48,0.1)",    text: "#FF3B30" },
+    amber:  { bg: "rgba(255,149,0,0.1)",    text: "#FF9500" },
+    teal:   { bg: "rgba(52,199,89,0.1)",    text: "#34C759" },
+    gray:   { bg: "rgba(142,142,147,0.12)", text: "#8E8E93" },
   }
   const c = colors[color] || colors.purple
   return (
     <span style={{
       background: c.bg, color: c.text,
-      fontSize: size === "xs" ? 9 : 10, fontWeight: 500,
-      padding: size === "xs" ? "1px 5px" : "2px 7px",
+      fontSize: size === "xs" ? 9 : 10, fontWeight: 600,
+      padding: size === "xs" ? "1px 6px" : "2px 8px",
       borderRadius: 99, whiteSpace: "nowrap", display: "inline-block",
+      letterSpacing: 0.1,
     }}>{children}</span>
   )
 }
@@ -145,9 +176,10 @@ function Badge({ children, color = "purple", size = "sm" }) {
 function Card({ children, style = {}, onClick }) {
   return (
     <div onClick={onClick} style={{
-      background: "var(--color-bg, #fff)",
-      border: "0.5px solid rgba(0,0,0,0.1)",
-      borderRadius: 12, padding: "12px 14px",
+      background: "#FFFFFF",
+      borderRadius: 13,
+      boxShadow: T.cardShadow,
+      padding: "12px 14px",
       cursor: onClick ? "pointer" : "default",
       ...style
     }}>{children}</div>
@@ -156,26 +188,29 @@ function Card({ children, style = {}, onClick }) {
 
 function StatCard({ label, value, sub, color = T.purple }) {
   return (
-    <Card style={{ textAlign: "center" }}>
-      <div style={{ fontSize: 26, fontWeight: 600, color, lineHeight: 1 }}>{value ?? "—"}</div>
-      {sub && <div style={{ fontSize: 10, color: T.gray, marginTop: 2 }}>{sub}</div>}
-      <div style={{ fontSize: 11, color: T.gray, marginTop: 4 }}>{label}</div>
+    <Card style={{ textAlign: "center", padding: "14px 10px" }}>
+      <div style={{ fontSize: 28, fontWeight: 700, color, lineHeight: 1, letterSpacing: -0.5 }}>{value ?? "—"}</div>
+      {sub && <div style={{ fontSize: 10, color: T.gray, marginTop: 3 }}>{sub}</div>}
+      <div style={{ fontSize: 11, color: T.textSoft, marginTop: 5, fontWeight: 500 }}>{label}</div>
     </Card>
   )
 }
 
 function Btn({ children, onClick, variant = "default", small, disabled, style = {} }) {
   const styles = {
-    default: { background: "transparent", color: T.gray, border: `0.5px solid rgba(0,0,0,0.15)` },
-    primary: { background: T.purple, color: "#fff", border: `1px solid ${T.purpleDark}` },
-    danger:  { background: "transparent", color: T.red, border: `0.5px solid ${T.red}` },
-    success: { background: "transparent", color: T.teal, border: `0.5px solid ${T.teal}` },
+    default: { background: "#F2F2F7",                    color: "#000000",  border: "none" },
+    primary: { background: "#007AFF",                    color: "#FFFFFF",  border: "none" },
+    danger:  { background: "rgba(255,59,48,0.1)",        color: "#FF3B30",  border: "none" },
+    success: { background: "rgba(52,199,89,0.1)",        color: "#34C759",  border: "none" },
   }
   return (
     <button onClick={onClick} disabled={disabled} style={{
-      padding: small ? "3px 9px" : "6px 14px",
-      borderRadius: 8, fontSize: small ? 11 : 12, fontWeight: 500,
-      cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
+      padding: small ? "4px 11px" : "7px 16px",
+      borderRadius: 10, fontSize: small ? 11 : 13, fontWeight: 500,
+      cursor: disabled ? "not-allowed" : "pointer",
+      opacity: disabled ? 0.45 : 1,
+      transition: "opacity 0.15s ease",
+      lineHeight: 1.3,
       ...styles[variant], ...style
     }}>{children}</button>
   )
@@ -203,6 +238,10 @@ function StatusDot({ status }) {
   const c = { healthy: T.teal, good: T.teal, degraded: T.amber, critical: T.red, error: T.red }[status] || T.gray
   return <span style={{ width: 7, height: 7, borderRadius: "50%", background: c, display: "inline-block" }}/>
 }
+
+// ── Shared exports for external page components ───────────────────────────────
+export { T, api, useStore, Badge, Card, StatCard, Btn, LoadingSpinner, ScoreRing, StatusDot }
+// EditProjectModal and ConfirmModal exported below after their definitions
 
 function SSEConsole({ events }) {
   const ref = useRef()
@@ -234,9 +273,11 @@ function LoadingSpinner() {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}>
       <div style={{
-        width: 28, height: 28, border: `3px solid ${T.purpleLight}`,
-        borderTopColor: T.purple, borderRadius: "50%",
-        animation: "spin 0.7s linear infinite"
+        width: 24, height: 24,
+        border: `2.5px solid rgba(0,122,255,0.15)`,
+        borderTopColor: "#007AFF",
+        borderRadius: "50%",
+        animation: "spin 0.65s linear infinite"
       }}/>
     </div>
   )
@@ -374,6 +415,8 @@ function ConfirmModal({ message, onConfirm, onClose }) {
   )
 }
 
+export { EditProjectModal, ConfirmModal }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PAGE: LOGIN
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,35 +447,47 @@ function LoginPage() {
     }
   }
 
+  const inputStyle = {
+    width: "100%", padding: "10px 12px", borderRadius: 10,
+    background: "#F2F2F7", border: "none",
+    fontSize: 15, marginBottom: 8, boxSizing: "border-box",
+    color: "#000", outline: "none",
+  }
+
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: T.grayLight }}>
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#F2F2F7" }}>
       <div style={{ width: 360 }}>
-        <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <div style={{ fontSize: 28, fontWeight: 700, color: T.purple, letterSpacing: -1 }}>AnnaSEO</div>
-          <div style={{ fontSize: 13, color: T.gray, marginTop: 4 }}>AI Keyword & Content OS</div>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 30, fontWeight: 700, color: "#000000", letterSpacing: -0.8 }}>
+            Anna<span style={{ color: "#007AFF" }}>SEO</span>
+          </div>
+          <div style={{ fontSize: 13, color: "rgba(60,60,67,0.55)", marginTop: 5 }}>AI Keyword & Content OS</div>
         </div>
-        <Card style={{ padding: 24 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <Card style={{ padding: "24px 20px", borderRadius: 16 }}>
+          {/* Mode toggle */}
+          <div style={{
+            display: "flex", background: "#F2F2F7", borderRadius: 10,
+            padding: 2, marginBottom: 20,
+          }}>
             {["login","register"].map(m => (
               <button key={m} onClick={() => setMode(m)} style={{
-                flex: 1, padding: "6px 0", borderRadius: 8, fontSize: 12, fontWeight: 500,
-                border: "none", cursor: "pointer",
-                background: mode === m ? T.purple : T.purpleLight,
-                color: mode === m ? "#fff" : T.purpleDark,
+                flex: 1, padding: "7px 0", borderRadius: 8, fontSize: 13, fontWeight: 500,
+                border: "none", cursor: "pointer", transition: "background 0.15s",
+                background: mode === m ? "#fff" : "transparent",
+                color: mode === m ? "#000" : "rgba(60,60,67,0.55)",
+                boxShadow: mode === m ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
               }}>{m === "login" ? "Sign in" : "Register"}</button>
             ))}
           </div>
           {mode === "register" && (
-            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Full name"
-              style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }}/>
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Full name" style={inputStyle}/>
           )}
-          <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email"
-            style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 13, marginBottom: 8, boxSizing: "border-box" }}/>
+          <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" style={inputStyle}/>
           <input value={pw} onChange={e=>setPw(e.target.value)} placeholder="Password" type="password"
             onKeyDown={e => e.key === "Enter" && submit()}
-            style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 13, marginBottom: 12, boxSizing: "border-box" }}/>
-          {err && <div style={{ color: T.red, fontSize: 11, marginBottom: 8 }}>{err}</div>}
-          <Btn onClick={submit} variant="primary" style={{ width: "100%" }}>
+            style={{ ...inputStyle, marginBottom: 14 }}/>
+          {err && <div style={{ color: "#FF3B30", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+          <Btn onClick={submit} variant="primary" style={{ width: "100%", padding: "12px", fontSize: 15, borderRadius: 12 }}>
             {mode === "login" ? "Sign in" : "Create account"}
           </Btn>
         </Card>
@@ -441,122 +496,7 @@ function LoginPage() {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE: DASHBOARD (P1)
-// ─────────────────────────────────────────────────────────────────────────────
-function DashboardPage() {
-  const { activeProject, setPage, setProject } = useStore()
-  const qclient = useQueryClient()
-  const [editingProject, setEditingProject] = useState(null)
-  const [deletingProject, setDeletingProject] = useState(null)
-  const { data: projects, isLoading } = useQuery({ queryKey: ["projects"], queryFn: () => api.get("/api/projects").then(r => r?.projects || []) })
-  const { data: health } = useQuery({ queryKey: ["health"], queryFn: () => api.get("/api/health"), refetchInterval: 30000 })
-  const { data: costs } = useQuery({ queryKey: ["costs", activeProject], queryFn: () => activeProject ? api.get(`/api/costs/${activeProject}`) : null, enabled: !!activeProject })
-  const { data: kwStats } = useQuery({ queryKey: ["kw-stats", activeProject], queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/keyword-stats`) : null, enabled: !!activeProject })
-
-  if (isLoading) return <LoadingSpinner/>
-
-  return (
-    <div>
-      <div style={{ marginBottom: 20, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 600, color: "#1a1a1a" }}>Dashboard</div>
-          <div style={{ fontSize: 12, color: T.gray, marginTop: 2 }}>
-            {projects?.length || 0} project{projects?.length !== 1 ? "s" : ""}
-          </div>
-        </div>
-        <Btn onClick={() => setPage("new-project")} variant="primary">+ New project</Btn>
-      </div>
-
-      {/* Engine health */}
-      {health && (
-        <Card style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
-            Engine health
-            <StatusDot status={health.all_ok ? "healthy" : "degraded"}/>
-            <span style={{ fontSize: 11, color: health.all_ok ? T.teal : T.amber }}>
-              {health.all_ok ? "All systems operational" : "Some engines need attention"}
-            </span>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 6 }}>
-            {Object.entries(health.engines || {}).map(([name, status]) => (
-              <div key={name} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
-                <StatusDot status={status === "ok" ? "healthy" : "error"}/>
-                <span style={{ color: T.gray, fontSize: 10 }}>{name}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {/* Universe hierarchy summary */}
-      {kwStats && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
-          {[
-            { label: "Universes", count: kwStats.universe_count || 1, color: T.purple, icon: "🌐" },
-            { label: "Pillars", count: kwStats.pillar_count || 0, color: T.purpleDark, icon: "📌" },
-            { label: "Clusters", count: kwStats.cluster_count || 0, color: T.teal, icon: "🔗" },
-            { label: "Keywords", count: kwStats.total || 0, color: T.green, icon: "🔑" },
-          ].map(item => (
-            <Card key={item.label} style={{ padding: 12 }}>
-              <div style={{ fontSize: 11, color: T.gray, marginBottom: 4 }}>{item.icon} {item.label}</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: item.color }}>{item.count?.toLocaleString()}</div>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* Projects grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, marginBottom: 20 }}>
-        {(projects || []).map(p => (
-          <Card key={p.project_id}
-            style={{ cursor: "pointer", borderColor: activeProject === p.project_id ? T.purple : "rgba(0,0,0,0.1)", borderWidth: activeProject === p.project_id ? 1.5 : 0.5 }}>
-            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
-              <div onClick={() => { setProject(p.project_id); setPage("keywords") }} style={{ flex: 1, cursor: "pointer" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "#1a1a1a" }}>{p.name}</div>
-                <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>{p.industry}</div>
-              </div>
-              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                <Badge color={p.status === "active" ? "teal" : "gray"}>{p.status}</Badge>
-                <button onClick={e => { e.stopPropagation(); setEditingProject(p) }}
-                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: T.gray, padding: "0 3px" }} title="Edit">✎</button>
-                <button onClick={e => { e.stopPropagation(); setDeletingProject(p) }}
-                  style={{ background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.red, padding: "0 3px" }} title="Delete">✕</button>
-              </div>
-            </div>
-            <div style={{ marginTop: 10, fontSize: 11, color: T.gray }}>
-              {JSON.parse(p.seed_keywords || "[]").slice(0,3).join(", ") || "No seeds yet"}
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      {editingProject && (
-        <EditProjectModal project={editingProject} onClose={() => setEditingProject(null)}
-          onSaved={() => qclient.invalidateQueries(["projects"])}/>
-      )}
-      {deletingProject && (
-        <ConfirmModal message={`Delete project "${deletingProject.name}"? This cannot be undone.`}
-          onClose={() => setDeletingProject(null)}
-          onConfirm={async () => {
-            await api.delete(`/api/projects/${deletingProject.project_id}`)
-            qclient.invalidateQueries(["projects"])
-            setDeletingProject(null)
-          }}/>
-      )}
-
-      {/* Cost overview */}
-      {costs && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
-          <StatCard label="Total cost" value={`$${costs.total_usd}`} color={T.purple}/>
-          <StatCard label="Articles" value={costs.articles_generated} color={T.teal}/>
-          <StatCard label="Per article" value={`$${costs.cost_per_article}`} color={T.green}/>
-          <StatCard label="Est. monthly" value={`$${costs.monthly_estimate}`} color={T.gray}/>
-        </div>
-      )}
-    </div>
-  )
-}
+// DashboardPage is imported from ./DashboardPage
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1006,7 +946,7 @@ const CONTENT_PHASE_ETA = {
   P13: 2000, P15: 3000, P16: 8000, P17: 3000, P19: 2000, P20: 1000,
 }
 
-function ContentPipelineTab({ projectId }) {
+export function ContentPipelineTab({ projectId }) {
   const [pillarStatus, setPillarStatus]   = useState([])
   const [selectedPillars, setSelectedPillars] = useState([])
   const [runs, setRuns]                   = useState([])
@@ -1325,184 +1265,7 @@ function ContentPipelineTab({ projectId }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE: CONTENT (P4 + P6 combined) — generate + blog editor
-// ─────────────────────────────────────────────────────────────────────────────
-function ContentPage() {
-  const { activeProject } = useStore()
-  const qclient = useQueryClient()
-  const [tab, setTab] = useState("articles")
-  const [kw, setKw] = useState("")
-  const [selected, setSelected] = useState(null)
-  const [editingArticle, setEditingArticle] = useState(null) // {article_id, title, meta_title, meta_desc}
-  const { data: articles, isLoading } = useQuery({
-    queryKey: ["articles", activeProject],
-    queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/content`) : [],
-    enabled: !!activeProject
-  })
-
-  const generate = useMutation({
-    mutationFn: () => api.post("/api/content/generate", { keyword: kw, project_id: activeProject }),
-    onSuccess: () => { qclient.invalidateQueries(["articles", activeProject]); setKw("") }
-  })
-
-  const approve = useMutation({
-    mutationFn: (id) => api.post(`/api/content/${id}/approve`),
-    onSuccess: () => qclient.invalidateQueries(["articles", activeProject])
-  })
-
-  const statusColor = { draft: "gray", generating: "amber", review: "purple", approved: "teal", publishing: "amber", published: "teal", failed: "red" }
-
-  if (!activeProject) return <div style={{ color: T.gray, padding: 20 }}>Select a project to manage content.</div>
-
-  const lifecycle = ["draft","generating","review","approved","publishing","published","failed"]
-  const lifeCounts = lifecycle.reduce((acc, s) => {
-    acc[s] = (articles || []).filter(a => a.status === s).length; return acc
-  }, {})
-
-  const tabStyle = (t) => ({
-    padding: "6px 16px", borderRadius: 20, fontSize: 12, fontWeight: 500, cursor: "pointer",
-    border: "none", background: tab === t ? T.purple : "transparent",
-    color: tab === t ? "#fff" : T.gray,
-  })
-
-  return (
-    <div>
-      {/* Tab bar */}
-      <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
-        <div style={{ fontSize: 20, fontWeight: 600, marginRight: 12 }}>Content</div>
-        <button style={tabStyle("articles")} onClick={() => setTab("articles")}>Articles</button>
-        <button style={tabStyle("pipeline")} onClick={() => setTab("pipeline")}>Content Pipeline</button>
-      </div>
-
-      {tab === "pipeline" && <ContentPipelineTab projectId={activeProject} />}
-
-      {tab === "articles" && <div style={{ display: "grid", gridTemplateColumns: selected ? "1fr 1fr" : "1fr", gap: 16 }}>
-      <div>
-        {/* Lifecycle pipeline */}
-        <Card style={{ marginBottom: 12, padding: "10px 14px" }}>
-          <div style={{ fontSize: 11, color: T.gray, marginBottom: 8, fontWeight: 500 }}>Content lifecycle</div>
-          <div style={{ display: "flex", gap: 0, alignItems: "center", overflowX: "auto" }}>
-            {lifecycle.filter(s => s !== "failed").map((s, i, arr) => (
-              <div key={s} style={{ display: "flex", alignItems: "center" }}>
-                <div style={{
-                  padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 500, whiteSpace: "nowrap",
-                  background: lifeCounts[s] > 0 ? {
-                    draft:T.purpleLight,generating:"#FFF3CD",review:T.purpleLight,
-                    approved:T.tealLight,publishing:"#FFF3CD",published:T.tealLight
-                  }[s] : "rgba(0,0,0,0.04)",
-                  color: lifeCounts[s] > 0 ? {
-                    draft:T.purple,generating:T.amber,review:T.purpleDark,
-                    approved:T.teal,publishing:T.amber,published:T.teal
-                  }[s] : T.gray,
-                }}>
-                  {s} {lifeCounts[s] > 0 && <strong>({lifeCounts[s]})</strong>}
-                </div>
-                {i < arr.length-1 && <span style={{ color: T.gray, padding: "0 2px", fontSize: 10 }}>→</span>}
-              </div>
-            ))}
-            {lifeCounts.failed > 0 && (
-              <div style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 20, fontSize: 11, background:"#FEE2E2", color: T.red }}>
-                failed ({lifeCounts.failed})
-              </div>
-            )}
-          </div>
-        </Card>
-        <Card style={{ marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input value={kw} onChange={e=>setKw(e.target.value)} placeholder="Keyword to generate article for..."
-              style={{ flex: 1, padding: "7px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12 }}/>
-            <Btn onClick={() => generate.mutate()} variant="primary" disabled={!kw.trim() || generate.isPending}>
-              {generate.isPending ? "Generating..." : "Generate"}
-            </Btn>
-          </div>
-        </Card>
-
-        {isLoading ? <LoadingSpinner/> : (articles || []).map(a => (
-          <div key={a.article_id}>
-            {editingArticle?.article_id === a.article_id ? (
-              <Card style={{ marginBottom: 8, border: `1.5px solid ${T.purple}` }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: T.purple, marginBottom: 8 }}>Editing: {a.keyword}</div>
-                {[["Title", "title"], ["Meta title", "meta_title"], ["Meta description", "meta_desc"]].map(([label, field]) => (
-                  <div key={field} style={{ marginBottom: 7 }}>
-                    <label style={{ fontSize: 10, color: T.gray, display: "block", marginBottom: 2 }}>{label}</label>
-                    <input value={editingArticle[field] || ""} onChange={e => setEditingArticle({ ...editingArticle, [field]: e.target.value })}
-                      style={{ width: "100%", padding: "6px 8px", borderRadius: 7, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 11, boxSizing: "border-box" }}/>
-                  </div>
-                ))}
-                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                  <Btn small onClick={() => setEditingArticle(null)}>Cancel</Btn>
-                  <Btn small variant="primary" onClick={async () => {
-                    await api.put(`/api/content/${a.article_id}`, {
-                      title: editingArticle.title,
-                      meta_title: editingArticle.meta_title,
-                      meta_desc: editingArticle.meta_desc,
-                    })
-                    qclient.invalidateQueries(["articles", activeProject])
-                    setEditingArticle(null)
-                  }}>Save</Btn>
-                </div>
-              </Card>
-            ) : (
-              <Card onClick={() => setSelected(a)}
-                style={{ marginBottom: 8, cursor: "pointer", borderColor: selected?.article_id === a.article_id ? T.purple : "rgba(0,0,0,0.1)" }}>
-                <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, fontWeight: 500, color: "#1a1a1a" }}>{a.title || a.keyword}</div>
-                    <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>{a.keyword}</div>
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                      <Badge color={statusColor[a.status] || "gray"}>{a.status}</Badge>
-                      <button onClick={e => { e.stopPropagation(); setEditingArticle({ article_id: a.article_id, title: a.title || "", meta_title: a.meta_title || "", meta_desc: a.meta_desc || "" }) }}
-                        style={{ background:"none",border:"none",cursor:"pointer",color:T.gray,fontSize:13 }} title="Edit">✎</button>
-                      <button onClick={e => { e.stopPropagation(); if(window.confirm("Delete this article?")) { api.delete(`/api/content/${a.article_id}`).then(() => qclient.invalidateQueries(["articles", activeProject])) }}}
-                        style={{ background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:12 }} title="Delete">✕</button>
-                    </div>
-                    {a.seo_score > 0 && <div style={{ display: "flex", gap: 4 }}>
-                      {[["SEO", a.seo_score], ["EEAT", a.eeat_score], ["GEO", a.geo_score]].map(([l, s]) => (
-                        <span key={l} style={{ fontSize: 9, color: (s||0) >= 75 ? T.teal : T.amber }}>
-                          {l}:{Math.round(s||0)}
-                        </span>
-                      ))}
-                    </div>}
-                  </div>
-                </div>
-              </Card>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {selected && (
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-            <div style={{ flex: 1, fontSize: 14, fontWeight: 600 }}>{selected.title || selected.keyword}</div>
-            <Btn small onClick={() => setSelected(null)}>✕</Btn>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
-            <StatCard label="SEO" value={Math.round(selected.seo_score||0)} color={selected.seo_score >= 75 ? T.teal : T.amber}/>
-            <StatCard label="E-E-A-T" value={Math.round(selected.eeat_score||0)} color={selected.eeat_score >= 75 ? T.teal : T.amber}/>
-            <StatCard label="GEO" value={Math.round(selected.geo_score||0)} color={selected.geo_score >= 75 ? T.teal : T.amber}/>
-          </div>
-          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-            {selected.status === "draft" && <Btn small variant="primary" onClick={() => {}}>Send to review</Btn>}
-            {selected.status === "review" && <Btn small variant="success" onClick={() => approve.mutate(selected.article_id)}>✓ Approve</Btn>}
-            {selected.status === "approved" && <Btn small variant="primary" onClick={() => {}}>Publish</Btn>}
-            {!selected.frozen && <Btn small onClick={() => {}}>🔒 Freeze</Btn>}
-            {selected.frozen && <Btn small variant="danger">Frozen</Btn>}
-          </div>
-          <Card style={{ maxHeight: 400, overflowY: "auto" }}>
-            <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", wordBreak: "break-word", color: T.gray, margin: 0 }}>
-              {selected.body ? selected.body.slice(0, 2000) + (selected.body.length > 2000 ? "..." : "") : "No content yet"}
-            </pre>
-          </Card>
-        </div>
-      )}
-    </div>}
-    </div>
-  )
-}
+// ContentPage is imported from ./ContentPage
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PAGE: CALENDAR (P5)
@@ -3019,40 +2782,88 @@ function SystemGraphPage() {
 const NAV = [
   { id: "dashboard",    label: "Dashboard" },
   { id: "keywords",     label: "Keywords" },
+  { id: "kw2",          label: "Keywords v2" },
+  { id: "strategy-hub", label: "Strategy Hub" },
   { id: "content",      label: "Content" },
   { id: "blogs",        label: "Content Calendar" },
   { id: "graph",        label: "System Graph" },
-  { id: "calendar",     label: "Calendar" },
   { id: "seo-checker",  label: "SEO Checker" },
   { id: "quality",      label: "Quality" },
+  { id: "prompts",      label: "Prompts" },
   { id: "rsd",          label: "Research & Dev" },
   { id: "bug-fixer",    label: "Bug Fixer" },
   { id: "queue",        label: "Queue" },
   { id: "errors",       label: "Errors" },
+  { id: "settings",     label: "⚙ Settings" },
 ]
 
 function Sidebar({ page: currentPage, setPage }) {
-  const logout = () => { localStorage.removeItem("token"); window.location.reload() }
+  const { user } = useStore()
+  const logout = () => { localStorage.removeItem("annaseo_token"); localStorage.removeItem("annaseo_project"); window.location.reload() }
   return (
-    <div style={{ width: 200, background: "white", borderRight: "0.5px solid rgba(0,0,0,0.08)", display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, overflow: "auto" }}>
-        {NAV.map(n => (
-          <button key={n.id} onClick={() => setPage(n.id)} style={{
-            display: "flex", alignItems: "center", gap: 9, padding: "7px 16px",
-            width: "100%", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 500,
-            background: currentPage === n.id ? T.purpleLight : "transparent",
-            color: currentPage === n.id ? T.purpleDark : T.gray,
-            borderLeft: `3px solid ${currentPage === n.id ? T.purple : "transparent"}`,
-            textAlign: "left",
-          }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%",
-              background: currentPage === n.id ? T.purple : "rgba(0,0,0,0.1)", flexShrink: 0 }}/>
-            {n.label}
-          </button>
-        ))}
+    <div style={{
+      width: 218,
+      background: "#FFFFFF",
+      borderRight: "0.5px solid rgba(60,60,67,0.12)",
+      display: "flex",
+      flexDirection: "column",
+      minHeight: "100vh",
+      flexShrink: 0,
+    }}>
+      {/* Logo */}
+      <div style={{ padding: "18px 16px 14px", borderBottom: "0.5px solid rgba(60,60,67,0.08)" }}>
+        <div style={{
+          fontSize: 18, fontWeight: 700, color: "#000000",
+          letterSpacing: -0.4, lineHeight: 1,
+        }}>
+          Anna<span style={{ color: "#007AFF" }}>SEO</span>
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(60,60,67,0.4)", marginTop: 3, letterSpacing: 0.1 }}>
+          AI Content Intelligence
+        </div>
       </div>
-      <div style={{ padding: "12px 16px", borderTop: "0.5px solid rgba(0,0,0,0.08)" }}>
-        <button onClick={logout} style={{ fontSize: 11, color: T.gray, background: "none", border: "none", cursor: "pointer" }}>
+
+      {/* Nav */}
+      <div style={{ flex: 1, padding: "8px 8px", overflowY: "auto" }}>
+        {NAV.map(n => {
+          const isActive = currentPage === n.id
+          return (
+            <button key={n.id} onClick={() => setPage(n.id)} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "7px 10px",
+              width: "100%", border: "none", cursor: "pointer",
+              fontSize: 13, fontWeight: isActive ? 600 : 400,
+              borderRadius: 9, marginBottom: 1, textAlign: "left",
+              background: isActive ? "rgba(0,122,255,0.1)" : "transparent",
+              color: isActive ? "#007AFF" : "rgba(60,60,67,0.75)",
+              transition: "background 0.1s, color 0.1s",
+            }}
+            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = "rgba(0,0,0,0.04)" }}
+            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = "transparent" }}
+            >
+              <span style={{
+                width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+                background: isActive ? "#007AFF" : "rgba(60,60,67,0.2)",
+              }}/>
+              {n.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Footer */}
+      <div style={{ padding: "12px 16px", borderTop: "0.5px solid rgba(60,60,67,0.08)" }}>
+        {user?.email && (
+          <div style={{
+            fontSize: 11, color: "rgba(60,60,67,0.45)", marginBottom: 7,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {user.email}
+          </div>
+        )}
+        <button onClick={logout} style={{
+          fontSize: 12, color: "#FF3B30", background: "none",
+          border: "none", cursor: "pointer", padding: 0, fontWeight: 400,
+        }}>
           Sign out
         </button>
       </div>
@@ -3066,9 +2877,12 @@ function Sidebar({ page: currentPage, setPage }) {
 
 function SettingsPage() {
   const [keys, setKeys] = useState({
-    groq_key: "", gemini_key: "", anthropic_key: "", openai_key: "",
-    ollama_url: "http://localhost:11434", ollama_model: "deepseek-r1:7b",
-    groq_model: "llama-3.3-70b-versatile",
+    groq_key: "", groq_model: "",
+    gemini_key: "", gemini_paid_key: "",
+    anthropic_key: "", anthropic_paid_key: "",
+    openai_key: "", openai_paid_key: "",
+    openrouter_key: "", openrouter_model: "",
+    ollama_url: "", ollama_model: "",
   })
   const [status, setStatus] = useState({})
   const [saving, setSaving] = useState(false)
@@ -3078,6 +2892,18 @@ function SettingsPage() {
     queryKey: ["api-keys"],
     queryFn: () => api.get("/api/settings/api-keys"),
   })
+
+  // Pre-populate non-secret fields (url, models) from server when loaded
+  useEffect(() => {
+    if (!current) return
+    setKeys(prev => ({
+      ...prev,
+      ollama_url:   current.ollama_url   || prev.ollama_url   || "http://172.235.16.165:11434",
+      ollama_model: current.ollama_model || prev.ollama_model || "qwen2.5:3b",
+      groq_model:   current.groq_model   || prev.groq_model   || "llama-3.3-70b-versatile",
+      openrouter_model: current.openrouter_model || prev.openrouter_model || "openai/gpt-4o",
+    }))
+  }, [current])
 
   const save = async () => {
     setSaving(true); setMsg("")
@@ -3110,8 +2936,44 @@ function SettingsPage() {
     </div>
   )
 
+  const TierGroup = ({ label, freeKey, paidKey, freePlaceholder, paidPlaceholder }) => (
+    <div style={{ marginBottom: 18, padding: "12px 14px", borderRadius: 8, background: "rgba(0,0,0,0.02)", border: "0.5px solid rgba(0,0,0,0.08)" }}>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10, color: T.purple }}>{label}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <label style={{ fontSize: 11, fontWeight: 500, color: T.teal }}>Free Tier</label>
+            {current?.[freeKey] !== undefined && (
+              <Badge color={current[freeKey] ? "teal" : "red"}>{current[freeKey] ? "set" : "not set"}</Badge>
+            )}
+          </div>
+          <input type="password" value={keys[freeKey] || ""}
+            onChange={e=>setKeys({...keys,[freeKey]:e.target.value})}
+            placeholder={freePlaceholder || "Free tier key..."}
+            style={{ width:"100%",padding:"7px 9px",borderRadius:6,border:"0.5px solid rgba(0,150,100,0.3)",
+                     fontSize:11,boxSizing:"border-box",fontFamily:"monospace" }}/>
+          <div style={{ fontSize: 10, color: T.gray, marginTop: 3 }}>General AI use · all features</div>
+        </div>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <label style={{ fontSize: 11, fontWeight: 500, color: "#e67e22" }}>Paid Tier</label>
+            {current?.[paidKey] !== undefined && (
+              <Badge color={current[paidKey] ? "amber" : "gray"}>{current[paidKey] ? "set" : "not set"}</Badge>
+            )}
+          </div>
+          <input type="password" value={keys[paidKey] || ""}
+            onChange={e=>setKeys({...keys,[paidKey]:e.target.value})}
+            placeholder={paidPlaceholder || "Paid tier key..."}
+            style={{ width:"100%",padding:"7px 9px",borderRadius:6,border:"0.5px solid rgba(230,126,34,0.3)",
+                     fontSize:11,boxSizing:"border-box",fontFamily:"monospace" }}/>
+          <div style={{ fontSize: 10, color: T.gray, marginTop: 3 }}>Content generation only</div>
+        </div>
+      </div>
+    </div>
+  )
+
   return (
-    <div style={{ maxWidth: 640 }}>
+    <div style={{ maxWidth: 680 }}>
       <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Settings</div>
       <div style={{ fontSize: 12, color: T.gray, marginBottom: 24 }}>API keys are encrypted before storage. They are never exposed in logs.</div>
 
@@ -3120,19 +2982,54 @@ function SettingsPage() {
           AI Model Configuration
         </div>
         <div style={{ fontSize: 11, color: T.gray, background: T.purpleLight, borderRadius: 6, padding: "8px 12px", marginBottom: 16 }}>
-          <strong>Routing:</strong> Groq Llama (primary, free) → Ollama/DeepSeek (offline fallback) → Claude (quality gates ≤1000 tokens only)
+          <strong>Routing:</strong> Groq Llama (primary, free) → Ollama/DeepSeek (offline fallback) → Claude (quality gates ≤1000 tokens only).<br/>
+          <strong>Paid tier keys</strong> are used exclusively for content generation to preserve free-tier quotas.
         </div>
-        <Field label="Groq API Key (primary — free tier)" k="groq_key" type="password"
-               placeholder="gsk_..." />
+
+        {/* Groq */}
+        <Field label="Groq API Key (primary — free tier)" k="groq_key" type="password" placeholder="gsk_..." />
         <Field label="Groq Model" k="groq_model" placeholder="llama-3.3-70b-versatile" />
-        <Field label="Ollama URL (local DeepSeek)" k="ollama_url" placeholder="http://localhost:11434" />
+
+        {/* Ollama */}
+        <Field label="Ollama URL (Remote Server)" k="ollama_url" placeholder="http://172.235.16.165:11434" />
         <Field label="Ollama Model" k="ollama_model" placeholder="deepseek-r1:7b" />
-        <Field label="Google Gemini API Key" k="gemini_key" type="password"
-               placeholder="AIzaSy..." />
-        <Field label="Anthropic Claude Key (verification only)" k="anthropic_key" type="password"
-               placeholder="sk-ant-..." />
-        <Field label="OpenAI API Key (optional)" k="openai_key" type="password"
-               placeholder="sk-..." />
+
+        {/* Gemini tiers */}
+        <TierGroup
+          label="Google Gemini"
+          freeKey="gemini_key"
+          paidKey="gemini_paid_key"
+          freePlaceholder="AIzaSy... (free tier)"
+          paidPlaceholder="AIzaSy... (paid tier)"
+        />
+
+        {/* ChatGPT / OpenAI tiers */}
+        <TierGroup
+          label="ChatGPT / OpenAI"
+          freeKey="openai_key"
+          paidKey="openai_paid_key"
+          freePlaceholder="sk-... (free tier)"
+          paidPlaceholder="sk-... (paid tier)"
+        />
+
+        {/* Anthropic tiers */}
+        <TierGroup
+          label="Anthropic Claude"
+          freeKey="anthropic_key"
+          paidKey="anthropic_paid_key"
+          freePlaceholder="sk-ant-... (free tier)"
+          paidPlaceholder="sk-ant-... (paid tier)"
+        />
+
+        {/* OpenRouter */}
+        <div style={{ marginBottom: 18, padding: "12px 14px", borderRadius: 8, background: "rgba(0,0,0,0.02)", border: "0.5px solid rgba(0,0,0,0.08)" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10, color: T.purple }}>🌐 OpenRouter (Multi-Model Gateway)</div>
+          <div style={{ fontSize: 10, color: T.gray, marginBottom: 10 }}>
+            Access 100+ models (GPT-4o, Claude, Gemini, Llama, Mistral) with a single API key from openrouter.ai
+          </div>
+          <Field label="OpenRouter API Key" k="openrouter_key" type="password" placeholder="sk-or-v1-..." />
+          <Field label="OpenRouter Model" k="openrouter_model" placeholder="openai/gpt-4o" />
+        </div>
 
         <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
           <Btn onClick={save} variant="primary" disabled={saving}>{saving ? "Saving..." : "Save keys"}</Btn>
@@ -3146,7 +3043,7 @@ function SettingsPage() {
             {Object.entries(status).map(([k,v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "4px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)" }}>
                 <span style={{ fontWeight: 500 }}>{k}</span>
-                <Badge color={v === "ok" ? "teal" : v.startsWith("not") ? "gray" : "red"}>{v}</Badge>
+                <Badge color={v === "ok" ? "teal" : v.startsWith("not") ? "gray" : v.includes("configured") ? "amber" : "red"}>{v}</Badge>
               </div>
             ))}
           </div>
@@ -3157,9 +3054,11 @@ function SettingsPage() {
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>AI Routing Priority</div>
         {[
           { model: "Groq Llama-3.3-70b", use: "Bulk analysis: intent, clusters, scoring, universe generation", cost: "Free", badge: "teal" },
-          { model: "Ollama/DeepSeek-R1:7b", use: "Offline fallback when Groq unavailable", cost: "Free (local)", badge: "teal" },
-          { model: "Claude Sonnet", use: "Quality gates only — pillar validation, content quality check", cost: "~$0.001/check (≤1000 tokens)", badge: "amber" },
-          { model: "Google Gemini Flash", use: "P9 clustering, P10 pillar identification", cost: "Free tier", badge: "teal" },
+          { model: "Ollama (local)", use: "Offline fallback when Groq unavailable", cost: "Free (local)", badge: "teal" },
+          { model: "Gemini Free Tier", use: "General AI: research, structure, verify, links, references", cost: "Free quota", badge: "teal" },
+          { model: "Gemini Paid Tier", use: "Content generation: Draft, Redevelop, Quality Loop", cost: "Pay-per-use", badge: "amber" },
+          { model: "Anthropic Claude", use: "Content polish pass after Gemini draft — E-E-A-T & readability", cost: "Pay-per-use", badge: "amber" },
+          { model: "OpenAI / ChatGPT", use: "Optional additional polish pass (if key configured)", cost: "Pay-per-use", badge: "amber" },
         ].map(r => (
           <div key={r.model} style={{ display: "flex", gap: 12, padding: "8px 0", borderBottom: "0.5px solid rgba(0,0,0,0.06)" }}>
             <div style={{ flex: 1 }}>
@@ -3172,7 +3071,190 @@ function SettingsPage() {
           </div>
         ))}
       </Card>
+
+      <OllamaServersSection />
     </div>
+  )
+}
+
+// ── Ollama Servers Management Component ─────────────────────────────────────
+function OllamaServersSection() {
+  const [servers, setServers] = useState([])
+  const [newServer, setNewServer] = useState({ name: "", url: "", model: "qwen2.5:3b", enabled: true, is_primary: false })
+  const [loading, setLoading] = useState(false)
+  const [msg, setMsg] = useState("")
+
+  const qclient = useQueryClient()
+
+  // Load servers
+  useEffect(() => {
+    fetchServers()
+  }, [])
+
+  const fetchServers = async () => {
+    try {
+      const r = await api.get("/api/settings/ollama-servers")
+      setServers(r || [])
+    } catch (e) {
+      console.error("Failed to fetch ollama servers:", e)
+    }
+  }
+
+  const addServer = async () => {
+    if (!newServer.name.trim() || !newServer.url.trim()) {
+      setMsg("Name and URL required")
+      return
+    }
+    setLoading(true)
+    setMsg("")
+    try {
+      const r = await api.post("/api/settings/ollama-servers", newServer)
+      if (r?.status === "added") {
+        setNewServer({ name: "", url: "", model: "qwen2.5:3b", enabled: true, is_primary: false })
+        await fetchServers()
+        setMsg("✓ Server added")
+        setTimeout(() => setMsg(""), 3000)
+      }
+    } catch (e) {
+      setMsg("Error adding server: " + e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const updateServer = async (id, updates) => {
+    try {
+      const r = await api.put(`/api/settings/ollama-servers/${id}`, updates)
+      if (r?.status === "updated") {
+        await fetchServers()
+      }
+    } catch (e) {
+      console.error("Failed to update server:", e)
+    }
+  }
+
+  const deleteServer = async (id) => {
+    if (!confirm("Delete this server?")) return
+    try {
+      const r = await api.delete(`/api/settings/ollama-servers/${id}`)
+      if (r?.status === "deleted") {
+        await fetchServers()
+      }
+    } catch (e) {
+      console.error("Failed to delete server:", e)
+    }
+  }
+
+  const testServer = async (id) => {
+    try {
+      const r = await api.post(`/api/settings/ollama-servers/${id}/test`)
+      const srv = servers.find(s => s.server_id === id)
+      if (srv) {
+        srv._test_result = r
+        setServers([...servers])
+      }
+    } catch (e) {
+      const srv = servers.find(s => s.server_id === id)
+      if (srv) {
+        srv._test_result = { status: "error", message: e.message }
+        setServers([...servers])
+      }
+    }
+  }
+
+  return (
+    <Card style={{ marginTop: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 16, color: T.purple }}>
+        🖥️ External Ollama Servers
+      </div>
+      <div style={{ fontSize: 11, color: T.gray, background: T.purpleLight, borderRadius: 6, padding: "8px 12px", marginBottom: 16 }}>
+        Add remote Ollama servers to distribute load or provide failover redundancy. Servers are tested before use.
+      </div>
+
+      {/* Add new server form */}
+      <div style={{ background: "rgba(255,255,255,0.5)", border: "0.5px dashed rgba(0,0,0,0.1)", borderRadius: 8, padding: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 10, color: T.darkGray }}>Add New Server</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+          <input
+            type="text"
+            placeholder="Server name (e.g., Main Ollama)"
+            value={newServer.name}
+            onChange={(e) => setNewServer({ ...newServer, name: e.target.value })}
+            style={{ padding: "7px 10px", borderRadius: 6, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 11, boxSizing: "border-box" }}
+          />
+          <input
+            type="text"
+            placeholder="URL (e.g., http://172.235.16.165:11434)"
+            value={newServer.url}
+            onChange={(e) => setNewServer({ ...newServer, url: e.target.value })}
+            style={{ padding: "7px 10px", borderRadius: 6, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 11, boxSizing: "border-box" }}
+          />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <input
+            type="text"
+            placeholder="Model (e.g., qwen2.5:3b)"
+            value={newServer.model}
+            onChange={(e) => setNewServer({ ...newServer, model: e.target.value })}
+            style={{ padding: "7px 10px", borderRadius: 6, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 11, boxSizing: "border-box" }}
+          />
+          <label style={{ display: "flex", alignItems: "center", fontSize: 11, gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={newServer.enabled}
+              onChange={(e) => setNewServer({ ...newServer, enabled: e.target.checked })}
+            />
+            Enabled
+          </label>
+          <label style={{ display: "flex", alignItems: "center", fontSize: 11, gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={newServer.is_primary}
+              onChange={(e) => setNewServer({ ...newServer, is_primary: e.target.checked })}
+            />
+            Set as Primary
+          </label>
+        </div>
+        <Btn onClick={addServer} variant="primary" disabled={loading} style={{ marginTop: 10 }}>
+          {loading ? "Adding..." : "Add Server"}
+        </Btn>
+        {msg && <div style={{ marginTop: 8, fontSize: 11, color: msg.startsWith("✓") ? T.teal : T.red }}>{msg}</div>}
+      </div>
+
+      {/* List of servers */}
+      {servers.length > 0 ? (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: T.darkGray }}>Configured Servers</div>
+          {servers.map((srv) => (
+            <div key={srv.server_id} style={{ background: "rgba(0,0,0,0.02)", border: "0.5px solid rgba(0,0,0,0.08)", borderRadius: 8, padding: 12, marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>
+                    {srv.name}
+                    {srv.is_primary && <Badge style={{ marginLeft: 8 }} color="teal">Primary</Badge>}
+                    {!srv.enabled && <Badge style={{ marginLeft: 8 }} color="gray">Disabled</Badge>}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.gray, marginTop: 3, fontFamily: "monospace" }}>{srv.url}</div>
+                  <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>Model: {srv.model}</div>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Btn size="sm" onClick={() => testServer(srv.server_id)}>Test</Btn>
+                  <Btn size="sm" onClick={() => deleteServer(srv.server_id)}>Delete</Btn>
+                </div>
+              </div>
+              {srv._test_result && (
+                <div style={{ background: srv._test_result.status === "ok" ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)", borderRadius: 6, padding: "6px 10px", fontSize: 11, marginTop: 8 }}>
+                  <Badge color={srv._test_result.status === "ok" ? "teal" : "red"}>{srv._test_result.status}</Badge>
+                  <div style={{ marginTop: 4 }}>{srv._test_result.message}</div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ fontSize: 11, color: T.gray, padding: "12px 0" }}>No external servers configured. Add one to get started.</div>
+      )}
+    </Card>
   )
 }
 
@@ -3357,7 +3439,7 @@ function QueueDashboard() {
       const { res: _mRes, parsed: m } = await fetchDebug(`${apiBase}/api/queue/metrics`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       const { res: _jRes, parsed: j } = await fetchDebug(`${apiBase}/api/queue/jobs`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       setMetrics(m)
-      setJobs(j)
+      setJobs(Array.isArray(j) ? j : j?.jobs || [])
     } catch (e) {
       console.error("QueueDashboard fetch error", e)
     } finally {
@@ -3367,7 +3449,7 @@ function QueueDashboard() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 3000)
+    const interval = setInterval(fetchData, 5000)
     return () => clearInterval(interval)
   }, [token])
 
@@ -3376,54 +3458,46 @@ function QueueDashboard() {
     fetchData()
   }
 
+  const statusColor = { running: T.teal, queued: T.amber, paused: T.purple, complete: T.teal, error: T.red, cancelled: T.gray }
+
   return (
-    <div className="p-6 space-y-6">
-      <h1 className="text-2xl font-bold">Queue Dashboard</h1>
-      {loading && <p>Loading...</p>}
+    <div>
+      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Queue Dashboard</div>
+      {loading && <LoadingSpinner/>}
 
       {metrics && (
-        <div className="grid grid-cols-6 gap-4">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10, marginBottom: 16 }}>
           {Object.entries(metrics).map(([k, v]) => (
-            <div key={k} className="p-4 rounded-2xl shadow bg-white">
-              <div className="text-sm text-gray-500">{k}</div>
-              <div className="text-xl font-bold">{v}</div>
-            </div>
+            <Card key={k} style={{ textAlign: "center", padding: 12 }}>
+              <div style={{ fontSize: 20, fontWeight: 700, color: T.purple }}>{v}</div>
+              <div style={{ fontSize: 10, color: T.gray, marginTop: 2, textTransform: "capitalize" }}>{k.replace(/_/g, " ")}</div>
+            </Card>
           ))}
         </div>
       )}
 
-      <div className="overflow-x-auto">
-        <table className="w-full border">
-          <thead>
-            <tr className="bg-gray-100">
-              <th className="p-2">ID</th>
-              <th>Status</th>
-              <th>Control</th>
-              <th>Step</th>
-              <th>Retries</th>
-              <th>Updated</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.map((job) => (
-              <tr key={job.id} className="border-t">
-                <td className="p-2">{job.id}</td>
-                <td>{job.status}</td>
-                <td>{job.control_state}</td>
-                <td>{job.last_completed_step}</td>
-                <td>{job.retry_count}/{job.max_retries}</td>
-                <td>{job.updated_at}</td>
-                <td className="space-x-2">
-                  <button onClick={() => action(job.id, "pause")} className="px-2 py-1 bg-yellow-200 rounded">Pause</button>
-                  <button onClick={() => action(job.id, "resume")} className="px-2 py-1 bg-green-200 rounded">Resume</button>
-                  <button onClick={() => action(job.id, "cancel")} className="px-2 py-1 bg-red-200 rounded">Cancel</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <Card>
+        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Jobs ({jobs.length})</div>
+        {jobs.length === 0 ? (
+          <div style={{ color: T.gray, fontSize: 12, padding: "12px 0" }}>No jobs in queue.</div>
+        ) : jobs.map((job) => (
+          <div key={job.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+            borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 12 }}>
+            <span style={{ fontFamily: "monospace", fontSize: 10, color: T.gray, minWidth: 60 }}>{String(job.id).slice(0,8)}</span>
+            <Badge color={statusColor[job.status] || "gray"}>{job.status}</Badge>
+            <span style={{ flex: 1, color: T.gray, fontSize: 11 }}>
+              Step: {job.last_completed_step || "—"} · Control: {job.control_state || "—"}
+            </span>
+            <span style={{ fontSize: 10, color: T.gray }}>{job.retry_count || 0}/{job.max_retries || 3} retries</span>
+            <span style={{ fontSize: 10, color: T.gray, minWidth: 80 }}>{(job.updated_at || "").slice(0, 16)}</span>
+            <div style={{ display: "flex", gap: 4 }}>
+              <Btn small onClick={() => action(job.id, "pause")}>Pause</Btn>
+              <Btn small variant="success" onClick={() => action(job.id, "resume")}>Resume</Btn>
+              <Btn small variant="danger" onClick={() => action(job.id, "cancel")}>Cancel</Btn>
+            </div>
+          </div>
+        ))}
+      </Card>
     </div>
   )
 }
@@ -3433,6 +3507,7 @@ function QueueDashboard() {
 function ErrorsDashboard() {
   const [errors, setErrors] = useState([])
   const [loading, setLoading] = useState(true)
+  const [expanded, setExpanded] = useState({})
   const { token } = useStore()
   const apiBase = API || ""
 
@@ -3450,34 +3525,52 @@ function ErrorsDashboard() {
 
   useEffect(() => {
     fetchErrors()
-    const interval = setInterval(fetchErrors, 5000)
+    const interval = setInterval(fetchErrors, 10000)
     return () => clearInterval(interval)
   }, [token])
 
+  const typeColor = { "ValueError": T.amber, "KeyError": T.amber, "TypeError": T.amber,
+    "RuntimeError": T.red, "500": T.red, "404": T.gray, "ConnectionError": T.red }
+
   return (
-    <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-bold">Error Log</h1>
-      {loading && <p>Loading...</p>}
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr>
-            <th className="p-2 border">Time</th>
-            <th className="p-2 border">Path</th>
-            <th className="p-2 border">Type</th>
-            <th className="p-2 border">Error</th>
-          </tr>
-        </thead>
-        <tbody>
-          {errors.map((e, idx) => (
-            <tr key={idx} className="border-t">
-              <td className="p-2 border">{new Date(e.timestamp).toLocaleString()}</td>
-              <td className="p-2 border">{e.path}</td>
-              <td className="p-2 border">{e.type}</td>
-              <td className="p-2 border" style={{ color: '#c53030' }}>{e.error}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 20, fontWeight: 600 }}>Error Log</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: T.gray }}>{errors.length} errors</span>
+          <Btn small onClick={fetchErrors}>Refresh</Btn>
+        </div>
+      </div>
+      {loading && <LoadingSpinner/>}
+
+      {errors.length === 0 ? (
+        <Card style={{ textAlign: "center", padding: 30 }}>
+          <div style={{ fontSize: 13, color: T.gray }}>No errors recorded. System is healthy.</div>
+        </Card>
+      ) : errors.map((e, idx) => (
+        <Card key={idx} style={{ marginBottom: 6, padding: "10px 14px", cursor: "pointer" }}
+              onClick={() => setExpanded(p => ({...p, [idx]: !p[idx]}))}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 10, color: T.gray, minWidth: 120, flexShrink: 0 }}>
+              {e.timestamp ? new Date(e.timestamp).toLocaleString() : "—"}
+            </span>
+            <Badge color={typeColor[e.type] || "amber"}>{e.type || "error"}</Badge>
+            <span style={{ flex: 1, fontSize: 12, fontWeight: 500, color: "#1a1a1a",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: expanded[idx] ? "normal" : "nowrap" }}>
+              {e.error}
+            </span>
+            <span style={{ fontSize: 10, color: T.gray, flexShrink: 0 }}>{e.path || ""}</span>
+            <span style={{ color: T.gray, fontSize: 11 }}>{expanded[idx] ? "▲" : "▼"}</span>
+          </div>
+          {expanded[idx] && e.traceback && (
+            <pre style={{ marginTop: 8, fontSize: 10, fontFamily: "monospace", background: "#f5f5f5",
+              borderRadius: 6, padding: "8px 10px", whiteSpace: "pre-wrap", wordBreak: "break-all",
+              color: T.red, maxHeight: 200, overflow: "auto" }}>
+              {e.traceback}
+            </pre>
+          )}
+        </Card>
+      ))}
     </div>
   )
 }
@@ -3520,13 +3613,15 @@ function App() {
   const pages = {
     dashboard:    <DashboardPage/>,
     "keywords":   <KeywordsUnifiedPage/>,
+    "kw2":        <KwPage projectId={activeProject}/>,
     strategy:     <StrategyPage projectId={activeProject} setPage={setPage}/>,
+    "strategy-hub": <StrategyIntelligenceHub projectId={activeProject} setPage={setPage}/>,
     content:      <ContentPage/>,
     blogs:        <BlogCalendarPage/>,
     graph:        <SystemGraphPage/>,
-    calendar:     <CalendarPage/>,
     "seo-checker":<SEOCheckerPage/>,
     quality:      <QualityDashboard/>,
+    prompts:      <PromptEditorPage/>,
     "rsd":        <RSDPage/>,
     "bug-fixer":  <BugFixerPage/>,
     "new-project":<NewProjectPage/>,
@@ -3539,17 +3634,33 @@ function App() {
     <>
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fafafa; color: #1a1a1a; }
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Plus Jakarta Sans', 'Helvetica Neue', sans-serif;
+          background: #F2F2F7;
+          color: #000000;
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+        }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+        @keyframes pageIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
         input, select, textarea, button { font-family: inherit; }
+        input:focus, textarea:focus, select:focus { outline: 2px solid rgba(0,122,255,0.5); outline-offset: 0; }
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 99px; }
+        ::-webkit-scrollbar-thumb { background: rgba(60,60,67,0.18); border-radius: 99px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(60,60,67,0.28); }
       `}</style>
       <div style={{ display: "flex", minHeight: "100vh" }}>
         <Sidebar page={currentPage} setPage={setPage}/>
-        <main style={{ flex: 1, padding: "24px 28px", overflowY: "auto", maxHeight: "100vh" }}>
+        <main style={{
+          flex: 1,
+          padding: "24px 28px",
+          overflowY: "auto",
+          maxHeight: "100vh",
+          background: "#F2F2F7",
+          animation: "pageIn 0.2s ease both",
+        }}>
           {pages[currentPage] || <DashboardPage/>}
         </main>
       </div>

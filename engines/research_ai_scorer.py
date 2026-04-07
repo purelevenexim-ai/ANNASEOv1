@@ -6,6 +6,7 @@ Respects business intent context.
 """
 
 import os
+import re
 import json
 import logging
 from typing import List, Dict, Any, Optional
@@ -34,9 +35,24 @@ class KeywordScore:
 class AIScorer:
     """Score keywords using Ollama DeepSeek in a single batch call."""
 
+    _instances: dict = {}  # keyed by (ollama_url, model)
+
+    @classmethod
+    def get_instance(cls, ollama_url: str = "http://172.235.16.165:11434",
+                     model: str = "deepseek-r1:7b",
+                     industry: str = "general") -> "AIScorer":
+        """Singleton per (url, model) pair — avoids re-creating per request."""
+        key = (ollama_url, model)
+        inst = cls._instances.get(key)
+        if inst is None:
+            inst = cls(ollama_url=ollama_url, model=model, industry=industry)
+            cls._instances[key] = inst
+        inst.industry = industry  # update industry per call (lightweight)
+        return inst
+
     def __init__(
         self,
-        ollama_url: str = "http://localhost:11434",
+        ollama_url: str = "http://172.235.16.165:11434",
         model: str = "deepseek-r1:7b",
         industry: str = "general",
     ):
@@ -52,7 +68,7 @@ class AIScorer:
         business_intent: str,
     ) -> List[KeywordScore]:
         """
-        Score multiple keywords in a single Ollama call.
+        Score multiple keywords in batches via Ollama.
 
         Args:
             keywords: List of {"keyword": str, "source": str, "source_score": int}
@@ -66,21 +82,25 @@ class AIScorer:
         if not keywords:
             return []
 
-        # Build prompt
-        prompt = self._build_scoring_prompt(
-            keywords, pillars, supporting_keywords, business_intent
-        )
+        all_scores = []
+        batch_size = 5  # Small batches — Ollama on CPU needs short prompts to stay under timeout
+        total = len(keywords)
 
-        # Call Ollama
-        response = self._call_ollama(prompt)
+        for batch_start in range(0, total, batch_size):
+            batch = keywords[batch_start:batch_start + batch_size]
+            try:
+                prompt = self._build_scoring_prompt(
+                    batch, pillars, supporting_keywords, business_intent
+                )
+                response = self._call_ollama(prompt)
+                scores = self._parse_ollama_response(response, batch)
+                all_scores.extend(scores)
+            except Exception as e:
+                log.warning(f"[AIScorer] Batch {batch_start//batch_size+1} failed: {e}")
+                continue  # skip failed batch, continue with next
 
-        # Parse response
-        scores = self._parse_ollama_response(response, keywords)
-
-        # Sort by total_score
-        scores.sort(key=lambda x: x.total_score, reverse=True)
-
-        return scores
+        all_scores.sort(key=lambda x: x.total_score, reverse=True)
+        return all_scores
 
     def _build_scoring_prompt(
         self,
@@ -96,7 +116,7 @@ class AIScorer:
         # Format keywords list
         keywords_list = "\n".join(
             f"  {i+1}. {kw['keyword']} (source: {kw['source']})"
-            for i, kw in enumerate(keywords[:50])  # Max 50 for performance
+            for i, kw in enumerate(keywords[:5])
         )
 
         prompt = f"""You are a keyword intelligence expert for {self.industry} industry.
@@ -137,41 +157,66 @@ RESPOND WITH ONLY VALID JSON ARRAY, NO OTHER TEXT:
         return prompt
 
     def _call_ollama(self, prompt: str) -> str:
-        """Call Ollama API."""
-        try:
-            import requests
-            response = requests.post(
-                f"{self.ollama_url}/api/generate",
-                json={
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "temperature": 0.3,
-                },
-                timeout=120,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("response", "")
-        except Exception as e:
-            log.error(f"[AIScorer] Ollama call failed: {e}")
-            raise
+        """Call Ollama API with retry."""
+        import requests
+        import time
+        last_err = None
+        for attempt in range(2):
+            try:
+                response = requests.post(
+                    f"{self.ollama_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "temperature": 0.3,
+                        "options": {"num_ctx": 2048, "num_predict": 1500},
+                    },
+                    timeout=120,  # Increased from 45s to 120s — batch processing can be slow
+                )
+                response.raise_for_status()
+                data = response.json()
+                result = data.get("response", "")
+                if not result:
+                    log.warning(f"[AIScorer] Empty response from Ollama")
+                return result
+            except Exception as e:
+                last_err = e
+                log.warning(f"[AIScorer] Ollama attempt {attempt+1} failed: {str(e)[:100]}")
+                if attempt == 0:
+                    time.sleep(2)
+        log.error(f"[AIScorer] Ollama failed after 2 attempts: {last_err}")
+        raise last_err
 
     def _parse_ollama_response(
         self,
         response: str,
         keywords: List[Dict[str, Any]],
     ) -> List[KeywordScore]:
-        """Parse JSON response from DeepSeek."""
+        """Parse JSON response from Ollama."""
         try:
+            # Strip DeepSeek/Qwen reasoning blocks before JSON extraction
+            response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+            response = re.sub(r'```json\n?|```', '', response).strip()  # Remove markdown code fences
+
             # Try to extract JSON from response (may have preamble)
             json_start = response.find("[")
             json_end = response.rfind("]") + 1
-            if json_start >= 0 and json_end > json_start:
-                json_str = response[json_start:json_end]
+            if json_start < 0 or json_end <= json_start:
+                log.warning(f"[AIScorer] No JSON array found in response. Response length: {len(response)}")
+                log.debug(f"[AIScorer] Response: {response[:300]}")
+                return []
+                
+            json_str = response[json_start:json_end]
+            try:
                 scores_data = json.loads(json_str)
-            else:
-                log.warning(f"[AIScorer] Could not find JSON in response")
+            except json.JSONDecodeError as je:
+                log.error(f"[AIScorer] JSON decode failed at position {je.pos}: {str(je)[:100]}")
+                log.debug(f"[AIScorer] JSON string: {json_str[:300]}")
+                return []
+
+            if not isinstance(scores_data, list):
+                log.warning(f"[AIScorer] Expected JSON array, got {type(scores_data).__name__}")
                 return []
 
             # Build lookup of source keywords
@@ -179,37 +224,44 @@ RESPOND WITH ONLY VALID JSON ARRAY, NO OTHER TEXT:
 
             # Convert to KeywordScore objects
             result = []
-            for item in scores_data:
-                kw_text = item.get("keyword", "").strip()
-                source_kw = source_lookup.get(kw_text)
-                if not source_kw:
+            for idx, item in enumerate(scores_data):
+                try:
+                    kw_text = item.get("keyword", "").strip()
+                    if not kw_text:
+                        log.debug(f"[AIScorer] Item {idx} has no keyword")
+                        continue
+                        
+                    source_kw = source_lookup.get(kw_text)
+                    if not source_kw:
+                        log.debug(f"[AIScorer] Keyword '{kw_text}' not in source batch")
+                        continue
+
+                    ai_score = int(item.get("ai_score", 0))
+                    source_score = source_kw.get("source_score", 0)
+                    total_score = source_score + ai_score
+
+                    score_obj = KeywordScore(
+                        keyword=kw_text,
+                        intent=item.get("intent", "informational"),
+                        volume=item.get("volume", "medium"),
+                        difficulty=item.get("difficulty", "medium"),
+                        source=source_kw.get("source", "unknown"),
+                        source_score=source_score,
+                        ai_score=ai_score,
+                        total_score=total_score,
+                        confidence=int(item.get("confidence", 0)),
+                        relevant_to_intent=item.get("relevant_to_intent", False),
+                        pillar_keyword=source_kw.get("pillar_keyword", ""),
+                        reasoning=item.get("reasoning", ""),
+                    )
+                    result.append(score_obj)
+                except Exception as item_err:
+                    log.debug(f"[AIScorer] Error parsing item {idx}: {item_err}")
                     continue
 
-                ai_score = int(item.get("ai_score", 0))
-                source_score = source_kw.get("source_score", 0)
-                total_score = source_score + ai_score
-
-                score_obj = KeywordScore(
-                    keyword=kw_text,
-                    intent=item.get("intent", "informational"),
-                    volume=item.get("volume", "medium"),
-                    difficulty=item.get("difficulty", "medium"),
-                    source=source_kw.get("source", "unknown"),
-                    source_score=source_score,
-                    ai_score=ai_score,
-                    total_score=total_score,
-                    confidence=int(item.get("confidence", 0)),
-                    relevant_to_intent=item.get("relevant_to_intent", False),
-                    pillar_keyword=source_kw.get("pillar_keyword", ""),
-                    reasoning=item.get("reasoning", ""),
-                )
-                result.append(score_obj)
-
+            log.info(f"[AIScorer] Parsed {len(result)}/{len(scores_data)} items from Ollama response")
             return result
 
-        except json.JSONDecodeError as e:
-            log.error(f"[AIScorer] JSON parse failed: {e}\nResponse: {response[:200]}")
-            return []
         except Exception as e:
             log.error(f"[AIScorer] Parse failed: {e}")
             return []

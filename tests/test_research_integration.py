@@ -395,11 +395,11 @@ class TestResearchMinimumKeywords:
         """Test that engine initializes with correct defaults."""
 
         engine = ResearchEngine(
-            ollama_url="http://localhost:11434",
+            ollama_url="http://172.235.16.165:11434",
             industry="spices"
         )
 
-        assert engine.ollama_url == "http://localhost:11434"
+        assert engine.ollama_url == "http://172.235.16.165:11434"
         assert engine.industry == "spices"
 
     def test_scorer_lazy_loading(self):

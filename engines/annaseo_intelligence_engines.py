@@ -48,9 +48,11 @@ from dataclasses import dataclass, field
 import requests as _req
 
 log = logging.getLogger("annaseo.intelligence")
-GEMINI_URL   = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+def _GEMINI_URL() -> str:
+    model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://172.235.16.165:11434")
 DB_PATH      = Path(os.getenv("ANNASEO_DB", "./annaseo.db"))
 
 
@@ -268,7 +270,7 @@ Format: JSON with keys title, body, meta_title, meta_desc, hreflang (e.g. "ml" f
                           "{\"title\":\"...\",\"body\":\"...\",\"meta_title\":\"...\",\"meta_desc\":\"...\",\"hreflang\":\"\"}"
                       ),
                       "stream":False,"options":{"num_predict":2000}},
-                timeout=120)
+                timeout=30)
             if r.ok:
                 text = r.json().get("response","").strip()
                 m = re.search(r'\{.*\}', text, re.DOTALL)
@@ -484,7 +486,7 @@ class VoiceSearchOptimiser:
         if not key:
             return f"{keyword.capitalize()} is a topic with multiple important aspects. Here is what you need to know."
         try:
-            r = _req.post(f"{GEMINI_URL}?key={key}",
+            r = _req.post(f"{_GEMINI_URL()}?key={key}",
                 json={"contents":[{"parts":[{"text":
                     f"Write a spoken answer for Google Assistant to the query: '{keyword}'\n"
                     f"Based on this article:\n{article_body[:500]}\n\n"

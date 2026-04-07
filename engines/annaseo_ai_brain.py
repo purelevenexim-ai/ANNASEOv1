@@ -29,19 +29,28 @@ from dotenv import load_dotenv
 load_dotenv()
 log = logging.getLogger("annaseo.brain")
 
+# Import central AI config & router
+try:
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', 'core'))
+    from ai_config import AICfg, AIRouter
+    _central_ai = True
+except ImportError:
+    _central_ai = False
+    log.warning("[Brain] Central AIRouter not available — using inline fallback")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
+# CONFIG — mirrors central config, kept for backward compatibility
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BrainCfg:
     GROQ_KEY    = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL  = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile")
-    OLLAMA_URL  = os.getenv("OLLAMA_URL",   "http://localhost:11434")
+    GROQ_MODEL  = os.getenv("GROQ_MODEL",   "llama-3.1-8b-instant")
+    OLLAMA_URL  = os.getenv("OLLAMA_URL",   "http://172.235.16.165:11434")
     OLLAMA_MODEL= os.getenv("OLLAMA_MODEL", "deepseek-r1:7b")
     CLAUDE_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL= os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-    # Max tokens for Claude (keep cheap — verification only)
     CLAUDE_MAX_TOKENS = 1000
 
 
@@ -150,17 +159,15 @@ class AnnaBrain:
             return ""
 
         try:
-            r = req.post(f"{BrainCfg.OLLAMA_URL}/api/chat", json={
+            combined = f"{system}\n\n{prompt}" if system else prompt
+            r = req.post(f"{BrainCfg.OLLAMA_URL}/api/generate", json={
                 "model": BrainCfg.OLLAMA_MODEL, "stream": False,
                 "options": {"temperature": temperature},
-                "messages": [{"role":"system","content":system},
-                             {"role":"user","content":prompt}]
-            }, timeout=120)
+                "prompt": combined
+            }, timeout=30)
             r.raise_for_status()
             data = r.json()
-            text = _extract_ollama_text(data)
-            if not text:
-                text = (data.get("response") or data.get("text") or "").strip()
+            text = data.get("response", "").strip()
             return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"[Brain] Ollama error: {e}")
@@ -190,11 +197,14 @@ class AnnaBrain:
     def think(self, prompt: str, system: str = "You are an expert SEO strategist.",
                temperature: float = 0.2, use_claude: bool = False) -> Tuple[str, int]:
         """
-        Main think() method. Routes to best available AI.
+        Main think() method. Routes to best available AI via central AIRouter.
         use_claude=True for quality gates (max 1000 tokens, higher accuracy).
         """
         if use_claude and BrainCfg.CLAUDE_KEY:
             return self._call_claude(prompt, system)
+        if _central_ai:
+            text, tokens = AIRouter.call_with_tokens(prompt, system, temperature)
+            return text, tokens
         return self._call_groq(prompt, system, temperature)
 
     def parse_json(self, text: str) -> Any:

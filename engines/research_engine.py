@@ -36,7 +36,7 @@ class ResearchEngine:
 
     def __init__(
         self,
-        ollama_url: str = "http://localhost:11434",
+        ollama_url: str = "http://172.235.16.165:11434",
         industry: str = "general",
     ):
         self.ollama_url = ollama_url
@@ -131,18 +131,23 @@ class ResearchEngine:
             for s in scored
         ]
 
-        # Apply fallback/emergency generation ONLY when there are no scored results
-        # This prevents generated fallback keywords from outranking real user/google results.
-        if len(results) == 0:
-            log.warning(f"[Research] No scored results, applying fallback to meet minimum guarantee")
-            # First try structured fallback using pillars
-            fallback_results = self._generate_fallback_keywords(pillars, supporting_kws, business_intent)
-            results.extend(fallback_results)
+        # Apply fallback/emergency generation ONLY when there are too few scored results
+        target_min = max(100, len(pillars) * 30) if pillars else 100
+        if len(results) < target_min:
+            log.info(f"[Research] {len(results)} scored < target {target_min}, generating long-tail fallback")
+            fallback_results = self._generate_fallback_keywords(
+                pillars, supporting_kws, business_intent,
+                target_count=target_min - len(results) + 50,
+            )
+            existing = {r.keyword.lower() for r in results}
+            results.extend(r for r in fallback_results if r.keyword.lower() not in existing)
 
-            # If still below 20 (e.g., no pillars), generate emergency keywords
-            if len(results) < 20:
-                log.error(f"[Research] Still below 20 after fallback, generating emergency keywords")
-                results.extend(self._generate_emergency_keywords(business_intent, target_count=20 - len(results)))
+            # If still below 30 (e.g., no pillars), generate emergency keywords
+            if len(results) < 30:
+                log.error(f"[Research] Still below 30 after fallback, generating emergency keywords")
+                existing2 = {r.keyword.lower() for r in results}
+                em = self._generate_emergency_keywords(business_intent, target_count=100)
+                results.extend(r for r in em if r.keyword.lower() not in existing2)
 
         # Deduplicate final results (case-insensitive)
         final_results = {}
@@ -253,26 +258,58 @@ class ResearchEngine:
         return result
 
     def _fetch_google_suggestions(self, pillars: List[str], language: str) -> List[Dict[str, Any]]:
-        """Fetch Google Autosuggest for each pillar with score +5."""
+        """Fetch Google Autosuggest with multiple intent-driven prefix patterns per pillar.
+
+        Instead of querying just the bare pillar name (returns 5-10 suggestions),
+        we query 15+ prefix patterns per pillar generating 50-150 unique suggestions.
+        """
+        import time
         result = []
+
+        # Prefix templates — {p} is replaced with pillar keyword
+        PREFIXES = [
+            # bare (already returns 10ish, but do it first)
+            "{p}",
+            # question-based (long tail goldmine)
+            "what is {p}", "how to use {p}", "why use {p}",
+            "where to buy {p}", "how to buy {p}",
+            # intent-based
+            "buy {p}", "best {p}", "organic {p}", "pure {p}",
+            "cheap {p}", "{p} price", "{p} online",
+            # commercial
+            "{p} wholesale", "{p} bulk", "{p} supplier",
+            "{p} near me", "{p} in india",
+            # informational
+            "{p} benefits", "{p} uses", "{p} powder",
+            "{p} vs", "{p} review", "{p} side effects",
+        ]
+
         try:
             from engines.annaseo_p2_enhanced import P2_PhraseSuggestor
             suggester = P2_PhraseSuggestor(lang=language.lower()[:2], region="in")
 
             for pillar in pillars:
-                try:
-                    suggestions = suggester.expand_phrase(pillar, deep=False)
-                    for s in suggestions:
-                        if s and s.strip():
-                            result.append({
-                                "keyword": s.strip(),
-                                "source": "google",
-                                "source_score": 5,
-                                "pillar_keyword": pillar,
-                            })
-                except Exception as e:
-                    log.debug(f"[Research] Google fetch failed for '{pillar}': {e}")
-                    continue
+                seen_for_pillar: set = set()
+
+                for tmpl in PREFIXES:
+                    query = tmpl.replace("{p}", pillar)
+                    try:
+                        suggestions = suggester._fetch_suggestions(query)
+                        for s in suggestions:
+                            s = s.strip()
+                            if s and s.lower() not in seen_for_pillar:
+                                seen_for_pillar.add(s.lower())
+                                result.append({
+                                    "keyword": s,
+                                    "source": "google",
+                                    "source_score": 5,
+                                    "pillar_keyword": pillar,
+                                })
+                    except Exception:
+                        pass
+                    time.sleep(0.15)  # polite rate limit
+
+                log.info(f"[Research] Google expanded '{pillar}': {len(seen_for_pillar)} suggestions")
 
         except Exception as e:
             log.warning(f"[Research] P2_PhraseSuggestor unavailable: {e}")
@@ -293,10 +330,9 @@ class ResearchEngine:
 
         return list(seen.values())
 
-    def _generate_emergency_keywords(self, business_intent: str, target_count: int = 20) -> List[ResearchResult]:
+    def _generate_emergency_keywords(self, business_intent: str, target_count: int = 100) -> List[ResearchResult]:
         """
         Generate emergency keywords when NO pillars or sources available.
-        Guarantees minimum keywords for the given business intent.
         """
         emergency_keywords = {
             "ecommerce": [
@@ -306,13 +342,16 @@ class ResearchEngine:
                 "customer reviews", "return policy", "warranty coverage",
                 "discount offer", "seasonal sale", "wholesale price",
                 "bulk buy", "compare products", "shop online", "save money",
+                "best price guarantee", "fast delivery", "express shipping",
+                "original product", "certified quality", "genuine seller",
             ],
             "content_blog": [
                 "how to guide", "tutorial video", "step by step", "tips and tricks",
                 "expert advice", "best practices", "frequently asked", "complete guide",
                 "latest news", "trending topics", "knowledge base", "learning resources",
                 "blog article", "industry insights", "case studies", "research findings",
-                "informative content", "educational material", "practical examples", "detailed explanation",
+                "informative content", "educational material", "practical examples",
+                "beginners guide", "advanced tutorial", "expert tips",
             ],
             "supplier": [
                 "wholesale supplier", "bulk pricing", "minimum order quantity",
@@ -320,7 +359,7 @@ class ResearchEngine:
                 "food grade certified", "international shipping", "competitive pricing",
                 "fast delivery", "reliable supplier", "bulk discount pricing",
                 "quality assurance", "certifications available", "factory direct",
-                "custom orders", "batch orders", "sample available", "long term contract",
+                "custom orders", "batch orders", "sample available",
             ],
             "mixed": [
                 "buy online", "how to", "best", "reviews", "price", "quality",
@@ -341,7 +380,7 @@ class ResearchEngine:
                     intent="mixed",
                     volume="medium",
                     difficulty="medium",
-                    total_score=20 + (i % 10),  # Score 20-29
+                    total_score=18 + (i % 7),  # Score 18-24 (always below real sources)
                     confidence=35,
                     pillar_keyword="emergency_fallback",
                     reasoning="Emergency keyword generation when sources unavailable"
@@ -356,94 +395,114 @@ class ResearchEngine:
         pillars: List[str],
         supporting_kws: Dict[str, List[str]],
         business_intent: str,
+        target_count: int = 100,
     ) -> List[ResearchResult]:
         """
-        Generate fallback keywords if research returns too few.
-        GUARANTEES minimum 20 keywords using modifier combinations.
-
-        Strategy: For each pillar, combine with intent-specific modifiers to ensure
-        we always return at least 20 keywords even if all other sources fail.
-        Falls back to emergency generation if pillars are empty.
+        Generate long-tail fallback keywords per pillar when primary sources return few results.
+        Uses intent-specific templates covering short, medium, and long-tail patterns.
+        Scores are BELOW real source scores (18-28) to keep ranking hierarchy correct.
         """
-        # If no pillars, delegate to emergency keywords
         if not pillars:
-            log.info(f"[Research] No pillars for fallback, using emergency keywords")
-            return self._generate_emergency_keywords(business_intent, target_count=20)
+            return self._generate_emergency_keywords(business_intent, target_count=target_count)
 
-        modifiers = {
-            "ecommerce": [
-                "buy", "price", "cost", "cheap", "bulk", "wholesale", "sale",
-                "discount", "online", "best", "reviews", "for sale", "vs",
-                "alternative", "where to buy", "how much", "quality", "authentic",
-                "organic", "natural", "pure", "benefits", "uses", "compare"
+        # Rich template sets covering short + long tail
+        TEMPLATES = {
+            "transactional": [
+                "buy {p}", "buy {p} online", "buy {p} wholesale",
+                "{p} price", "{p} price in india", "best {p} price",
+                "{p} online", "shop {p} online", "order {p} online",
+                "{p} for sale", "{p} supplier", "{p} manufacturer",
+                "cheap {p}", "affordable {p}", "{p} discount",
+                "{p} bulk", "{p} bulk buy", "{p} wholesale price",
+                "{p} kg price", "{p} cost", "{p} rate",
+                "best {p} brand", "top {p} brand", "{p} quality",
+                "{p} near me", "{p} shop near me", "buy {p} near me",
             ],
-            "content_blog": [
-                "how to", "guide", "tutorial", "tips", "benefits", "what is",
-                "why", "uses", "vs", "comparison", "best", "top", "expert",
-                "meaning", "definition", "history", "types", "recipes",
-                "health benefits", "side effects", "information", "guide"
+            "informational": [
+                "what is {p}", "what is {p} used for", "how to use {p}",
+                "{p} benefits", "{p} health benefits", "{p} benefits for skin",
+                "{p} uses", "{p} uses in cooking", "{p} nutritional value",
+                "how to store {p}", "how to grow {p}",
+                "{p} for health", "{p} for weight loss", "{p} for digestion",
+                "{p} side effects", "{p} dangers", "is {p} safe",
+                "best way to use {p}", "types of {p}", "grades of {p}",
+                "{p} vs other spices", "difference between {p} types",
+                "{p} properties", "{p} history", "{p} origin",
+                "{p} nutritional facts", "{p} composition",
             ],
-            "supplier": [
-                "bulk", "wholesale", "manufacturer", "supplier", "importer",
-                "specifications", "pricing", "MOQ", "certifications", "quality",
-                "industrial", "food grade", "organic", "fair trade", "export",
-                "direct", "cost", "minimum order", "delivery", "standard"
+            "commercial": [
+                "best {p}", "top {p}", "best organic {p}",
+                "{p} review", "{p} reviews", "best {p} brand in india",
+                "{p} quality comparison", "which {p} is best",
+                "{p} vs {p} alternatives", "premium {p}",
+                "certified {p}", "organic {p} certified",
+                "pure {p}", "natural {p}", "authentic {p}",
+                "{p} recommendations", "expert recommended {p}",
+                "{p} for home use", "{p} for restaurant use",
             ],
-            "mixed": [
-                "buy", "price", "how to", "benefits", "what is", "reviews",
-                "vs", "best", "online", "bulk", "organic", "quality",
-                "guide", "tips", "information", "cost", "comparison",
-                "alternatives", "uses", "types", "meaning", "history"
-            ]
+            "local": [
+                "{p} kerala", "{p} from kerala", "kerala {p}",
+                "{p} india", "{p} in india", "indian {p}",
+                "{p} wayanad", "{p} malabar", "{p} coorg",
+                "buy {p} from india", "{p} export india",
+                "{p} indian supplier", "{p} india price",
+                "{p} south india", "{p} north india",
+            ],
+            "wholesale": [
+                "{p} wholesale", "{p} wholesale price", "{p} bulk wholesale",
+                "{p} bulk supplier", "{p} bulk order",
+                "{p} importer", "{p} exporter", "{p} distributor",
+                "{p} B2B", "{p} business buyer", "{p} trade",
+                "minimum order {p}", "{p} MOQ", "{p} sample order",
+                "{p} food grade", "{p} export quality", "{p} ISO certified",
+                "{p} organic certified", "{p} fair trade",
+            ],
         }
 
-        mod_list = modifiers.get(business_intent, modifiers["mixed"])
+        # Select template sets based on intent
+        if business_intent == "ecommerce":
+            sets = ["transactional", "commercial", "informational", "local"]
+        elif business_intent == "supplier":
+            sets = ["wholesale", "transactional", "commercial", "local"]
+        elif business_intent == "content_blog":
+            sets = ["informational", "commercial", "transactional"]
+        else:
+            sets = ["transactional", "informational", "commercial", "local", "wholesale"]
+
         results = []
+        seen: set = set()
 
-        # Generate combinations of pillar + modifier
         for pillar in pillars:
-            for i, modifier in enumerate(mod_list):
-                keyword_text = f"{pillar} {modifier}"
-                results.append(
-                    ResearchResult(
-                        keyword=keyword_text,
-                        source="fallback_generation",
-                        intent="mixed",  # Fallback doesn't classify intent
-                        volume="medium",
-                        difficulty="medium",
-                        total_score=30 + (i % 15),  # Score 30-44
-                        confidence=50,  # Low confidence for generated keywords
-                        pillar_keyword=pillar,
-                        reasoning="Fallback generation when primary sources empty"
-                    )
-                )
+            p_count = 0
+            per_pillar_target = max(target_count // max(len(pillars), 1), 50)
 
-                # Stop when we have enough
-                if len(results) >= 20:
-                    log.info(f"[Research] Fallback generated {len(results)} keywords")
-                    return results[:20]
-
-        # If we still don't have 20, add reverse combinations (modifier pillar)
-        if len(results) < 20:
-            for modifier in mod_list[:20 - len(results)]:
-                for pillar in pillars:
-                    keyword_text = f"{modifier} {pillar}"
-                    results.append(
-                        ResearchResult(
+            for set_name in sets:
+                for tmpl in TEMPLATES.get(set_name, []):
+                    keyword_text = tmpl.replace("{p}", pillar)
+                    kl = keyword_text.lower()
+                    if kl not in seen:
+                        seen.add(kl)
+                        results.append(ResearchResult(
                             keyword=keyword_text,
                             source="fallback_generation",
-                            intent="mixed",
+                            intent="transactional" if set_name in ("transactional", "wholesale") else
+                                   "informational" if set_name == "informational" else "commercial",
                             volume="medium",
                             difficulty="medium",
-                            total_score=25,
-                            confidence=40,
+                            total_score=20 + (p_count % 9),  # 20-28, always below real sources
+                            confidence=45,
                             pillar_keyword=pillar,
-                            reasoning="Fallback generation (reverse order)"
-                        )
-                    )
-                    if len(results) >= 20:
-                        log.info(f"[Research] Fallback generated {len(results)} keywords (reverse)")
-                        return results[:20]
+                            reasoning=f"Template fallback ({set_name})"
+                        ))
+                        p_count += 1
+                        if p_count >= per_pillar_target:
+                            break
+                if p_count >= per_pillar_target:
+                    break
+            # Hard cap: stop generating once we reach overall target
+            if len(results) >= target_count:
+                break
 
-        log.warning(f"[Research] Fallback only generated {len(results)} keywords (target: 20)")
+        log.info(f"[Research] Fallback generated {len(results)} keywords for {len(pillars)} pillar(s)")
         return results
+

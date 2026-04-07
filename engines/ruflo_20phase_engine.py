@@ -80,13 +80,15 @@ class Cfg:
     ARTICLE_DIR     = BASE_DIR / "articles"
 
     # AI
-    OLLAMA_URL      = os.getenv("OLLAMA_URL",     "http://localhost:11434")
+    OLLAMA_URL      = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
     OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
     OLLAMA_EMBED    = os.getenv("OLLAMA_EMBED",   "nomic-embed-text")
-    GEMINI_KEY      = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_KEY      = os.getenv("GEMINI_API_KEY", "")          # free tier — general AI (P1-P14)
+    GEMINI_PAID_KEY = os.getenv("GEMINI_PAID_API_KEY", "")    # paid tier — content generation
     GEMINI_MODEL    = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
     GEMINI_RATE     = float(os.getenv("GEMINI_RATE", "4.0"))
     ANTHROPIC_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_PAID_KEY = os.getenv("ANTHROPIC_PAID_API_KEY", "")  # paid tier
     CLAUDE_MODEL    = os.getenv("CLAUDE_MODEL",   "claude-sonnet-4-6")
     GROQ_KEY        = os.getenv("GROQ_API_KEY",   "")
     GROQ_MODEL      = os.getenv("GROQ_MODEL",     "llama-3.3-70b-versatile")
@@ -125,16 +127,18 @@ class Cfg:
     @classmethod
     def refresh_from_env(cls):
         """Reload runtime API key and model configs from environment variables."""
-        cls.OLLAMA_URL    = os.getenv("OLLAMA_URL",   cls.OLLAMA_URL)
-        cls.OLLAMA_MODEL  = os.getenv("OLLAMA_MODEL", cls.OLLAMA_MODEL)
-        cls.OLLAMA_EMBED  = os.getenv("OLLAMA_EMBED", cls.OLLAMA_EMBED)
-        cls.GEMINI_KEY    = os.getenv("GEMINI_API_KEY",  cls.GEMINI_KEY)
-        cls.GEMINI_MODEL  = os.getenv("GEMINI_MODEL",    cls.GEMINI_MODEL)
-        cls.GEMINI_RATE   = float(os.getenv("GEMINI_RATE", str(cls.GEMINI_RATE)))
-        cls.ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", cls.ANTHROPIC_KEY)
-        cls.CLAUDE_MODEL  = os.getenv("CLAUDE_MODEL", cls.CLAUDE_MODEL)
-        cls.GROQ_KEY      = os.getenv("GROQ_API_KEY",   cls.GROQ_KEY)
-        cls.GROQ_MODEL    = os.getenv("GROQ_MODEL",     cls.GROQ_MODEL)
+        cls.OLLAMA_URL       = os.getenv("OLLAMA_URL",           cls.OLLAMA_URL)
+        cls.OLLAMA_MODEL     = os.getenv("OLLAMA_MODEL",         cls.OLLAMA_MODEL)
+        cls.OLLAMA_EMBED     = os.getenv("OLLAMA_EMBED",         cls.OLLAMA_EMBED)
+        cls.GEMINI_KEY       = os.getenv("GEMINI_API_KEY",       cls.GEMINI_KEY)
+        cls.GEMINI_PAID_KEY  = os.getenv("GEMINI_PAID_API_KEY",  cls.GEMINI_PAID_KEY)
+        cls.GEMINI_MODEL     = os.getenv("GEMINI_MODEL",         cls.GEMINI_MODEL)
+        cls.GEMINI_RATE      = float(os.getenv("GEMINI_RATE",    str(cls.GEMINI_RATE)))
+        cls.ANTHROPIC_KEY    = os.getenv("ANTHROPIC_API_KEY",    cls.ANTHROPIC_KEY)
+        cls.ANTHROPIC_PAID_KEY = os.getenv("ANTHROPIC_PAID_API_KEY", cls.ANTHROPIC_PAID_KEY)
+        cls.CLAUDE_MODEL     = os.getenv("CLAUDE_MODEL",         cls.CLAUDE_MODEL)
+        cls.GROQ_KEY         = os.getenv("GROQ_API_KEY",         cls.GROQ_KEY)
+        cls.GROQ_MODEL       = os.getenv("GROQ_MODEL",           cls.GROQ_MODEL)
 
     @staticmethod
     def _extract_ollama_text(data: Any) -> str:
@@ -444,18 +448,15 @@ class AI:
     def deepseek(prompt: str, system: str = "You are an SEO expert.",
                   temperature: float = 0.1) -> str:
         try:
-            r = _req.post(f"{Cfg.OLLAMA_URL}/api/chat", json={
+            combined = f"{system}\n\n{prompt}" if system else prompt
+            r = _req.post(f"{Cfg.OLLAMA_URL}/api/generate", json={
                 "model": Cfg.OLLAMA_MODEL, "stream": False,
-                "options": {"temperature": temperature},
-                "messages": [{"role":"system","content":system},
-                             {"role":"user","content":prompt}]
-            }, timeout=5)
+                "options": {"temperature": temperature, "num_ctx": 2048},
+                "prompt": combined
+            }, timeout=120)
             r.raise_for_status()
             data = r.json()
-            t = Cfg._extract_ollama_text(data)
-            if not t:
-                # fallback to older field names for compatibility
-                t = (data.get("response") or data.get("text") or "").strip()
+            t = data.get("response", "").strip()
             return re.sub(r"<think>.*?</think>","",t,flags=re.DOTALL).strip()
         except Exception as e:
             log.warning(f"[AI] DeepSeek: {e}")
@@ -622,6 +623,8 @@ class Seed:
     language:   str = "english"
     region:     str = "India"
     product_url:str = ""
+    business_locations: List[str] = field(default_factory=list)
+    target_locations:   List[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @staticmethod
@@ -634,13 +637,17 @@ class P1_SeedInput:
     phase = "P1"
 
     def run(self, keyword: str, language: str = "english",
-             region: str = "India", product_url: str = "") -> Seed:
+             region: str = "India", product_url: str = "",
+             business_locations: List[str] = None,
+             target_locations: List[str] = None) -> Seed:
         seed = Seed(
             id=Seed.make_id(keyword), keyword=keyword.strip().lower(),
-            language=language, region=region, product_url=product_url
+            language=language, region=region, product_url=product_url,
+            business_locations=business_locations or [],
+            target_locations=target_locations or [],
         )
         Cache.set(f"seed:{seed.id}", asdict(seed))
-        log.info(f"[P1] Seed stored: '{seed.keyword}' (id={seed.id})")
+        log.info(f"[P1] Seed stored: '{seed.keyword}' (id={seed.id}) biz_loc={seed.business_locations} target_loc={seed.target_locations}")
         return seed
 
 
@@ -684,8 +691,23 @@ class P2_KeywordExpansion:
 
         # Non-network expansions (questions, permutations, intent-driven)
         all_kws.extend(self._question_variants(seed.keyword))
-        all_kws.extend(self._permutations(seed.keyword))
+        all_kws.extend(self._permutations(seed.keyword, seed))
         all_kws.extend(self._intent_expansion(seed.keyword))
+
+        # ── Location-aware keyword expansion ──────────────────────────────
+        loc_kws = self._location_keyword_expansion(seed)
+        all_kws.extend(loc_kws)
+        # Location-specific Google Suggest queries (top 3 target + all business)
+        _loc_targets = (seed.target_locations or [])[:3] + (seed.business_locations or [])
+        _loc_targets = list(dict.fromkeys(_loc_targets))[:5]  # dedup, cap at 5
+        for loc in _loc_targets:
+            loc_l = loc.lower().strip()
+            if not loc_l:
+                continue
+            loc_suggest = self._google_autosuggest(f"{seed.keyword} in {loc_l}")
+            all_kws.extend(loc_suggest)
+            loc_suggest2 = self._google_autosuggest(f"{seed.keyword} {loc_l}")
+            all_kws.extend(loc_suggest2)
 
         # Recursive expansion from top network results only (limited for performance)
         recursive_seeds = list(dict.fromkeys(network_outputs))[:20]
@@ -734,7 +756,7 @@ class P2_KeywordExpansion:
             pass
 
         # Hard cap for quality and pipeline stability
-        MAX_P2 = 200
+        MAX_P2 = 500
         if len(filtered) > MAX_P2:
             log.warning(f"[P2] Trimming {len(filtered)} → {MAX_P2} keywords")
             filtered = filtered[:MAX_P2]
@@ -812,7 +834,7 @@ class P2_KeywordExpansion:
         suffixes = [""] + list("abcdefghijklmnopqrstuvwxyz") + [
             "for", "with", "without", "vs", "benefits", "side effects",
             "uses", "recipe", "buy", "organic", "price", "best",
-            "online", "wholesale", "bulk", "near me", "india"
+            "online", "wholesale", "bulk", "near me",
         ]
         for sfx in suffixes:   # expanded for broader coverage
             if errors >= 4:
@@ -965,9 +987,9 @@ class P2_KeywordExpansion:
                     "what does","where to buy","how do i","should i take"]
         return [f"{p} {kw}" for p in prefixes]
 
-    def _permutations(self, kw: str) -> List[str]:
+    def _permutations(self, kw: str, seed: Seed = None) -> List[str]:
         prefixes = ["buy", "best", "organic", "pure", "wholesale", "bulk", "export quality"]
-        suffixes = ["online", "price", "price in india", "near me", "for sale", "shipping"]
+        suffixes = ["online", "price", "near me", "for sale", "shipping"]
 
         results = []
         for p in prefixes:
@@ -977,6 +999,33 @@ class P2_KeywordExpansion:
         for p in prefixes:
             for s in suffixes:
                 results.append(f"{p} {kw} {s}")
+
+        # ── Location-aware permutations ──────────────────────────────────
+        if seed:
+            # Business locations — origin/trust keywords
+            for loc in (seed.business_locations or []):
+                loc_l = loc.lower().strip()
+                if not loc_l:
+                    continue
+                results.append(f"{loc_l} {kw}")
+                results.append(f"{kw} from {loc_l}")
+                results.append(f"authentic {loc_l} {kw}")
+                results.append(f"buy {kw} from {loc_l} online")
+                results.append(f"{loc_l} {kw} online")
+                results.append(f"original {loc_l} {kw}")
+            # Target locations — geo-targeted keywords (top 3 to prevent explosion)
+            for loc in (seed.target_locations or [])[:3]:
+                loc_l = loc.lower().strip()
+                if not loc_l:
+                    continue
+                results.append(f"{kw} in {loc_l}")
+                results.append(f"best {kw} {loc_l}")
+                results.append(f"{kw} {loc_l} online")
+                results.append(f"buy {kw} in {loc_l}")
+                results.append(f"{kw} delivery {loc_l}")
+                results.append(f"{kw} price in {loc_l}")
+                results.append(f"where to buy {kw} in {loc_l}")
+                results.append(f"order {kw} {loc_l} online")
 
         return list(dict.fromkeys([r.strip().lower() for r in results if r.strip()]))
 
@@ -988,6 +1037,82 @@ class P2_KeywordExpansion:
         results = [f"{kw} {t}" for t in topics]
         results += [f"{t} {kw}" for t in ["how to", "what is", "where to buy", "why", "is {kw}"]]  # careful
         return list(dict.fromkeys([r.strip().lower() for r in results if r.strip()]))
+
+    def _location_keyword_expansion(self, seed: Seed) -> List[str]:
+        """Generate location-specific keywords using AI + templates."""
+        biz_locs = seed.business_locations or []
+        tgt_locs = seed.target_locations or []
+        if not biz_locs and not tgt_locs:
+            return []
+
+        kw = seed.keyword
+        results = []
+
+        # Template-based location keywords (fast, no AI needed)
+        for loc in biz_locs:
+            loc_l = loc.lower().strip()
+            results.extend([
+                f"{loc_l} {kw}", f"{kw} from {loc_l}",
+                f"where to purchase {loc_l} {kw} online",
+                f"authentic {loc_l} {kw} buy online",
+                f"best {loc_l} {kw} brands",
+                f"{loc_l} {kw} export quality",
+                f"buy {loc_l} {kw} direct",
+            ])
+
+        for loc in tgt_locs[:5]:
+            loc_l = loc.lower().strip()
+            results.extend([
+                f"best {kw} available in {loc_l}",
+                f"{kw} shop in {loc_l}",
+                f"{kw} home delivery {loc_l}",
+                f"order {kw} online {loc_l}",
+                f"top {kw} brands in {loc_l}",
+                f"cheap {kw} in {loc_l}",
+                f"{kw} wholesale {loc_l}",
+            ])
+
+        # Cross-location: business → target
+        for b in biz_locs[:2]:
+            b_l = b.lower().strip()
+            for t in tgt_locs[:3]:
+                t_l = t.lower().strip()
+                if b_l != t_l:
+                    results.append(f"buy {b_l} {kw} in {t_l}")
+                    results.append(f"{b_l} {kw} delivery to {t_l}")
+
+        # AI-based location expansion (if we have Ollama)
+        try:
+            biz_txt = ", ".join(biz_locs[:3]) or "not specified"
+            tgt_txt = ", ".join(tgt_locs[:5]) or "not specified"
+            prompt = f"""Seed keyword: {kw}
+Business locations (where business operates): {biz_txt}
+Target locations (where customers are): {tgt_txt}
+
+Generate 20 location-specific long-tail SEO keywords. Include:
+- "[product] in [city]" variants for target locations
+- "[product] from [business_location]" trust/authority keywords
+- "where to buy [product] in [location]" transactional queries
+- "[location] [product] online/delivery/price" purchase variants
+- Local comparison: "[product] [city] vs [city]"
+
+Return ONLY a JSON list of keyword strings. No extra text.
+"""
+            ai_result = AI.groq(prompt, system="You are an SEO expert. Return ONLY a JSON list of strings.", temperature=0.3)
+            if ai_result:
+                import re as _re
+                m = _re.search(r'\[[\s\S]*?\]', ai_result)
+                if m:
+                    ai_kws = json.loads(m.group())
+                    if isinstance(ai_kws, list):
+                        results.extend([str(k).lower().strip() for k in ai_kws if isinstance(k, str)])
+                        log.info(f"[P2/Location] AI generated {len(ai_kws)} location keywords")
+        except Exception as e:
+            log.warning(f"[P2/Location] AI expansion failed: {e}")
+
+        final = list(dict.fromkeys([r.strip().lower() for r in results if r.strip() and len(r.strip()) > 5]))
+        log.info(f"[P2/Location] Total location keywords: {len(final)}")
+        return final
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1005,6 +1130,24 @@ class P3_Normalization:
                  "did","will","would","should","could","may","might","shall",
                  "at","by","from","up","out","on","off","into","through"}
 
+    # Navigation/UI text fragments and garbage tokens
+    REJECT_PATTERNS = [
+        r'^\d{4}\w',             # year-glued: "2025kerala"
+        r'^\d+$',                # pure numbers
+        r'\bcart\b',
+        r'\blogin\b',
+        r'\bsignup\b',
+        r'\bsubscribe\b',
+        r'\bmenu\b',
+        r'\bfooter\b',
+        r'\bheader\b',
+        r'\bnailed\b',
+        r'\bintroduces\b',
+        r'\bposted\b',
+        r'\bjanuary\b|\bfebruary\b|\bmarch\b|\bapril\b|\bjuly\b|\baugust\b|\bseptember\b|\boctober\b|\bnovember\b|\bdecember\b',
+    ]
+    REJECT_RE = [re.compile(p, re.I) for p in REJECT_PATTERNS]
+
     def run(self, seed: Seed, raw_keywords: List[str]) -> List[str]:
         cached = Cache.load_checkpoint(seed.id, self.phase)
         if cached:
@@ -1021,6 +1164,9 @@ class P3_Normalization:
                 kw_clean = self._fix_order(kw_clean)
 
                 if not kw_clean or kw_clean in seen:
+                    continue
+                # Hard reject garbage patterns
+                if self._is_garbage(kw_clean):
                     continue
 
                 seen.add(kw_clean)
@@ -1041,7 +1187,7 @@ class P3_Normalization:
             if found and token not in seed_tokens:
                 pruned.append(kw)
 
-        validated = self._ai_validate(pruned, seed.keyword)
+        validated = self._ai_validate(pruned, seed.keyword, seed_obj=seed)
 
         log.info(f"[P3] {len(raw_keywords)} → {len(validated)} normalized + validated keywords")
         Cache.save_checkpoint(seed.id, self.phase, validated)
@@ -1066,14 +1212,48 @@ class P3_Normalization:
             return f"{words[1]} {words[0]}"
         return kw
 
+    def _is_garbage(self, kw: str) -> bool:
+        """Hard-reject obviously garbage keywords that no human would search."""
+        words = kw.split()
+        if not words:
+            return True
+        # Reject if first or last word is a stopword (indicates sentence fragment)
+        if words[0] in self.STOPWORDS or words[-1] in self.STOPWORDS:
+            return True
+        # Reject if >40% stopwords
+        sw_count = sum(1 for w in words if w in self.STOPWORDS)
+        if len(words) > 2 and sw_count / len(words) > 0.4:
+            return True
+        # Reject any regex garbage pattern
+        for rx in self.REJECT_RE:
+            if rx.search(kw):
+                return True
+        # Reject year-prefixed tokens like "2025kerala"
+        if any(re.match(r'^\d{4}\w', w) for w in words):
+            return True
+        # Reject if all words are single characters
+        if all(len(w) <= 1 for w in words):
+            return True
+        # Reject very short (< 4 chars total excluding spaces)
+        if len(kw.replace(' ', '')) < 4:
+            return True
+        return False
+
     def _normalise(self, kw: str) -> str:
         """Compatibility wrapper: older tests expect `_normalise` to exist.
         Compose existing cleaning steps to produce the normalized keyword."""
         return self._fix_order(self._basic_clean(kw))
 
-    def _ai_validate(self, keywords: List[str], seed: str) -> List[str]:
+    def _ai_validate(self, keywords: List[str], seed: str, seed_obj: Seed = None) -> List[str]:
         if not keywords:
             return []
+
+        # Build location name set for preservation
+        _loc_names = set()
+        if seed_obj:
+            for loc in (seed_obj.target_locations or []) + (seed_obj.business_locations or []):
+                if loc:
+                    _loc_names.add(loc.lower().strip())
 
         # deterministic pre-filter first
         base = []
@@ -1093,6 +1273,11 @@ class P3_Normalization:
 
         base = list(dict.fromkeys(base))
 
+        # Build location context for AI prompt
+        loc_context = ""
+        if _loc_names:
+            loc_context = f"\\nIMPORTANT: Keywords containing location names ({', '.join(list(_loc_names)[:5])}) are HIGH PRIORITY — keep them all.\\n"
+
         final = []
         for chunk in MemoryManager.chunks(base, 100):
             prompt = f"""
@@ -1108,7 +1293,8 @@ Rules:
 - Must be relevant to seed
 - Remove generic or unrelated phrases
 - Keep buyer intent keywords HIGH priority
-
+- Keep location-specific keywords HIGH priority (containing city/region/country names)
+{loc_context}
 Return JSON list.
 """
             try:
@@ -1124,12 +1310,12 @@ Return JSON list.
 
         final = list(dict.fromkeys(final))
 
-        min_keep = int(len(keywords) * 0.7)
-        if min_keep < 1:
-            min_keep = 1
+        # Quality floor: reject aggressively rather than keep garbage.
+        # Old 70% minimum-keep rule removed — quality over quantity.
+        min_keep = max(10, int(len(keywords) * 0.3))  # keep at least 30% or 10
 
         if len(final) < min_keep:
-            log.warning(f"[P3] Reduced too aggressively ({len(final)}/{len(keywords)}) - using base list")
+            log.warning(f"[P3] AI reduced too aggressively ({len(final)}/{len(keywords)}) - using base list")
             final = base
 
         if not final:
@@ -1241,16 +1427,18 @@ class P5_IntentClassification:
     phase = "P5"
 
     RULES = {
-        "transactional": ["buy","order","purchase","price","cheap","discount","shop",
-                           "wholesale","bulk","delivery","near me","online","cost"],
-        "comparison":    ["vs ","versus"," vs","difference between","compare","better",
-                           "which is","type of"," or "],
-        "commercial":    ["best","top","review","alternative",
-                           "recommendation","recommended","suggest","ranking","ranked","rated","test"],
-        "navigational":  ["brand","website","official","login","contact",".com"],
-        "informational": ["what","how","why","when","does","is","are","can","benefits",
-                           "uses","effects","meaning","definition","guide","truth",
-                           "science","study","research"],
+        "local":         [" near me", " nearby", " in my area", " closest", " local "],
+        "transactional": [" buy "," order "," purchase "," price"," cheap "," discount ",
+                           " shop "," wholesale "," bulk "," delivery"," online",
+                           "buy ","order ","where to buy","how to buy"," cost "],
+        "comparison":    [" vs "," versus "," difference between"," compare ",
+                           " better than"," which is "," type of "," or "],
+        "commercial":    [" best "," top "," review"," alternative",
+                           " recommendation"," rated"," ranking","best ","top "],
+        "navigational":  [" brand "," website"," official"," login"," contact",".com"],
+        "informational": [" what "," how "," why "," when "," does "," benefits",
+                           " uses "," effects"," meaning"," definition"," guide",
+                           "what ","how ","why ","benefits ","uses of "],
     }
 
     def run(self, seed: Seed, keywords: List[str], entities: Optional[Dict[str,dict]] = None) -> Dict[str,dict]:
@@ -1261,11 +1449,16 @@ class P5_IntentClassification:
         if entities is None:
             entities = {}
 
+        # Location names from seed for detecting local intent
+        _loc_names = set()
+        for loc in (seed.target_locations or []) + (seed.business_locations or []):
+            _loc_names.add(loc.lower().strip())
+
         # Legacy tests expect a mapping kw -> intent string. Keep that behaviour
         # while _classify may also return (intent, confidence) tuples.
         intent_map = {}
         for kw in keywords:
-            res = self._classify(kw, entities.get(kw, {}))
+            res = self._classify(kw, entities.get(kw, {}), _loc_names)
             # _classify may return an IntentResult, tuple, or plain string
             if isinstance(res, IntentResult):
                 intent_map[kw] = res.intent
@@ -1277,22 +1470,32 @@ class P5_IntentClassification:
         Cache.save_checkpoint(seed.id, self.phase, intent_map)
         info_cnt = sum(1 for v in intent_map.values() if v == 'informational')
         trans_cnt = sum(1 for v in intent_map.values() if v == 'transactional')
+        local_cnt = sum(1 for v in intent_map.values() if v == 'local')
         comp_cnt = sum(1 for v in intent_map.values() if v == 'comparison')
         nav_cnt = sum(1 for v in intent_map.values() if v == 'navigational')
-        log.info(f"[P5] Intent classified: info={info_cnt}, trans={trans_cnt}, comp={comp_cnt}, nav={nav_cnt}")
+        log.info(f"[P5] Intent classified: info={info_cnt}, trans={trans_cnt}, local={local_cnt}, comp={comp_cnt}, nav={nav_cnt}")
         return intent_map
 
-    def _classify(self, kw: str, entity: Optional[Dict[str, Any]] = None):
-        """Return an (intent, confidence) wrapper for the keyword.
-        Tests historically expected a plain string; return an IntentResult for
-        compatibility while caller keeps only the intent when needed.
-        """
+    def _classify(self, kw: str, entity: Optional[Dict[str, Any]] = None, loc_names: set = None):
+        """Return an (intent, confidence) wrapper for the keyword."""
         entity = entity or {}
         kl = kw.lower()
 
+        # Check for local intent first (keyword contains a known location name)
+        if loc_names:
+            for loc in loc_names:
+                if loc and loc in kl:
+                    # Keywords with location + purchase signals → transactional (location just adds geo context)
+                    if any(s in kl for s in ["buy", "order", "purchase", "price", "delivery", "shop", "online"]):
+                        return IntentResult("transactional", 0.9)
+                    # Keywords with just location → local intent
+                    return IntentResult("local", 0.85)
+
         # Rule-based intent classification (high confidence)
+        # Pad keyword with spaces for boundary-aware matching
+        padded = f" {kl} "
         for intent, signals in self.RULES.items():
-            if any(s in kl for s in signals):
+            if any(s in padded for s in signals):
                 return IntentResult(intent, 0.9)
 
         if entity.get("intent"):
@@ -1343,16 +1546,17 @@ class P6_SERPIntelligence:
     }
 
     def run(self, seed: Seed, keywords: List[str],
-             max_keywords: int = 100) -> Dict[str, dict]:
+             max_keywords: int = None, emit_fn=None) -> Dict[str, dict]:
         cached = Cache.load_checkpoint(seed.id, self.phase)
         if cached:
             return cached
 
-        target = keywords[:max_keywords]
+        target = keywords[:max_keywords] if max_keywords else keywords
         serp_map = {}
-        log.info(f"[P6] SERP analysis for {len(target)} top keywords...")
+        total = len(target)
+        log.info(f"[P6] SERP analysis for {total} keywords (no truncation)...")
 
-        for kw in target:
+        for i, kw in enumerate(target):
             cache_key = f"serp:{hashlib.md5(kw.encode()).hexdigest()[:12]}"
             cached_serp = Cache.get(cache_key, Cfg.TTL_SERP)
             if cached_serp:
@@ -1362,62 +1566,101 @@ class P6_SERPIntelligence:
             data = self._analyse_serp(kw)
             Cache.set(cache_key, data, Cfg.TTL_SERP)
             serp_map[kw] = data
-            time.sleep(1.0)
+
+            # Emit progress every 25 keywords
+            if emit_fn and (i + 1) % 25 == 0:
+                try:
+                    emit_fn("phase_log", {
+                        "phase": "P6", "status": "progress", "color": "blue",
+                        "msg": f"P6 progress: {i+1}/{total} keywords analyzed",
+                        "output_count": i + 1,
+                    })
+                except Exception:
+                    pass
 
         Cache.save_checkpoint(seed.id, self.phase, serp_map)
         log.info(f"[P6] SERP signals generated for {len(serp_map)} keywords")
         return serp_map
 
     def _analyse_serp(self, kw: str) -> dict:
-        data = {
+        """Heuristic SERP analysis based on keyword properties.
+        Estimates KD, authority, content type, gap opportunity from keyword signals
+        rather than live Google scraping (which gets IP-blocked in production)."""
+        kw_l = kw.lower().strip()
+        words = kw_l.split()
+        word_count = len(words)
+
+        # ── Intent detection from keyword text ────────────────────────────
+        trans_signals = ["buy", "price", "order", "purchase", "cheap", "discount",
+                         "shop", "wholesale", "bulk", "delivery", "online", "cost", "deal"]
+        comm_signals = ["best", "top", "review", "vs", "versus", "compare",
+                        "alternative", "recommended", "rated"]
+        info_signals = ["what", "how", "why", "when", "does", "is", "are",
+                        "benefits", "uses", "guide", "meaning", "definition"]
+        local_signals = ["near me", "nearby", "in my area", "local"]
+
+        intent = "informational"
+        if any(s in kw_l for s in local_signals):
+            intent = "local"
+        elif any(s in kw_l for s in trans_signals):
+            intent = "transactional"
+        elif any(s in kw_l for s in comm_signals):
+            intent = "commercial"
+        elif any(s in kw_l for s in info_signals):
+            intent = "informational"
+
+        # ── KD estimation from keyword length and specificity ─────────────
+        # Longer-tail keywords = lower competition
+        if word_count <= 1:
+            kd = 75  # Head terms: high competition
+        elif word_count == 2:
+            kd = 55  # Mid-tail
+        elif word_count == 3:
+            kd = 35  # Long-tail
+        elif word_count == 4:
+            kd = 25  # Very long-tail
+        else:
+            kd = 15  # Ultra-long-tail
+
+        # Adjust based on intent (transactional = more competition)
+        if intent == "transactional":
+            kd = min(100, kd + 15)
+        elif intent == "commercial":
+            kd = min(100, kd + 10)
+        elif intent == "local":
+            kd = max(5, kd - 10)
+
+        # ── Authority estimation ──────────────────────────────────────────
+        # Generic/broad keywords likely dominated by big sites
+        authority = 3 if word_count <= 2 else (2 if word_count == 3 else 1)
+
+        # ── Gap opportunity ───────────────────────────────────────────────
+        gap = kd < 40 and authority < 3
+
+        # ── Content type estimation ───────────────────────────────────────
+        if intent == "transactional":
+            content_type = "product"
+        elif intent == "commercial":
+            content_type = "listicle"
+        elif any(w in kw_l for w in ["how to", "guide", "tutorial", "step"]):
+            content_type = "how-to"
+        elif any(w in kw_l for w in ["what is", "meaning", "definition"]):
+            content_type = "explainer"
+        else:
+            content_type = "article"
+
+        return {
             "kw": kw,
-            "top_urls": ["https://www.example.com"],
-            "kd": 50,
-            "authority": 0,
-            "content_type": "mixed",
+            "top_urls": [],
+            "kd": kd,
+            "authority": authority,
+            "content_type": content_type,
+            "intent": intent,
             "intent_match": True,
-            "gap": False,
-            "has_featured_snippet": False,
-            "has_paa": False
+            "gap": gap,
+            "has_featured_snippet": word_count >= 4 and intent == "informational",
+            "has_paa": intent in ("informational", "commercial"),
         }
-
-        try:
-            r = _req.get(
-                "https://www.google.com/search",
-                params={"q": kw, "hl": "en"},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=8
-            )
-            html = r.text.lower()
-
-            if any(x in html for x in ["buy", "price", "shop", "add to cart"]):
-                data["intent"] = "transactional"
-            elif any(x in html for x in ["best", "top", "review"]):
-                data["intent"] = "commercial"
-            else:
-                data["intent"] = "informational"
-
-            match = re.findall(r"<div[^>]*>", html)
-            result_count = len(match)
-            data["kd"] = min(100, max(1, int(result_count / 10)))
-
-            big_sites = ["amazon", "wikipedia", "flipkart", "healthline", "webmd"]
-            data["authority"] = sum(1 for b in big_sites if b in html)
-
-            data["gap"] = data["authority"] < 2
-            data["top_urls"] = [f"https://{kw.replace(' ', '')}.com"]
-
-        except Exception as e:
-            log.warning(f"[P6] SERP fetch failed ({e}); using fallback data")
-
-        if not data.get("top_urls"):
-            data["top_urls"] = ["https://example.com/placeholder"]
-            data["kd"] = min(data.get("kd", 50), 45)
-            data["authority"] = max(data.get("authority", 0), 1)
-            data["content_type"] = "informational"
-            data["gap"] = True
-
-        return data
 
 
 class P6_CompetitorKeywordMining:
@@ -1684,11 +1927,14 @@ class P7_TopKeywordSelector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class P8_TopicDetection:
-    """Phase 8: SEO-aware topic clustering (intent + semantic + AEO + GEO)."""
+    """Phase 8: SEO-aware topic clustering (intent + semantic embeddings).
+    Uses Ollama embeddings for cosine-similarity grouping within intent groups.
+    Falls back to word-overlap if embeddings unavailable."""
     phase = "P8"
 
     def run(self, seed: Seed, keywords: List[str],
-             scores: Dict[str,dict], intent_map: Optional[Dict[str,dict]] = None) -> Dict[str, List[str]]:
+             scores: Dict[str,dict], intent_map: Optional[Dict[str,dict]] = None,
+             emit_fn=None) -> Dict[str, List[str]]:
         if intent_map is None:
             intent_map = {}
         cached = Cache.load_checkpoint(seed.id, self.phase)
@@ -1702,36 +1948,213 @@ class P8_TopicDetection:
 
         log.info(f"[P8++] Topic clustering for {len(keywords)} keywords")
 
-        # Deterministic, lightweight fallback clustering (works without SBERT/KMeans)
-        ranked = sorted(keywords, key=lambda k: scores.get(k, 0), reverse=True)
+        ranked = sorted(keywords, key=lambda k: self._score_of(k, scores), reverse=True)
 
-        # Determine number of topics proportional to input size (clamped)
-        n_topics = max(5, min(60, max(1, len(keywords) // 10)))
-        n_topics = min(n_topics, len(keywords))
+        # ── Step 1: Group by intent ──────────────────────────────────────
+        intent_groups = {}
+        for kw in ranked:
+            intent = self._get_intent(kw, intent_map)
+            intent_groups.setdefault(intent, []).append(kw)
 
-        topic_buckets: Dict[int, List[str]] = {i: [] for i in range(n_topics)}
-        for i, kw in enumerate(ranked):
-            topic_buckets[i % n_topics].append(kw)
-
-        named: Dict[str, List[str]] = {}
+        # ── Step 2: Embed & cluster within each intent group ─────────────
+        named = {}
         used_names = set()
-        for cluster_id, kw_list in topic_buckets.items():
-            if not kw_list:
-                continue
-            top_kws = sorted(kw_list, key=lambda k: scores.get(k, 0), reverse=True)[:5]
-            name = self._name_topic(top_kws, scores)
-            # ensure uniqueness
-            base_name = name
-            suffix = 2
-            while name in used_names:
-                name = f"{base_name} {suffix}"
-                suffix += 1
-            used_names.add(name)
-            named[name] = kw_list
+        use_embeddings = self._can_use_embeddings(ranked[:5])  # Quick test
 
-        log.info(f"[P8++] Created {len(named)} topics (fallback)")
+        if use_embeddings and emit_fn:
+            try: emit_fn("phase_log", {"phase": "P8", "status": "starting", "msg": f"Generating embeddings for {len(keywords)} keywords…"})
+            except Exception: pass
+
+        for intent, kw_list in intent_groups.items():
+            if use_embeddings and len(kw_list) >= 4:
+                sub_clusters = self._cluster_by_embedding(kw_list, scores, emit_fn)
+            else:
+                sub_clusters = self._sub_cluster_by_overlap(kw_list)
+
+            for sub_kws in sub_clusters:
+                if not sub_kws:
+                    continue
+                name = self._name_topic(sub_kws, scores)
+                base_name = name
+                suffix = 2
+                while name in used_names:
+                    name = f"{base_name} {suffix}"
+                    suffix += 1
+                used_names.add(name)
+                named[name] = sub_kws
+
+        # ── Step 3: Split if too few topics ──────────────────────────────
+        min_topics = max(10, min(120, len(keywords) // 3))
+        if len(named) < min_topics:
+            log.info(f"[P8++] Clustering gave {len(named)} topics, splitting to reach ~{min_topics}")
+            named = self._split_large_topics(named, min_topics, scores)
+
+        # ── Step 4: Ensure no keyword is lost ────────────────────────────
+        all_assigned = set()
+        for kws in named.values():
+            all_assigned.update(kws)
+        missing = [k for k in keywords if k not in all_assigned]
+        if missing:
+            # Group stragglers into a misc topic
+            for i in range(0, len(missing), 8):
+                chunk = missing[i:i+8]
+                name = self._name_topic(chunk, scores)
+                base_name = name
+                suffix = 2
+                while name in used_names:
+                    name = f"{base_name} {suffix}"
+                    suffix += 1
+                used_names.add(name)
+                named[name] = chunk
+
+        log.info(f"[P8++] Created {len(named)} topics ({len(keywords)} keywords preserved)")
         Cache.save_checkpoint(seed.id, self.phase, named)
         return named
+
+    # ── Embedding-based clustering ───────────────────────────────────────
+
+    def _can_use_embeddings(self, sample_kws: List[str]) -> bool:
+        """Quick test: can we get embeddings from Ollama?"""
+        try:
+            vecs = AI.embed_batch(sample_kws[:2])
+            return vecs and len(vecs) >= 2 and any(v != 0.0 for v in vecs[0][:10])
+        except Exception:
+            return False
+
+    def _cluster_by_embedding(self, keywords: List[str], scores: Dict[str,Any],
+                                emit_fn=None) -> List[List[str]]:
+        """Embed keywords via Ollama, then agglomerative clustering by cosine similarity."""
+        # Batch embed with progress
+        batch_size = 50
+        all_vecs = []
+        for i in range(0, len(keywords), batch_size):
+            batch = keywords[i:i+batch_size]
+            vecs = AI.embed_batch(batch)
+            all_vecs.extend(vecs)
+            if emit_fn and i > 0:
+                try: emit_fn("phase_log", {"phase": "P8", "status": "starting",
+                             "msg": f"Embedded {min(i+batch_size, len(keywords))}/{len(keywords)} keywords"})
+                except Exception: pass
+
+        if not all_vecs or len(all_vecs) != len(keywords):
+            log.warning("[P8] Embedding count mismatch, falling back to word overlap")
+            return self._sub_cluster_by_overlap(keywords)
+
+        # Cosine similarity matrix (pure Python — no numpy needed)
+        def dot(a, b):
+            return sum(x*y for x, y in zip(a, b))
+        def norm(a):
+            return max(dot(a, a) ** 0.5, 1e-10)
+        def cosine(a, b):
+            return dot(a, b) / (norm(a) * norm(b))
+
+        # Target: 3-15 keywords per topic
+        target_topics = max(10, min(120, len(keywords) // 3))
+        target_per_topic = max(3, len(keywords) // max(target_topics, 1))
+        sim_threshold = 0.65  # Start with moderate threshold
+
+        # Greedy clustering: pick seed keyword, absorb similar
+        assigned = set()
+        clusters = []
+
+        # Sort by score desc — higher score keywords become cluster centers
+        scored_idx = sorted(range(len(keywords)),
+                            key=lambda i: self._score_of(keywords[i], scores), reverse=True)
+
+        for center_idx in scored_idx:
+            if center_idx in assigned:
+                continue
+            cluster = [center_idx]
+            assigned.add(center_idx)
+            center_vec = all_vecs[center_idx]
+
+            # Find similar unassigned keywords
+            candidates = []
+            for j in range(len(keywords)):
+                if j in assigned:
+                    continue
+                sim = cosine(center_vec, all_vecs[j])
+                if sim >= sim_threshold:
+                    candidates.append((j, sim))
+
+            # Sort by similarity desc, take up to target_per_topic
+            candidates.sort(key=lambda x: -x[1])
+            for j, sim in candidates[:target_per_topic - 1]:
+                cluster.append(j)
+                assigned.add(j)
+
+            clusters.append([keywords[i] for i in cluster])
+
+        # Pick up unassigned as singletons merged into smallest cluster
+        remaining = [keywords[i] for i in range(len(keywords)) if i not in assigned]
+        if remaining:
+            for kw in remaining:
+                if clusters:
+                    smallest = min(clusters, key=len)
+                    smallest.append(kw)
+                else:
+                    clusters.append([kw])
+
+        return clusters
+
+    # ── Fallback: word-overlap clustering ────────────────────────────────
+
+    # ── Fallback: word-overlap clustering ────────────────────────────────
+
+    def _sub_cluster_by_overlap(self, keywords: List[str], min_overlap: int = 2, max_per_cluster: int = 8) -> List[List[str]]:
+        """Group keywords that share >= min_overlap words. Limits cluster size."""
+        clusters = []
+        assigned = set()
+        for kw in keywords:
+            if kw in assigned:
+                continue
+            cluster = [kw]
+            assigned.add(kw)
+            kw_words = set(kw.lower().split())
+            for other in keywords:
+                if other in assigned:
+                    continue
+                other_words = set(other.lower().split())
+                if len(kw_words & other_words) >= min_overlap:
+                    cluster.append(other)
+                    assigned.add(other)
+                    if len(cluster) >= max_per_cluster:
+                        break
+            clusters.append(cluster)
+        # Pick up any remaining keywords as singletons grouped into a misc cluster
+        remaining = [kw for kw in keywords if kw not in assigned]
+        if remaining:
+            for i in range(0, len(remaining), max_per_cluster):
+                clusters.append(remaining[i:i+max_per_cluster])
+        return clusters
+
+    def _split_large_topics(self, named: Dict[str, List[str]], target: int, scores: Dict[str,Any]) -> Dict[str, List[str]]:
+        """Split oversized topics until we reach the target count."""
+        result = dict(named)
+        used_names = set(result.keys())
+        while len(result) < target:
+            # Find the largest topic
+            largest_name = max(result, key=lambda k: len(result[k]))
+            largest = result[largest_name]
+            if len(largest) <= 2:
+                break  # Can't split further
+            mid = len(largest) // 2
+            part_a = largest[:mid]
+            part_b = largest[mid:]
+            # Name the new split
+            del result[largest_name]
+            used_names.discard(largest_name)
+            for part in [part_a, part_b]:
+                top_kws = sorted(part, key=lambda k: scores.get(k, 0), reverse=True)[:5]
+                name = self._name_topic(top_kws, scores)
+                base_name = name
+                suffix = 2
+                while name in used_names:
+                    name = f"{base_name} {suffix}"
+                    suffix += 1
+                used_names.add(name)
+                result[name] = part
+        return result
 
     def _clean_topic_name(self, kw: str) -> str:
         remove = {"buy", "best", "cheap", "online", "price", "india", "wholesale", "bulk"}
@@ -1743,21 +2166,32 @@ class P8_TopicDetection:
         s2 = set(k2.lower().split())
         return len(s1 & s2) >= 2
 
+    @staticmethod
+    def _score_of(k: str, scores: Dict[str, Any]) -> float:
+        val = scores.get(k, 0)
+        if isinstance(val, dict):
+            return float(val.get("final", val.get("score", 0)))
+        if isinstance(val, (int, float)):
+            return float(val)
+        return 0.0
+
+    @staticmethod
+    def _get_intent(kw: str, intent_map: Dict[str, Any]) -> str:
+        intent_val = intent_map.get(kw, {})
+        if isinstance(intent_val, dict):
+            return intent_val.get("intent", "informational")
+        elif isinstance(intent_val, str):
+            return intent_val
+        return "informational"
+
     def _name_topic(self, keywords: List[str], scores: Dict[str,Any]) -> str:
         if not keywords:
             return "Untitled Topic"
 
-        def score_of(k):
-            val = scores.get(k, 0)
-            if isinstance(val, dict):
-                return val.get("final", val.get("score", 0))
-            if isinstance(val, (int, float)):
-                return float(val)
-            return 0.0
-
-        best = max(keywords, key=score_of)
+        best = max(keywords, key=lambda k: self._score_of(k, scores))
         tok = best.lower().split()
-        remove = {"buy", "best", "top", "online", "cheap", "price", "india", "kerala", "wayanad"}
+        # Only remove generic modifiers — keep location words as they provide important context
+        remove = {"buy", "best", "top", "online", "cheap", "price"}
         tok = [w for w in tok if w not in remove]
         name = " ".join(tok).strip() or best
 
@@ -1778,11 +2212,16 @@ class P9_ClusterFormation:
     """
     phase = "P9"
 
-    CLUSTER_PROMPT = """Group these SEO topics into {n_clusters} larger thematic clusters.
-Topics: {topics}
+    CLUSTER_PROMPT = """You are an SEO content strategist. Group these {n_topics} SEO topics into exactly {n_clusters} larger thematic clusters.
+Each cluster should be a broad, distinct theme. Every topic must be assigned to exactly one cluster.
+
 Seed keyword: {seed}
 
-Return ONLY valid JSON: {{"Cluster Name": ["Topic 1", "Topic 2", ...], ...}}"""
+Topics (with sample keywords):
+{topic_details}
+
+Return ONLY valid JSON: {{"Cluster Name": ["Topic 1", "Topic 2", ...], ...}}
+Every topic above MUST appear in exactly one cluster. Do not rename topics."""
 
     def run(self, seed: Seed, topic_map: Dict[str, List[str]], project_id: Optional[str] = None) -> Dict[str, List[str]]:
         cached = Cache.load_checkpoint(seed.id, self.phase)
@@ -1795,26 +2234,21 @@ Return ONLY valid JSON: {{"Cluster Name": ["Topic 1", "Topic 2", ...], ...}}"""
             return {}
 
         topics = list(topic_map.keys())
-        n      = max(4, min(40, max(1, len(topics) // 5)))
+        n      = max(5, min(50, max(1, len(topics) // 3)))
 
-        prompt = self.CLUSTER_PROMPT.format(
-            n_clusters=n, topics=topics[:60], seed=seed.keyword
-        )
+        # Build rich topic details: topic name + top 3 keywords
+        topic_details_parts = []
+        for t_name in topics:
+            kws = topic_map.get(t_name, [])
+            sample = ", ".join(kws[:3]) if kws else "(no keywords)"
+            topic_details_parts.append(f"- {t_name} [{sample}]")
+        topic_details = "\n".join(topic_details_parts)
 
-        clusters = None
-        try:
-            text = AI.gemini(prompt, temperature=0.2)
-            clusters = AI.parse_json(text)
-            if not isinstance(clusters, dict):
-                raise ValueError("Expected dict")
-
-            all_ai_vals = [v for vals in clusters.values() for v in (vals if isinstance(vals, list) else [])]
-            if not all_ai_vals or not any(v in all_ai_vals for v in [kw for kws in topic_map.values() for kw in kws[:1]]):
-                raise ValueError("AI clusters don't contain keywords")
-
-        except Exception as e:
-            log.warning(f"[P9] AI cluster formation failed ({e}), using topic map fallback")
-            clusters = {k: list(v) for k, v in topic_map.items()}
+        # Paginate if too many topics for single prompt (>150 topics)
+        if len(topics) <= 150:
+            clusters = self._cluster_single_call(seed, topics, topic_map, topic_details, n)
+        else:
+            clusters = self._cluster_paginated(seed, topics, topic_map, n)
 
         # If a project_id is provided, filter clusters by domain context
         if project_id:
@@ -1823,24 +2257,174 @@ Return ONLY valid JSON: {{"Cluster Name": ["Topic 1", "Topic 2", ...], ...}}"""
                 dce = DomainContextEngine()
                 filtered = {}
                 dropped = 0
-                for cname, kws in clusters.items():
+                for cname, topic_names in clusters.items():
                     keep = []
-                    for kw in kws:
-                        res = dce.classify(kw, project_id)
+                    for tn in topic_names:
+                        # Check the first keyword of the topic
+                        kws = topic_map.get(tn, [tn])
+                        res = dce.classify(kws[0] if kws else tn, project_id)
                         if res.get("verdict") != "reject":
-                            keep.append(kw)
-                    # If fewer than 40% of original kws remain, drop the cluster
-                    if keep and (len(keep) / max(1, len(kws))) >= 0.4:
+                            keep.append(tn)
+                    if keep and (len(keep) / max(1, len(topic_names))) >= 0.3:
                         filtered[cname] = keep
                     else:
                         dropped += 1
-                log.info(f"[P9] Domain filter: dropped {dropped} clusters for project {project_id}")
-                clusters = filtered or clusters
+                        # Don't completely drop — keep topics that passed, even if ratio low
+                        if keep:
+                            filtered[cname] = keep
+                log.info(f"[P9] Domain filter: dropped {dropped} full clusters for project {project_id}")
+                # Safety: never let domain filter remove more than 50% of clusters
+                if len(filtered) >= len(clusters) * 0.5:
+                    clusters = filtered
+                else:
+                    log.warning(f"[P9] Domain filter too aggressive ({len(filtered)}/{len(clusters)} clusters remain), keeping original")
             except Exception as e:
                 log.warning(f"[P9] DomainContext filtering failed: {e}")
 
+        # Ensure all topics are assigned (rescue orphans)
+        assigned_topics = set()
+        for topic_names in clusters.values():
+            assigned_topics.update(topic_names)
+        orphans = [t for t in topics if t not in assigned_topics]
+        if orphans:
+            log.info(f"[P9] Rescuing {len(orphans)} orphan topics into 'Other' cluster")
+            clusters["Other Topics"] = orphans
+
         Cache.save_checkpoint(seed.id, self.phase, clusters)
         log.info(f"[P9] {len(clusters)} clusters formed from {len(topics)} topics")
+        return clusters
+
+    def _cluster_single_call(self, seed: Seed, topics: List[str],
+                               topic_map: Dict[str, List[str]],
+                               topic_details: str, n: int) -> Dict[str, List[str]]:
+        """Single Gemini call for <= 150 topics."""
+        prompt = self.CLUSTER_PROMPT.format(
+            n_clusters=n, n_topics=len(topics),
+            topic_details=topic_details, seed=seed.keyword
+        )
+        try:
+            text = AI.gemini(prompt, temperature=0.2)
+            clusters = AI.parse_json(text)
+            if not isinstance(clusters, dict):
+                raise ValueError("Expected dict")
+            # Validate: remap AI topic names back to real names
+            clusters = self._remap_cluster_topics(clusters, topics)
+            if not clusters:
+                raise ValueError("Remapping produced empty clusters")
+            return clusters
+        except Exception as e:
+            log.warning(f"[P9] AI cluster formation failed ({e}), using topic map fallback")
+            return self._fallback_clustering(topics, topic_map, n)
+
+    def _cluster_paginated(self, seed: Seed, topics: List[str],
+                             topic_map: Dict[str, List[str]], n: int) -> Dict[str, List[str]]:
+        """Paginated clustering for >150 topics: batch into groups of 100, then merge."""
+        batch_size = 100
+        all_clusters = {}
+        for i in range(0, len(topics), batch_size):
+            batch_topics = topics[i:i+batch_size]
+            batch_n = max(3, n * len(batch_topics) // len(topics))
+            td_parts = []
+            for t_name in batch_topics:
+                kws = topic_map.get(t_name, [])
+                sample = ", ".join(kws[:3]) if kws else "(no keywords)"
+                td_parts.append(f"- {t_name} [{sample}]")
+            prompt = self.CLUSTER_PROMPT.format(
+                n_clusters=batch_n, n_topics=len(batch_topics),
+                topic_details="\n".join(td_parts), seed=seed.keyword
+            )
+            try:
+                text = AI.gemini(prompt, temperature=0.2)
+                batch_clusters = AI.parse_json(text)
+                if isinstance(batch_clusters, dict):
+                    batch_clusters = self._remap_cluster_topics(batch_clusters, batch_topics)
+                    for name, topic_names in batch_clusters.items():
+                        if name in all_clusters:
+                            all_clusters[name].extend(topic_names)
+                        else:
+                            all_clusters[name] = list(topic_names)
+                time.sleep(Cfg.GEMINI_RATE)
+            except Exception as e:
+                log.warning(f"[P9] Batch {i//batch_size} failed: {e}")
+                for t in batch_topics:
+                    all_clusters.setdefault("Unclustered", []).append(t)
+
+        return all_clusters if all_clusters else self._fallback_clustering(topics, topic_map, n)
+
+    def _remap_cluster_topics(self, clusters: Dict[str, list], real_topics: List[str]) -> Dict[str, List[str]]:
+        """Map AI-returned topic names back to actual topic names using fuzzy matching.
+        Any orphaned real topics (not matched by any cluster) get assigned to the nearest cluster."""
+        real_lower = {t.lower().strip(): t for t in real_topics}
+        matched_originals = set()  # Track which real topics have been matched
+        remapped = {}
+        for cname, topic_names in clusters.items():
+            if not isinstance(topic_names, list):
+                continue
+            matched = []
+            for tn in topic_names:
+                tn_lower = str(tn).lower().strip()
+                # Exact match
+                if tn_lower in real_lower:
+                    matched.append(real_lower[tn_lower])
+                    matched_originals.add(real_lower[tn_lower])
+                    continue
+                # Substring match
+                found = False
+                for real_l, real_orig in real_lower.items():
+                    if real_orig in matched_originals:
+                        continue
+                    if tn_lower in real_l or real_l in tn_lower:
+                        matched.append(real_orig)
+                        matched_originals.add(real_orig)
+                        found = True
+                        break
+                if not found:
+                    # Word overlap match (>=40% words shared — lowered from 60% to reduce orphans)
+                    tn_words = set(tn_lower.split())
+                    best_match, best_overlap = None, 0
+                    for real_l, real_orig in real_lower.items():
+                        if real_orig in matched_originals:
+                            continue
+                        real_words = set(real_l.split())
+                        overlap = len(tn_words & real_words) / max(len(tn_words | real_words), 1)
+                        if overlap > best_overlap and overlap >= 0.4:
+                            best_overlap = overlap
+                            best_match = real_orig
+                    if best_match:
+                        matched.append(best_match)
+                        matched_originals.add(best_match)
+            if matched:
+                remapped[cname] = matched
+
+        # ── Assign orphaned topics to nearest cluster ─────────────────────
+        orphans = [t for t in real_topics if t not in matched_originals]
+        if orphans and remapped:
+            cluster_names = list(remapped.keys())
+            for orphan in orphans:
+                orphan_words = set(orphan.lower().split())
+                best_cluster, best_score = cluster_names[0], 0
+                for cname, topics in remapped.items():
+                    cluster_words = set()
+                    for t in topics:
+                        cluster_words.update(t.lower().split())
+                    overlap = len(orphan_words & cluster_words)
+                    if overlap > best_score:
+                        best_score = overlap
+                        best_cluster = cname
+                remapped[best_cluster].append(orphan)
+            if orphans:
+                log.info(f"[P9] Assigned {len(orphans)} orphaned topics to existing clusters")
+
+        return remapped
+
+    def _fallback_clustering(self, topics: List[str], topic_map: Dict[str, List[str]], n: int) -> Dict[str, List[str]]:
+        """Simple round-robin fallback when AI clustering fails."""
+        sorted_topics = sorted(topics, key=lambda t: len(topic_map.get(t, [])), reverse=True)
+        clusters = {}
+        for i, t in enumerate(sorted_topics):
+            bucket = i % n
+            cname = f"Cluster {bucket + 1}"
+            clusters.setdefault(cname, []).append(t)
         return clusters
 
 
@@ -1849,37 +2433,84 @@ Return ONLY valid JSON: {{"Cluster Name": ["Topic 1", "Topic 2", ...], ...}}"""
 # ─────────────────────────────────────────────────────────────────────────────
 
 class P10_PillarIdentification:
-    """Phase 10: For each cluster, identify the anchor pillar page."""
+    """Phase 10: For each cluster, identify the anchor pillar page.
+    When cluster count > MAX_PILLARS, consolidates similar clusters first."""
     phase = "P10"
+
+    MAX_PILLARS = 15
+    MIN_PILLARS = 5
 
     PILLAR_PROMPT = """For this SEO cluster, generate the perfect pillar page title.
 The pillar page is the comprehensive, authoritative guide that covers everything
 in this cluster. It should rank for the broadest keyword in the cluster.
 
 Cluster: "{cluster}"
-Topics in cluster: {topics}
+All topics in this cluster: {topics}
 Seed keyword: {seed}
 
 Return ONLY the pillar page title (one line, no quotes)."""
 
-    def run(self, seed: Seed, clusters: Dict[str,List[str]], project_id: Optional[str] = None) -> Dict[str,dict]:
+    CONSOLIDATE_PROMPT = """You are an SEO architect. Merge these {n_clusters} topic clusters into
+exactly {target} pillar groups. Each pillar should be a distinct, broad theme.
+
+Clusters:
+{cluster_list}
+
+Seed keyword: {seed}
+
+Return ONLY valid JSON mapping pillar name to list of cluster names to merge:
+{{"Pillar Name": ["Cluster A", "Cluster B"], ...}}"""
+
+    def run(self, seed: Seed, clusters: Dict[str,List[str]],
+             scores: Dict[str,float] = None,
+             topic_map: Dict[str,List[str]] = None,
+             project_id: Optional[str] = None) -> Dict[str,dict]:
         cached = Cache.load_checkpoint(seed.id, self.phase)
         if cached:
             return cached
+        scores = scores or {}
+        topic_map = topic_map or {}
+
+        # Consolidate if too many clusters
+        if len(clusters) > self.MAX_PILLARS:
+            clusters = self._consolidate(seed, clusters)
 
         pillars = {}
         for cluster_name, topics in clusters.items():
+            # Send ALL topics (up to 30) for context
             pillar_title = AI.gemini(
                 self.PILLAR_PROMPT.format(
-                    cluster=cluster_name, topics=topics[:10], seed=seed.keyword
+                    cluster=cluster_name, topics=topics[:30], seed=seed.keyword
                 ), temperature=0.2
             ).strip().strip('"')
 
+            # Fallback if AI returns empty title
+            if not pillar_title:
+                pillar_title = f"{seed.keyword}: {cluster_name}"
+
+            # Find best keyword across all topics in this cluster
+            all_kws_in_cluster = []
+            for t in topics:
+                all_kws_in_cluster.extend(topic_map.get(t, []))
+            if all_kws_in_cluster and scores:
+                best_kw = max(all_kws_in_cluster,
+                              key=lambda k: float(scores.get(k, 0)) if isinstance(scores.get(k, 0), (int, float))
+                              else float(scores.get(k, {}).get("score", 0)) if isinstance(scores.get(k, 0), dict)
+                              else 0)
+                pillar_keyword = best_kw.lower()
+            else:
+                pillar_keyword = cluster_name.lower()
+
+            # Real article count: count of all keywords across topics + 1 pillar page
+            total_kws = sum(len(topic_map.get(t, [])) for t in topics)
+            article_count = max(total_kws, len(topics)) + 1
+
             pillars[cluster_name] = {
                 "pillar_title": pillar_title,
-                "pillar_keyword": cluster_name.lower(),
+                "pillar_keyword": pillar_keyword,
                 "topics": topics,
-                "article_count": len(topics) + 1   # topics + pillar itself
+                "article_count": article_count,
+                "keyword_count": total_kws,
             }
             time.sleep(Cfg.GEMINI_RATE)
 
@@ -1899,6 +2530,77 @@ Return ONLY the pillar page title (one line, no quotes)."""
         log.info(f"[P10] {len(pillars)} pillar pages identified")
         return pillars
 
+    def _consolidate(self, seed: Seed, clusters: Dict[str,List[str]]) -> Dict[str,List[str]]:
+        """Merge similar clusters until count is within MAX_PILLARS."""
+        target = min(self.MAX_PILLARS, max(self.MIN_PILLARS, len(clusters) // 2))
+        cluster_list = "\n".join(
+            f"- {name}: {', '.join(topics[:5])}" for name, topics in list(clusters.items())[:60]
+        )
+        try:
+            text = AI.gemini(
+                self.CONSOLIDATE_PROMPT.format(
+                    n_clusters=len(clusters), target=target,
+                    cluster_list=cluster_list, seed=seed.keyword,
+                ), temperature=0.2
+            )
+            merge_map = AI.parse_json(text)
+            if not isinstance(merge_map, dict):
+                raise ValueError("Expected dict")
+
+            merged = {}
+            used_clusters = set()
+            for pillar_name, cluster_names in merge_map.items():
+                if not isinstance(cluster_names, list):
+                    continue
+                combined_topics = []
+                for cn in cluster_names:
+                    # Fuzzy match cluster names (AI may not return exact names)
+                    matched = None
+                    for real_cn in clusters:
+                        if real_cn.lower().strip() == cn.lower().strip():
+                            matched = real_cn
+                            break
+                    if not matched:
+                        for real_cn in clusters:
+                            if cn.lower() in real_cn.lower() or real_cn.lower() in cn.lower():
+                                matched = real_cn
+                                break
+                    if matched and matched not in used_clusters:
+                        combined_topics.extend(clusters[matched])
+                        used_clusters.add(matched)
+                if combined_topics:
+                    merged[pillar_name] = combined_topics
+
+            # Add any clusters not mapped
+            for cn, topics in clusters.items():
+                if cn not in used_clusters:
+                    merged[cn] = topics
+
+            log.info(f"[P10] Consolidated {len(clusters)} clusters → {len(merged)} pillars")
+            return merged
+
+        except Exception as e:
+            log.warning(f"[P10] AI consolidation failed ({e}), using largest-{target}")
+            # Fallback: keep top-N largest clusters, merge the rest into them
+            sorted_clusters = sorted(clusters.items(), key=lambda x: len(x[1]), reverse=True)
+            result = {}
+            for name, topics in sorted_clusters[:target]:
+                result[name] = list(topics)
+            # Distribute remaining clusters into closest existing pillar
+            for name, topics in sorted_clusters[target:]:
+                # Find pillar with most word overlap
+                best_pillar = list(result.keys())[0]
+                best_score = 0
+                name_words = set(name.lower().split())
+                for pname in result:
+                    pwords = set(pname.lower().split())
+                    overlap = len(name_words & pwords)
+                    if overlap > best_score:
+                        best_score = overlap
+                        best_pillar = pname
+                result[best_pillar].extend(topics)
+            return result
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 15 — KNOWLEDGE GRAPH (P11)
@@ -1910,6 +2612,9 @@ class KnowledgeGraph:
     seed:    str
     pillars: Dict[str, dict] = field(default_factory=dict)
     # {pillar_name: {title, clusters: {cluster_name: {topics: {topic: [keywords]}}}}}
+
+    def __len__(self):
+        return len(self.pillars)
 
 class P11_KnowledgeGraph:
     """Phase 11: Build the complete SEO knowledge graph."""
@@ -1933,8 +2638,25 @@ class P11_KnowledgeGraph:
             }
             # Map topics into this cluster
             for topic in pillar_data.get("topics",[]):
-                # Get keywords for this topic
+                # Get keywords for this topic — try exact match, then fuzzy
                 topic_kws = topic_map.get(topic, [])
+                if not topic_kws:
+                    # Fuzzy match: topic may have been renamed by P9/P10
+                    topic_lower = topic.lower().strip()
+                    for tm_key, tm_val in topic_map.items():
+                        if tm_key.lower().strip() == topic_lower:
+                            topic_kws = tm_val
+                            break
+                    if not topic_kws:
+                        # Substring match
+                        for tm_key, tm_val in topic_map.items():
+                            if topic_lower in tm_key.lower() or tm_key.lower() in topic_lower:
+                                topic_kws = tm_val
+                                break
+                    if not topic_kws:
+                        # Use topic name as a keyword rather than leaving empty
+                        topic_kws = [topic]
+                        log.warning(f"[P11] Topic '{topic}' not found in topic_map, using as keyword")
                 kg.pillars[cluster_name]["clusters"][cluster_name][topic] = {
                     "keywords": topic_kws,
                     "best_keyword": max(topic_kws, key=lambda k: scores.get(k,0), default=topic),
@@ -1959,60 +2681,179 @@ class P11_KnowledgeGraph:
 class P12_InternalLinking:
     """
     Phase 12: Generate internal link map from knowledge graph.
-    Rules: Topic→Pillar, Topic→Topic (sibling), Cluster→Pillar, Pillar→Seed product.
+    Rules: Topic→Pillar, Topic→Topic (sibling + cross-cluster), Cluster→Pillar, Pillar→Seed product.
+    Link types vary by intent: informational/commercial/transactional.
     """
     phase = "P12"
 
-    def run(self, seed: Seed, graph: KnowledgeGraph) -> dict:
+    INTENT_CTA = {
+        "informational": "learn more about",
+        "commercial":    "compare",
+        "transactional": "buy",
+        "navigational":  "visit",
+        "local":         "find near you",
+    }
+
+    def run(self, seed: Seed, graph: KnowledgeGraph,
+             intent_map: Dict[str, str] = None, scores: Dict[str, float] = None) -> dict:
         cached = Cache.load_checkpoint(seed.id, self.phase)
         if cached:
             return cached
 
+        intent_map = intent_map or {}
+        scores = scores or {}
+
         link_map = {
-            "topic_to_pillar":  [],
-            "topic_to_topic":   [],
-            "cluster_to_pillar":[],
-            "pillar_to_product":[],
+            "topic_to_pillar":    [],
+            "topic_to_topic":     [],
+            "cross_cluster":      [],
+            "cluster_to_pillar":  [],
+            "pillar_to_product":  [],
         }
 
-        for cluster_name, pillar_data in graph.pillars.items():
-            pillar_url = f"/{seed.keyword.replace(' ','-')}/{pillar_data['keyword']}"
+        # Collect all topic data across pillars for cross-cluster linking
+        all_topics = []  # [(topic_name, cluster_name, best_kw, intent, score)]
 
-            # Pillar → product (transactional anchor)
+        for cluster_name, pillar_data in graph.pillars.items():
+            pillar_kw = pillar_data.get("keyword", cluster_name.lower())
+            pillar_url = f"/{seed.keyword.replace(' ','-')}/{pillar_kw.replace(' ','-')}"
+
+            # Determine CTA based on dominant intent in pillar
+            pillar_intents = []
+            for cluster, topics in pillar_data.get("clusters", {}).items():
+                for topic, topic_data in topics.items():
+                    intent = topic_data.get("intent", "informational") if isinstance(topic_data, dict) else "informational"
+                    pillar_intents.append(intent)
+            dominant_intent = max(set(pillar_intents), key=pillar_intents.count) if pillar_intents else "informational"
+            cta_verb = self.INTENT_CTA.get(dominant_intent, "learn more about")
+
+            # Pillar → product (CTA varies by intent)
+            product_url = seed.product_url or f"/products/{seed.keyword.replace(' ', '-')}"
             link_map["pillar_to_product"].append({
                 "from_page":   pillar_url,
-                "to_page":     seed.product_url or f"/products/{seed.keyword.replace(' ','-')}",
-                "anchor_text": f"buy {seed.keyword} online",
-                "placement":   "conclusion"
+                "to_page":     product_url,
+                "anchor_text": f"{cta_verb} {seed.keyword}",
+                "placement":   "conclusion",
+                "intent":      dominant_intent,
             })
 
             # Cluster → pillar
             link_map["cluster_to_pillar"].append({
                 "cluster": cluster_name, "pillar_page": pillar_url,
-                "anchor_text": pillar_data["keyword"]
+                "anchor_text": pillar_kw, "intent": dominant_intent,
             })
 
-            # Topic → pillar
+            # Topic → pillar + sibling links
             for cluster, topics in pillar_data.get("clusters", {}).items():
                 topic_list = list(topics.keys())
                 for i, topic in enumerate(topic_list):
-                    topic_url = f"/{seed.keyword.replace(' ','-')}/{topic.lower().replace(' ','-')}"
+                    topic_data = topics[topic] if isinstance(topics[topic], dict) else {}
+                    best_kw = topic_data.get("best_keyword", topic)
+                    intent = topic_data.get("intent", "informational")
+                    score = float(scores.get(best_kw, 40)) if isinstance(scores.get(best_kw, 0), (int, float)) else 40
+
+                    topic_url = f"/{seed.keyword.replace(' ','-')}/{best_kw.lower().replace(' ','-')}"
+                    all_topics.append((topic, cluster_name, best_kw, intent, score, topic_url))
+
+                    # Topic → pillar (every topic links to its pillar)
                     link_map["topic_to_pillar"].append({
                         "from_page": topic_url, "to_page": pillar_url,
-                        "anchor_text": pillar_data["keyword"], "placement": "body"
+                        "anchor_text": pillar_kw, "placement": "body",
+                        "intent": intent,
                     })
-                    # Topic → sibling topic (lateral links)
+                    # Topic → sibling (prev and next, not just prev)
                     if i > 0:
                         prev_topic = topic_list[i-1]
-                        prev_url   = f"/{seed.keyword.replace(' ','-')}/{prev_topic.lower().replace(' ','-')}"
+                        prev_data = topics[prev_topic] if isinstance(topics[prev_topic], dict) else {}
+                        prev_kw = prev_data.get("best_keyword", prev_topic)
+                        prev_url = f"/{seed.keyword.replace(' ','-')}/{prev_kw.lower().replace(' ','-')}"
                         link_map["topic_to_topic"].append({
                             "from_page": topic_url, "to_page": prev_url,
-                            "anchor_text": prev_topic, "placement": "related-section"
+                            "anchor_text": prev_kw, "placement": "related-section",
                         })
+                    if i < len(topic_list) - 1:
+                        next_topic = topic_list[i+1]
+                        next_data = topics[next_topic] if isinstance(topics[next_topic], dict) else {}
+                        next_kw = next_data.get("best_keyword", next_topic)
+                        next_url = f"/{seed.keyword.replace(' ','-')}/{next_kw.lower().replace(' ','-')}"
+                        link_map["topic_to_topic"].append({
+                            "from_page": topic_url, "to_page": next_url,
+                            "anchor_text": next_kw, "placement": "related-section",
+                        })
+
+        # Cross-cluster authority links: high-score → low-score in different clusters
+        # Boosts weaker pages by linking from stronger ones
+        sorted_topics = sorted(all_topics, key=lambda x: x[4], reverse=True)
+        cross_link_count = 0
+        max_cross_links = min(50, len(all_topics))  # Cap total cross links
+        for i, (t1_name, t1_cluster, t1_kw, t1_intent, t1_score, t1_url) in enumerate(sorted_topics):
+            if cross_link_count >= max_cross_links:
+                break
+            # Find a low-score topic in a DIFFERENT cluster with related intent
+            for j in range(len(sorted_topics) - 1, max(i, len(sorted_topics)//2), -1):
+                t2_name, t2_cluster, t2_kw, t2_intent, t2_score, t2_url = sorted_topics[j]
+                if t2_cluster != t1_cluster and t1_url != t2_url:
+                    # Shared words between topic names → likely related
+                    t1_words = set(t1_name.lower().split())
+                    t2_words = set(t2_name.lower().split())
+                    shared = len(t1_words & t2_words)
+                    if shared >= 1:
+                        link_map["cross_cluster"].append({
+                            "from_page": t1_url, "to_page": t2_url,
+                            "anchor_text": t2_kw, "placement": "body",
+                            "reason": f"authority boost ({t1_score:.0f}→{t2_score:.0f})",
+                        })
+                        cross_link_count += 1
+                        break
+
+        # ── Location hub-spoke linking ────────────────────────────────────
+        # If business/target locations exist, create hub→spoke location links
+        biz_locs = seed.business_locations or []
+        tgt_locs = seed.target_locations or []
+        if biz_locs or tgt_locs:
+            link_map.setdefault("location_links", [])
+            # National hub page → regional spoke pages
+            national_url = f"/{seed.keyword.replace(' ','-')}"
+            for loc in tgt_locs[:10]:
+                loc_l = loc.lower().strip()
+                loc_url = f"/{seed.keyword.replace(' ','-')}/{loc_l.replace(' ','-')}"
+                link_map["location_links"].append({
+                    "from_page": national_url, "to_page": loc_url,
+                    "anchor_text": f"{seed.keyword} in {loc}", "placement": "body",
+                    "link_type": "hub_to_spoke",
+                })
+            # Business location pages → target location pages
+            for bl in biz_locs[:3]:
+                bl_l = bl.lower().strip()
+                bl_url = f"/{seed.keyword.replace(' ','-')}/{bl_l.replace(' ','-')}"
+                for tl in tgt_locs[:5]:
+                    tl_l = tl.lower().strip()
+                    if bl_l != tl_l:
+                        tl_url = f"/{seed.keyword.replace(' ','-')}/{tl_l.replace(' ','-')}"
+                        link_map["location_links"].append({
+                            "from_page": bl_url, "to_page": tl_url,
+                            "anchor_text": f"Available in {tl}",
+                            "placement": "cta",
+                            "link_type": "business_to_target",
+                        })
+            # Topic pages with location → location hub
+            for t_name, t_cluster, t_kw, t_intent, t_score, t_url in all_topics:
+                kw_l = t_kw.lower()
+                for loc in list(biz_locs) + list(tgt_locs[:5]):
+                    loc_l = loc.lower().strip()
+                    if loc_l and loc_l in kw_l:
+                        loc_url = f"/{seed.keyword.replace(' ','-')}/{loc_l.replace(' ','-')}"
+                        link_map["location_links"].append({
+                            "from_page": t_url, "to_page": loc_url,
+                            "anchor_text": f"More about {seed.keyword} in {loc}",
+                            "placement": "related-section",
+                            "link_type": "topic_to_location_hub",
+                        })
+                        break  # Only one location link per topic
 
         Cache.save_checkpoint(seed.id, self.phase, link_map)
         total = sum(len(v) for v in link_map.values())
-        log.info(f"[P12] Internal link map: {total} links generated")
+        log.info(f"[P12] Internal link map: {total} links generated ({cross_link_count} cross-cluster)")
         return link_map
 
 
@@ -2074,32 +2915,69 @@ class P13_ContentCalendar:
 
     def _schedule(self, articles: List[dict], pace: ContentPace,
                    start: datetime, seed: Seed) -> List[dict]:
-        # Sort: info-gap / question-type first, then by score desc
+        # ── Location-aware priority sorting ──────────────────────────────
+        biz_locs = set(l.lower().strip() for l in (seed.business_locations or []) if l)
+        tgt_locs = set(l.lower().strip() for l in (seed.target_locations or []) if l)
+
+        def _loc_tier(art):
+            """0 = business loc (highest), 1 = target loc, 2 = no location."""
+            kw = (art.get("keyword", "") + " " + art.get("title", "")).lower()
+            for bl in biz_locs:
+                if bl in kw:
+                    return 0
+            for tl in tgt_locs:
+                if tl in kw:
+                    return 1
+            return 2
+
+        # Sort: pillar pages first, then by location tier, then score desc
         articles.sort(key=lambda a: (
+            0 if a.get("is_pillar") else 1,
+            _loc_tier(a),
             0 if a.get("intent") == "informational" and "?" in a.get("title","") else 1,
-            -a.get("score",0)
+            -a.get("score", 0),
         ))
 
-        calendar = []
-        current_date = start
-        day_counter  = 0
+        # ── Inter-pillar round-robin ─────────────────────────────────────
+        # Group articles by cluster, then interleave so we don't publish
+        # all articles from one pillar back-to-back
+        by_cluster = {}
+        for art in articles:
+            c = art.get("cluster", "_none")
+            by_cluster.setdefault(c, []).append(art)
 
-        # Build date → slot map
-        slots_per_day = pace.blogs_per_day
-        article_idx   = 0
+        # Round-robin across clusters
+        interleaved = []
+        cluster_queues = list(by_cluster.values())
+        idx = 0
+        while cluster_queues:
+            q = cluster_queues[idx % len(cluster_queues)]
+            if q:
+                interleaved.append(q.pop(0))
+            if not q:
+                cluster_queues.pop(idx % len(cluster_queues))
+                if not cluster_queues:
+                    break
+                idx = idx % len(cluster_queues)
+            else:
+                idx += 1
+
+        # ── Assign dates ─────────────────────────────────────────────────
+        calendar = []
+        article_idx = 0
 
         for day in range(pace.total_days):
             pub_date = start + timedelta(days=day)
-            if article_idx >= len(articles):
+            if article_idx >= len(interleaved):
                 break
 
-            cluster = articles[article_idx].get("cluster","")
+            cluster = interleaved[article_idx].get("cluster","")
             day_slots = pace.blogs_per_day_for_pillar(cluster)
 
             for slot in range(day_slots):
-                if article_idx >= len(articles):
+                if article_idx >= len(interleaved):
                     break
-                art = articles[article_idx].copy()
+                art = interleaved[article_idx].copy()
                 art["scheduled_date"] = pub_date.strftime("%Y-%m-%d")
                 art["status"]         = "scheduled"
                 art["frozen"]         = False
@@ -2149,6 +3027,19 @@ class P14_DedupPrevention:
         seen     = set()
         removed  = 0
 
+        # Build location name set for location-aware dedup
+        _loc_names = set()
+        for loc in (seed.target_locations or []) + (seed.business_locations or []):
+            if loc:
+                _loc_names.add(loc.lower().strip())
+
+        def _strip_locations(text: str) -> str:
+            """Remove known location names from text for comparison."""
+            t = text
+            for loc in _loc_names:
+                t = t.replace(loc, "")
+            return re.sub(r"\s+", " ", t).strip()
+
         # Pass 1: Exact/near-exact title dedup
         for art in calendar:
             title_norm = re.sub(r"[^\w\s]","",art.get("title","")).lower().strip()
@@ -2159,13 +3050,35 @@ class P14_DedupPrevention:
             clean.append(art)
 
         # Pass 2: Keyword-level dedup (same target keyword = same article)
+        # Location-aware: "buy spices online" and "buy spices online mumbai" are DIFFERENT keywords
+        # But "spices in mumbai" and "spices mumbai" are the SAME (normalize location position)
         kw_seen, final = set(), []
         for art in clean:
             kw = art.get("keyword","").lower().strip()
-            if kw and kw in kw_seen:
+            if not kw:
+                final.append(art)
+                continue
+
+            # For location keywords, normalize to canonical form for dedup
+            kw_no_loc = _strip_locations(kw)
+            has_location = (kw_no_loc != kw)
+
+            if has_location:
+                # Location keyword: dedup key is "base + location" regardless of word order
+                # Extract which location is in the keyword
+                _loc_found = ""
+                for loc in _loc_names:
+                    if loc in kw:
+                        _loc_found = loc
+                        break
+                dedup_key = f"{kw_no_loc}|{_loc_found}"
+            else:
+                dedup_key = kw
+
+            if dedup_key in kw_seen:
                 removed += 1
                 continue
-            kw_seen.add(kw)
+            kw_seen.add(dedup_key)
             final.append(art)
 
         Cache.save_checkpoint(seed.id, self.phase, final)
@@ -2879,7 +3792,7 @@ class RufloOrchestrator:
             "cost_preview":     cost_preview,
             "link_map_size":    sum(len(v) for v in link_map.values()),
             "elapsed_seconds":  round(time.time()-t0, 1),
-            "_graph":           graph,
+            "_graph":           asdict(graph),
             "_link_map":        link_map,
             "_calendar":        calendar,
             "_entities":        entities,
@@ -3115,7 +4028,7 @@ Stages: expansion, normalize, intent, topics, calendar, dedup, brief, full, pace
 Environment (.env):
   GEMINI_API_KEY   = your free key (aistudio.google.com)
   ANTHROPIC_API_KEY= your Claude key (content writing only)
-  OLLAMA_URL       = http://localhost:11434
+  OLLAMA_URL       = http://172.235.16.165:11434
   WP_URL/USERNAME/APP_PASSWORD = for publishing
 """
     if len(sys.argv) < 2:
