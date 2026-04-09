@@ -66,7 +66,7 @@ const PHASES = [
 ]
 
 // ── Keyword Pillars Phase (from Keyword Workflow) ────────────────────────────
-function KeywordPillarsPhase({ projectId, setPage }) {
+function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
   const [openPillar, setOpenPillar] = useState(null)
   const [showBrief, setShowBrief] = useState(false)
   const [selected, setSelected] = useState(new Set()) // Set of "pillar|keyword"
@@ -74,7 +74,55 @@ function KeywordPillarsPhase({ projectId, setPage }) {
   const [editValue, setEditValue] = useState("")
   const [deleteConfirm, setDeleteConfirm] = useState(null) // "pillar|keyword" key
   const [hoveredRow, setHoveredRow] = useState(null)
+  const [kwView, setKwView] = useState("session") // "session" | "pipeline"
   const queryClient = useQueryClient()
+
+  // KW2 session keyword data (when session is active)
+  const sessionStrategy = kw2Session?._strategy || null
+  const sessionPillars = sessionStrategy?.priority_pillars || []
+  const sessionPillarStrategy = sessionStrategy?.pillar_strategy || []
+  const hasSessionData = !!kw2Session && (sessionPillars.length > 0 || sessionPillarStrategy.length > 0)
+
+  // Merge priority_pillars + pillar_strategy for rich display
+  const sessionKwMap = (() => {
+    const map = {}
+    sessionPillarStrategy.forEach((p, i) => {
+      const name = typeof p === "string" ? p : p?.pillar || p?.name || `Pillar ${i + 1}`
+      map[name] = typeof p === "object" ? p : { pillar: name }
+    })
+    sessionPillars.forEach(p => {
+      const name = typeof p === "string" ? p : p?.pillar || p?.name || ""
+      if (name && !map[name]) map[name] = typeof p === "object" ? p : { pillar: name }
+    })
+    return map
+  })()
+
+  const sessionLabel = kw2Session?.name ||
+    (Array.isArray(kw2Session?.seed_keywords) && kw2Session.seed_keywords.length
+      ? kw2Session.seed_keywords.slice(0, 3).join(" · ")
+      : kw2Session ? `Session ${(kw2Session.id || "").slice(-6)}` : null)
+
+  // ── Fetch KW2 session validated keywords (session-scoped view) ──
+  const { data: validatedData, isLoading: validatedLoading } = useQuery({
+    queryKey: ["kw2-validated-hub", projectId, kw2Session?.id],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${kw2Session.id}/validated`),
+    enabled: !!kw2Session?.id && !!projectId,
+    staleTime: 30_000,
+    retry: false,
+  })
+  // Group by pillar for expandable view
+  const sessionValidPillarMap = (() => {
+    const items = validatedData?.items || []
+    const map = {}
+    items.forEach(kw => {
+      const p = (kw.pillar || "Uncategorized").trim()
+      if (!map[p]) map[p] = []
+      map[p].push(kw)
+    })
+    return map
+  })()
+  const sessionValidPillars = Object.keys(sessionValidPillarMap).sort()
+  const [openSessionPillar, setOpenSessionPillar] = useState(null)
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["kw-strategy-brief", projectId],
@@ -219,6 +267,239 @@ function KeywordPillarsPhase({ projectId, setPage }) {
 
   return (
     <div>
+      {/* ── Session scope banner ── */}
+      {kw2Session && (
+        <div style={{
+          background: `${T.teal}08`, border: `1px solid ${T.teal}33`,
+          borderRadius: 10, padding: "10px 14px", marginBottom: 16,
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        }}>
+          <span style={{ fontSize: 18 }}>📌</span>
+          <div style={{ flex: 1 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: T.teal }}>Scoped to: </span>
+            <span style={{ fontSize: 12, color: T.text, fontWeight: 500 }}>{sessionLabel}</span>
+            {kw2Session.phase9_done && <span style={{ marginLeft: 8, fontSize: 10, padding: "1px 6px", borderRadius: 6, background: "#dcfce7", color: T.teal, fontWeight: 700 }}>✓ Strategy done</span>}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              onClick={() => setKwView("session")}
+              style={{ padding: "4px 10px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600,
+                background: kwView === "session" ? T.teal : T.grayLight, color: kwView === "session" ? "#fff" : T.gray }}
+            >Session Keywords</button>
+            <button
+              onClick={() => setKwView("pipeline")}
+              style={{ padding: "4px 10px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11, fontWeight: 600,
+                background: kwView === "pipeline" ? T.purple : T.grayLight, color: kwView === "pipeline" ? "#fff" : T.gray }}
+            >All Pipeline Keywords</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Session keyword view ── */}
+      {kw2Session && kwView === "session" && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h2 style={{ margin: 0, fontSize: 18 }}>Session Keywords</h2>
+            <div style={{ display: "flex", gap: 8 }}>
+              <span style={{ fontSize: 12, color: T.textSoft, padding: "4px 0" }}>
+                {sessionValidPillars.length > 0
+                  ? `${sessionValidPillars.length} pillars · ${(validatedData?.count || 0).toLocaleString()} keywords`
+                  : Object.keys(sessionKwMap).length > 0
+                    ? `${Object.keys(sessionKwMap).length} pillars from Phase 9`
+                    : "No keywords yet"}
+              </span>
+              {setPage && (
+                <button onClick={() => setPage("kw2")} style={{ padding: "5px 12px", borderRadius: 6, border: "none",
+                  background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
+                  Open in Keywords v2 →
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Session stats bar */}
+          {(validatedData?.count > 0 || Object.keys(sessionKwMap).length > 0) && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 14 }}>
+              {[
+                { label: "Pillars", val: sessionValidPillars.length || Object.keys(sessionKwMap).length, color: T.purple },
+                { label: "Validated", val: (validatedData?.count || 0).toLocaleString(), color: T.teal },
+                { label: "Universe", val: (kw2Session.universe_total || 0).toLocaleString(), color: T.amber },
+                { label: "Phase 9", val: kw2Session.phase9_done ? "✓ Done" : "Pending", color: kw2Session.phase9_done ? T.teal : T.gray },
+              ].map(s => (
+                <Card key={s.label} style={{ padding: "8px 12px", textAlign: "center" }}>
+                  <div style={{ fontSize: typeof s.val === "number" ? 20 : 13, fontWeight: 700, color: s.color }}>{s.val}</div>
+                  <div style={{ fontSize: 10, color: T.textSoft, marginTop: 2 }}>{s.label}</div>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* Validated keywords by pillar (expandable) */}
+          {validatedLoading && (
+            <div style={{ textAlign: "center", padding: 20, color: T.textSoft, fontSize: 12 }}>Loading session keywords…</div>
+          )}
+
+          {!validatedLoading && sessionValidPillars.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>
+                📋 Validated Keywords by Pillar
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {sessionValidPillars.map(pillar => {
+                  const kws = sessionValidPillarMap[pillar] || []
+                  const isOpen = openSessionPillar === pillar
+                  return (
+                    <div key={pillar} style={{ border: `1px solid ${T.border}`, borderRadius: 10, overflow: "hidden", background: "#fff" }}>
+                      <div
+                        onClick={() => setOpenSessionPillar(isOpen ? null : pillar)}
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "10px 14px", cursor: "pointer",
+                          background: isOpen ? `${T.purple}08` : "transparent",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ width: 7, height: 7, borderRadius: "50%", background: T.teal, flexShrink: 0 }} />
+                          <span style={{ fontWeight: 700, fontSize: 13, color: T.text }}>{pillar}</span>
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#fff",
+                            background: T.purple, borderRadius: 10, padding: "1px 8px" }}>
+                            {kws.length} keywords
+                          </span>
+                        </div>
+                        <span style={{ fontSize: 14, color: T.textSoft }}>{isOpen ? "▲" : "▼"}</span>
+                      </div>
+                      {isOpen && (
+                        <div style={{ maxHeight: 360, overflowY: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ background: "#f8f9fa", borderBottom: `1px solid ${T.border}` }}>
+                                <th style={{ padding: "6px 14px", textAlign: "left", fontWeight: 600, color: T.textSoft }}>#</th>
+                                <th style={{ padding: "6px 10px", textAlign: "left", fontWeight: 600, color: T.textSoft }}>Keyword</th>
+                                <th style={{ padding: "6px 10px", textAlign: "center", fontWeight: 600, color: T.textSoft, width: 70 }}>Score</th>
+                                <th style={{ padding: "6px 14px", textAlign: "center", fontWeight: 600, color: T.textSoft, width: 110 }}>Intent</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {kws.map((kw, idx) => {
+                                const sc = kw.score != null ? Math.round(kw.score) : null
+                                const iColor = ((i) => {
+                                  const m = { informational: "#3b82f6", transactional: "#10b981", navigational: "#f59e0b", commercial: "#8b5cf6" }
+                                  return m[(i || "").toLowerCase()] || "#6b7280"
+                                })(kw.intent)
+                                return (
+                                  <tr key={kw.id || idx} style={{ borderBottom: `1px solid ${T.border}08`, background: idx % 2 ? "#fafafa" : "#fff" }}>
+                                    <td style={{ padding: "5px 14px", color: T.textSoft, textAlign: "center", fontSize: 11 }}>{idx + 1}</td>
+                                    <td style={{ padding: "5px 10px", fontWeight: 500 }}>{kw.keyword}</td>
+                                    <td style={{ padding: "5px 10px", textAlign: "center" }}>
+                                      {sc != null && sc > 0 ? (
+                                        <span style={{ fontWeight: 700, color: sc >= 70 ? "#16a34a" : sc >= 50 ? "#d97706" : "#6b7280" }}>{sc}</span>
+                                      ) : <span style={{ color: T.textSoft }}>—</span>}
+                                    </td>
+                                    <td style={{ padding: "5px 14px", textAlign: "center" }}>
+                                      {kw.intent ? (
+                                        <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 8,
+                                          background: iColor + "20", color: iColor, fontWeight: 600 }}>
+                                          {kw.intent}
+                                        </span>
+                                      ) : <span style={{ color: T.textSoft }}>—</span>}
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Phase 9 strategy pillar summary when available */}
+          {!validatedLoading && Object.keys(sessionKwMap).length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>
+                🗺️ Strategy Pillar Summary (Phase 9)
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
+                {Object.entries(sessionKwMap).map(([pillarName, pillarData], i) => {
+                  const monthly = pillarData?.monthly_searches
+                  const rank = pillarData?.target_rank
+                  const diff = pillarData?.difficulty
+                  const ctype = pillarData?.content_type
+                  return (
+                    <Card key={pillarName + i} style={{ padding: "10px 12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: T.text, lineHeight: 1.3, flex: 1, marginRight: 8 }}>{pillarName}</div>
+                        {rank && (
+                          <div style={{ fontSize: 16, fontWeight: 800, color: rank <= 3 ? T.teal : T.amber, flexShrink: 0 }}>#{rank}</div>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {ctype && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 8, background: T.purpleLight, color: T.purpleDark, fontWeight: 600 }}>{ctype}</span>}
+                        {monthly && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 8, background: T.amberLight, color: T.amber, fontWeight: 600 }}>{monthly}/mo</span>}
+                        {diff && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 8,
+                          background: diff === "low" ? "#dcfce7" : diff === "high" ? "#fee2e2" : "#fef9c3",
+                          color: diff === "low" ? T.teal : diff === "high" ? T.red : "#a16207",
+                          fontWeight: 600 }}>{diff}</span>}
+                      </div>
+                    </Card>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Empty state — no keywords in session */}
+          {!validatedLoading && sessionValidPillars.length === 0 && Object.keys(sessionKwMap).length === 0 && (
+            <Card style={{ padding: 28, textAlign: "center" }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>⚠️</div>
+              <div style={{ fontSize: 13, color: T.textSoft }}>
+                {kw2Session.universe_total > 0
+                  ? `This session has ${kw2Session.universe_total.toLocaleString()} universe keywords. Run Phase 3 to validate them.`
+                  : "No keywords in this session yet. Run Phase 2 to generate the keyword universe."}
+              </div>
+              {setPage && (
+                <button onClick={() => setPage("kw2")} style={{ marginTop: 12, padding: "6px 18px", borderRadius: 8, border: "none",
+                  background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
+                  Continue in Keywords v2 →
+                </button>
+              )}
+            </Card>
+          )}
+
+          {/* Content calendar from strategy */}
+          {sessionStrategy?.content_calendar?.length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.purpleDark, marginBottom: 10 }}>Content Calendar from Strategy</div>
+              <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4 }}>
+                {sessionStrategy.content_calendar.slice(0, 4).map((month, i) => (
+                  <div key={i} style={{ minWidth: 200, background: "#f8f9fa", borderRadius: 10, padding: 12, flexShrink: 0, border: `1px solid ${T.border}` }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>
+                      {month.month} — {month.focus_pillar}
+                    </div>
+                    {(month.articles || []).slice(0, 3).map((a, j) => (
+                      <div key={j} style={{ background: "#fff", borderRadius: 6, padding: "5px 8px", marginBottom: 3, fontSize: 11, border: `0.5px solid ${T.border}` }}>
+                        <div style={{ fontWeight: 600, marginBottom: 1 }}>{a.title}</div>
+                        <div style={{ color: T.textSoft, fontSize: 10 }}>{a.type} · {a.word_count || 1500} words</div>
+                      </div>
+                    ))}
+                    {(month.articles || []).length > 3 && (
+                      <div style={{ fontSize: 10, color: T.textSoft, marginTop: 4 }}>+{month.articles.length - 3} more</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Pipeline / KI data view ── */}
+      {(!kw2Session || kwView === "pipeline") && (
+      <div>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 20 }}>
         <div>
@@ -644,23 +925,19 @@ function KeywordPillarsPhase({ projectId, setPage }) {
           )}
         </Card>
       )}
+      </div>
+      )}
 
-      {/* ── Edit Keyword Modal ─────────────────────────────────────────────── */}
+      {/* Edit keyword modal — always render outside conditionals */}
       {editModal && (
-        <div
-          onClick={() => setEditModal(null)}
-          style={{
-            position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 9999,
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: "#fff", borderRadius: 14, padding: 28, width: 440, maxWidth: "90vw",
-              boxShadow: "0 24px 64px rgba(0,0,0,0.22)",
-            }}
-          >
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <div style={{
+            background: "#fff", borderRadius: 16, padding: 28, width: 400, maxWidth: "90vw",
+            boxShadow: "0 12px 40px rgba(0,0,0,0.25)",
+          }}>
             <div style={{ fontWeight: 700, fontSize: 17, color: T.text, marginBottom: 4 }}>Edit Keyword</div>
             <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 20 }}>
               Pillar: <strong style={{ color: T.purpleDark }}>{editModal.pillar}</strong>
@@ -704,7 +981,7 @@ function KeywordPillarsPhase({ projectId, setPage }) {
 //  ANALYSIS PHASE — Merged Research + Scoring + Quick Wins (3 tabs)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function AnalysisPhase({ projectId, strategy }) {
+function AnalysisPhase({ projectId, strategy, kw2Session }) {
   const [tab, setTab] = useState("research")
 
   const { data: kwBriefData } = useQuery({
@@ -754,6 +1031,42 @@ function AnalysisPhase({ projectId, strategy }) {
       <p style={{ margin: "0 0 14px", fontSize: 13, color: T.textSoft }}>
         Research insights, scoring, and quick-win opportunities from your {allKws.length} keywords.
       </p>
+
+      {/* Session strategy highlights */}
+      {kw2Session?._strategy && (
+        <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {/* Quick wins from session */}
+          {(kw2Session._strategy.quick_wins || []).length > 0 && (
+            <Card style={{ border: `1px solid ${T.teal}33` }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.teal, marginBottom: 8 }}>
+                🍎 Quick Wins · {kw2Session.name || "Active Session"}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                {(kw2Session._strategy.quick_wins || []).slice(0, 5).map((w, i) => (
+                  <li key={i} style={{ fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}>
+                    {typeof w === "string" ? w : w?.keyword || w?.title || JSON.stringify(w)}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+          {/* Competitor gaps from session */}
+          {(kw2Session._strategy.competitive_gaps || kw2Session._strategy.competitor_gaps || []).length > 0 && (
+            <Card style={{ border: `1px solid ${T.amber}33` }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.amber, marginBottom: 8 }}>
+                ⚡ Competitor Gaps · {kw2Session.name || "Active Session"}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                {(kw2Session._strategy.competitive_gaps || kw2Session._strategy.competitor_gaps || []).slice(0, 5).map((g, i) => (
+                  <li key={i} style={{ fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}>
+                    {typeof g === "string" ? g : g?.gap || g?.topic || g?.title || JSON.stringify(g)}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+        </div>
+      )}
 
       {/* Tab bar */}
       <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: `1px solid ${T.border}`, paddingBottom: 2 }}>
@@ -965,14 +1278,18 @@ function AnalysisPhase({ projectId, strategy }) {
 //  STRATEGY PHASE — Goals + AI Strategy Roadmap (merged)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function StrategyPhase({ projectId, setPage }) {
+function StrategyPhase({ projectId, setPage, selectedSessionId, setSelectedSessionId, kw2Sessions = [] }) {
   const qc = useQueryClient()
   const [generating, setGenerating] = useState(false)
   const [logs, setLogs] = useState([])
   const [genError, setGenError] = useState("")
   const [showGoals, setShowGoals] = useState(false)
   const [goalForm, setGoalForm] = useState({ goal_type: "traffic", target_metric: 10, timeframe_months: 24, business_outcome: "", business_type: "ecommerce" })
-  const [selectedKw2SessionId, setSelectedKw2SessionId] = useState(null)
+
+  // Use lifted session state; fall back to local if props not provided
+  const [localSessionId, setLocalSessionId] = useState(null)
+  const selectedKw2SessionId = selectedSessionId !== undefined ? selectedSessionId : localSessionId
+  const setSelectedKw2SessionId = setSelectedSessionId || setLocalSessionId
 
   const { data: kwBriefData } = useQuery({
     queryKey: ["kw-strategy-brief", projectId],
@@ -984,13 +1301,9 @@ function StrategyPhase({ projectId, setPage }) {
   const clusters = kwCtx.content_clusters || []
   const allKws = Object.values(kwBrief?.keywords_json || {}).flat()
 
-  const { data: kw2SessionsData, isLoading: kw2Loading } = useQuery({
-    queryKey: ["kw2-strategy-sessions", projectId],
-    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/list`),
-    enabled: !!projectId,
-    retry: false,
-    staleTime: 30_000,
-  })
+  // Use sessions from parent hub (kw2Sessions prop); no duplicate query
+  const kw2Loading = false
+  const refetchSessions = () => {} // handled at hub level
 
   const { data: latestStrategy, refetch } = useQuery({
     queryKey: ["latest-strategy-hub", projectId],
@@ -1004,20 +1317,10 @@ function StrategyPhase({ projectId, setPage }) {
   })
   const legacyStrat = latestStrategy?.strategy || latestStrategy?.result_json?.strategy || null
 
-  const kw2Sessions = (kw2SessionsData?.sessions || []).map((s) => {
-    let parsed = null
-    const raw = s?.strategy_json
-    if (raw) {
-      try {
-        parsed = typeof raw === "string" ? JSON.parse(raw) : raw
-      } catch {
-        parsed = null
-      }
-    }
-    return { ...s, _strategy: parsed }
-  })
+  // kw2Sessions comes from the hub prop (already processed with _strategy)
   const kw2Completed = kw2Sessions.filter((s) => s.phase9_done || s._strategy)
-  const selectedKw2Session = kw2Completed.find((s) => s.id === selectedKw2SessionId) || null
+  // selectedKw2Session searches ALL sessions so in-progress ones can also be selected
+  const selectedKw2Session = kw2Sessions.find((s) => s.id === selectedKw2SessionId) || null
 
   const { data: selectedKw2Strategy } = useQuery({
     queryKey: ["kw2-session-strategy", projectId, selectedKw2SessionId],
@@ -1062,6 +1365,85 @@ function StrategyPhase({ projectId, setPage }) {
     if (!v) return "-"
     const d = new Date(v)
     return Number.isNaN(d.getTime()) ? "-" : d.toLocaleDateString()
+  }
+  const normTopic = (v) => {
+    const raw = String(v || "").trim().replace(/[\s_\-]+/g, " ")
+    if (!raw) return ""
+    return raw.length > 42 ? `${raw.slice(0, 39)}...` : raw
+  }
+  const getSessionTopics = (s) => {
+    const fromPriority = (s?._strategy?.priority_pillars || []).map((p) => {
+      if (typeof p === "string") return p
+      return p?.pillar || p?.name || p?.topic || ""
+    })
+    const fromPillarStrategy = (s?._strategy?.pillar_strategy || []).map((p) => {
+      if (typeof p === "string") return p
+      return p?.pillar || p?.name || p?.topic || ""
+    })
+    const fromCalendar = (s?._strategy?.content_calendar || []).map((c) => c?.focus_pillar || c?.pillar || "")
+    const fromWeekly = (s?._strategy?.weekly_plan || []).map((w) => w?.focus_pillar || w?.pillar || "")
+    const fromSession = [
+      s?.pillar,
+      s?.topic,
+      Array.isArray(s?.seed_keywords) ? s.seed_keywords[0] : "",
+    ]
+    const seen = new Set()
+    const out = []
+    for (const t of [...fromPriority, ...fromPillarStrategy, ...fromCalendar, ...fromWeekly, ...fromSession]) {
+      const label = normTopic(t)
+      if (!label) continue
+      const k = label.toLowerCase()
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(label)
+      if (out.length >= 4) break
+    }
+    return out.length ? out : ["General"]
+  }
+  // Group ALL sessions (in-progress + completed) so every keyword research is visible
+  const topicBySessionId = new Map(kw2Sessions.map((s) => [s.id, getSessionTopics(s)]))
+  const groupedByTopicMap = kw2Sessions.reduce((acc, s) => {
+    const key = topicBySessionId.get(s.id)?.[0] || "General"
+    if (!acc[key]) acc[key] = []
+    acc[key].push(s)
+    return acc
+  }, {})
+  const topicGroups = Object.entries(groupedByTopicMap)
+    .map(([topic, sessions]) => ({ topic, sessions }))
+    .sort((a, b) => {
+      // Completed-strategy groups first, then groups with selected session, then by size
+      const aHasDone = a.sessions.some((s) => s.phase9_done || s._strategy) ? 1 : 0
+      const bHasDone = b.sessions.some((s) => s.phase9_done || s._strategy) ? 1 : 0
+      if (aHasDone !== bHasDone) return bHasDone - aHasDone
+      const aHasSelected = a.sessions.some((s) => s.id === selectedKw2SessionId) ? 1 : 0
+      const bHasSelected = b.sessions.some((s) => s.id === selectedKw2SessionId) ? 1 : 0
+      if (aHasSelected !== bHasSelected) return bHasSelected - aHasSelected
+      if (a.sessions.length !== b.sessions.length) return b.sessions.length - a.sessions.length
+      return a.topic.localeCompare(b.topic)
+    })
+
+  const routeToPage = (page) => {
+    if (typeof setPage === "function") setPage(page)
+  }
+  const openKw2Session = (s) => {
+    setSelectedKw2SessionId(s.id)
+    try {
+      localStorage.setItem("annaseo_kw2_open_session", JSON.stringify({
+        projectId,
+        sessionId: s.id,
+        mode: s.mode || "brand",
+        ts: Date.now(),
+      }))
+    } catch {}
+    routeToPage("kw2")
+  }
+  const openCalendar = (s) => {
+    setSelectedKw2SessionId(s.id)
+    routeToPage("blogs")
+  }
+  const openContentHub = (s) => {
+    setSelectedKw2SessionId(s.id)
+    routeToPage("content")
   }
 
   const startGeneration = async () => {
@@ -1125,7 +1507,8 @@ function StrategyPhase({ projectId, setPage }) {
       difficulty: "medium",
     }
   })
-  const competitorGaps = (strat?.competitor_gaps || strat?.content_gaps || []).map((g) => {
+  // competitive_gaps = engine field name; content_gaps / competitor_gaps = AI-generated field names
+  const competitorGaps = (strat?.competitor_gaps || strat?.competitive_gaps || strat?.content_gaps || []).map((g) => {
     if (typeof g === "string") return g
     return g?.gap || g?.topic || g?.title || JSON.stringify(g)
   })
@@ -1220,51 +1603,116 @@ function StrategyPhase({ projectId, setPage }) {
               All keyword research for this project is grouped here. Select a session card to view its Phase 9 strategy.
             </div>
           </div>
-          <Badge label={`${kw2Completed.length} strategy session${kw2Completed.length !== 1 ? "s" : ""}`} color={T.teal} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Badge label={`${kw2Sessions.length} session${kw2Sessions.length !== 1 ? "s" : ""} · ${kw2Completed.length} with strategy`} color={T.teal} />
+            <Btn small variant="outline" onClick={() => refetchSessions()}>↺ Refresh</Btn>
+          </div>
         </div>
 
         {kw2Loading ? (
           <div style={{ fontSize: 12, color: T.textSoft, padding: "6px 0" }}>Loading keyword research sessions...</div>
-        ) : kw2Completed.length === 0 ? (
+        ) : kw2Sessions.length === 0 ? (
           <div style={{ fontSize: 12, color: T.textSoft, padding: "6px 0" }}>
-            No KW2 sessions with Phase 9 strategy yet. Complete all 9 phases in Keywords v2 to populate Strategy Hub cards.
+            No keyword research sessions yet.{" "}
+            {setPage && <button onClick={() => routeToPage("kw2")} style={{ color: T.teal, background: "none", border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, padding: 0 }}>Start one in Keywords v2 →</button>}
           </div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
-            {kw2Completed.map((s) => {
-              const selected = selectedKw2SessionId === s.id
-              const title = sessionLabel(s)
-              const summary = s._strategy?.strategy_summary?.headline || s._strategy?.executive_summary || "Phase 9 strategy ready"
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => setSelectedKw2SessionId(s.id)}
-                  style={{
-                    textAlign: "left",
-                    borderRadius: 10,
-                    border: selected ? `2px solid ${T.teal}` : `1px solid ${T.border}`,
-                    background: selected ? `${T.teal}14` : "#fff",
-                    padding: "10px 12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{title}</div>
-                    <Badge label={s.phase9_done ? "Phase 9 Done" : "Draft"} color={s.phase9_done ? T.teal : T.gray} />
-                  </div>
-                  <div style={{ fontSize: 10, color: T.textSoft, marginBottom: 6 }}>
-                    {(s.mode || "brand").toUpperCase()} · {phaseDoneCount(s)}/9 phases · {shortDate(s.created_at)}
-                  </div>
-                  <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
-                    <Badge label={`${s.universe_total || 0} universe`} color={T.purple} />
-                    <Badge label={`${s.validated_total || 0} validated`} color={T.amber} />
-                  </div>
-                  <div style={{ fontSize: 11, color: T.textSoft, lineHeight: 1.4 }}>
-                    {String(summary).slice(0, 120)}{String(summary).length > 120 ? "..." : ""}
-                  </div>
-                </button>
-              )
-            })}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {topicGroups.map((g) => (
+              <div key={g.topic} style={{ border: `1px solid ${T.border}`, borderRadius: 10, padding: 10, background: "#fff" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: T.purpleDark }}>Pillar / Topic · {g.topic}</div>
+                  <Badge label={`${g.sessions.length} session${g.sessions.length !== 1 ? "s" : ""}`} color={T.purpleDark} />
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+                  {g.sessions.map((s) => {
+                    const selected = selectedKw2SessionId === s.id
+                    const hasStrategy = s.phase9_done || !!s._strategy
+                    const title = sessionLabel(s)
+                    const phasesDone = phaseDoneCount(s)
+                    const summary = hasStrategy
+                      ? (s._strategy?.strategy_summary?.headline || s._strategy?.executive_summary || "Strategy ready")
+                      : `${phasesDone}/9 phases complete — run Phase 9 to generate strategy`
+                    const sessionTopics = topicBySessionId.get(s.id) || []
+                    return (
+                      <div
+                        key={s.id}
+                        onClick={() => setSelectedKw2SessionId(s.id)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault()
+                            setSelectedKw2SessionId(s.id)
+                          }
+                        }}
+                        style={{
+                          textAlign: "left",
+                          borderRadius: 10,
+                          border: selected
+                            ? `2px solid ${hasStrategy ? T.teal : T.amber}`
+                            : `1px solid ${T.border}`,
+                          background: selected
+                            ? (hasStrategy ? `${T.teal}14` : `${T.amber}0d`)
+                            : "#fff",
+                          padding: "10px 12px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{title}</div>
+                          <Badge
+                            label={hasStrategy ? "Strategy Ready" : `${phasesDone}/9 phases`}
+                            color={hasStrategy ? T.teal : T.amber}
+                          />
+                        </div>
+                        <div style={{ fontSize: 10, color: T.textSoft, marginBottom: 6 }}>
+                          {(s.mode || "brand").toUpperCase()} · {shortDate(s.created_at)}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                          <Badge label={`${s.universe_total || 0} universe`} color={T.purple} />
+                          <Badge label={`${s.validated_total || 0} validated`} color={T.amber} />
+                          {hasStrategy && sessionTopics.slice(0, 2).map((topic) => (
+                            <Badge key={`${s.id}-${topic}`} label={topic} color={T.purpleDark} />
+                          ))}
+                        </div>
+                        {/* Phase progress dots for in-progress sessions */}
+                        {!hasStrategy && (
+                          <div style={{ display: "flex", gap: 4, marginBottom: 6, alignItems: "center" }}>
+                            {[1,2,3,4,5,6,7,8,9].map((i) => (
+                              <div key={i} style={{
+                                width: 7, height: 7, borderRadius: "50%",
+                                background: s[`phase${i}_done`] ? T.teal : T.border,
+                                flexShrink: 0,
+                              }} title={`Phase ${i}`} />
+                            ))}
+                            <span style={{ fontSize: 9, color: T.textSoft, marginLeft: 4 }}>{phasesDone}/9</span>
+                          </div>
+                        )}
+                        <div style={{ fontSize: 11, color: T.textSoft, lineHeight: 1.4, marginBottom: 8 }}>
+                          {String(summary).slice(0, 120)}{String(summary).length > 120 ? "..." : ""}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <Btn
+                            small
+                            variant={hasStrategy ? "outline" : "primary"}
+                            onClick={(e) => { e.stopPropagation(); openKw2Session(s) }}
+                          >
+                            {hasStrategy ? "Open in Keywords v2" : "Continue in Keywords v2 →"}
+                          </Btn>
+                          {hasStrategy && (
+                            <>
+                              <Btn small variant="outline" onClick={(e) => { e.stopPropagation(); openCalendar(s) }}>Open Calendar</Btn>
+                              <Btn small variant="outline" onClick={(e) => { e.stopPropagation(); openContentHub(s) }}>Open Content Hub</Btn>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </Card>
@@ -1286,16 +1734,30 @@ function StrategyPhase({ projectId, setPage }) {
         <div style={{ fontSize: 12, color: T.red }}>Error: {genError}</div>
       </Card>}
 
-      {/* Empty state */}
+      {/* Empty state — contextual based on whether a session is selected */}
       {!strat && !generating && (
-        <Card style={{ textAlign: "center", padding: 40 }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}>🗺️</div>
-          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>No strategy generated yet</div>
-          <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 16 }}>
-            Click "Generate Strategy" to create an AI-powered SEO roadmap based on your keywords and goals.
-          </div>
-          <Btn variant="primary" onClick={startGeneration}>Generate Strategy</Btn>
-        </Card>
+        selectedKw2Session && !selectedKw2Session.phase9_done ? (
+          <Card style={{ textAlign: "center", padding: 32, marginBottom: 14 }}>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>🚀</div>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+              Phase 9 not yet complete for &ldquo;{sessionLabel(selectedKw2Session)}&rdquo;
+            </div>
+            <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 16 }}>
+              Complete Phase 9 in Keywords v2 to generate the AI strategy for this session.
+              The card above will automatically update when ready.
+            </div>
+            <Btn variant="primary" onClick={() => openKw2Session(selectedKw2Session)}>Continue in Keywords v2 →</Btn>
+          </Card>
+        ) : (
+          <Card style={{ textAlign: "center", padding: 40 }}>
+            <div style={{ fontSize: 36, marginBottom: 12 }}>🗺️</div>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>No strategy generated yet</div>
+            <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 16 }}>
+              Complete all 9 phases in Keywords v2 to generate an AI strategy for your keyword research sessions.
+            </div>
+            {setPage && <Btn variant="outline" onClick={() => routeToPage("kw2")}>Go to Keywords v2 →</Btn>}
+          </Card>
+        )
       )}
 
       {/* Strategy display */}
@@ -1473,13 +1935,15 @@ function PipelineProgress({ articleId }) {
   )
 }
 
-function ContentHubPhase({ projectId }) {
+function ContentHubPhase({ projectId, kw2Session }) {
   const qc = useQueryClient()
   const [openCluster, setOpenCluster] = useState(null)
   const [addTopicIdx, setAddTopicIdx] = useState(null) // cluster index for add-topic form
   const [addForm, setAddForm] = useState({ title: "", target_keyword: "", intent: "informational" })
   const [genKeyword, setGenKeyword] = useState("")
   const [selectedArticle, setSelectedArticle] = useState(null)
+  const [aiProvider, setAiProvider] = useState("auto") // AI provider for topic generation
+  const [nTopics, setNTopics] = useState(25) // number of topics to generate
 
   const { data: kwBriefData, refetch: refetchBrief } = useQuery({
     queryKey: ["kw-strategy-brief", projectId],
@@ -1525,7 +1989,10 @@ function ContentHubPhase({ projectId }) {
   })
 
   const regenMut = useMutation({
-    mutationFn: (clusterIndex) => apiFetch(`/api/ki/${projectId}/cluster/${clusterIndex}/regenerate-topics`, { method: "POST" }),
+    mutationFn: (clusterIndex) => apiFetch(`/api/ki/${projectId}/cluster/${clusterIndex}/regenerate-topics`, {
+      method: "POST",
+      body: JSON.stringify({ provider: aiProvider, n_topics: nTopics }),
+    }),
     onSuccess: () => refetchBrief(),
   })
 
@@ -1541,8 +2008,81 @@ function ContentHubPhase({ projectId }) {
   const statusCounts = articleList.reduce((acc, a) => { acc[a.status] = (acc[a.status] || 0) + 1; return acc }, {})
   const inStyle = { width: "100%", padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 12, boxSizing: "border-box" }
 
+  // AI Provider options
+  const AI_PROVIDERS = [
+    { value: "auto", label: "🤖 Auto (Best Available)" },
+    { value: "groq", label: "⚡ Groq (Fast)" },
+    { value: "gemini", label: "✨ Gemini Free" },
+    { value: "gemini_paid", label: "✨ Gemini Pro" },
+    { value: "openai", label: "🧠 OpenAI GPT-4o" },
+    { value: "claude", label: "🎭 Claude" },
+    { value: "ollama", label: "🦙 Ollama (Local)" },
+  ]
+
+  // Session content calendar (from active KW2 session strategy)
+  const sessionCalendar = kw2Session?._strategy?.content_calendar || []
+  const sessionPillars = kw2Session?._strategy?.pillar_strategy || kw2Session?._strategy?.priority_pillars || []
+  const sessionLabel = kw2Session?.name ||
+    (Array.isArray(kw2Session?.seed_keywords) && kw2Session.seed_keywords.length
+      ? kw2Session.seed_keywords.slice(0, 2).join(" · ") : "")
+
   return (
     <div>
+      {/* AI Provider selector bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, padding: "10px 14px",
+        background: `${T.purple}06`, borderRadius: 10, border: `1px solid ${T.purple}22`, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, fontWeight: 700, color: T.purpleDark, textTransform: "uppercase" }}>AI Engine:</span>
+        <select
+          value={aiProvider}
+          onChange={e => setAiProvider(e.target.value)}
+          style={{ fontSize: 12, padding: "4px 10px", borderRadius: 7, border: `1px solid ${T.border}`,
+            background: "#fff", color: T.text, fontWeight: 500, cursor: "pointer" }}
+        >
+          {AI_PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+        </select>
+        <span style={{ fontSize: 11, fontWeight: 700, color: T.purpleDark, textTransform: "uppercase", marginLeft: 12 }}>Topics per cluster:</span>
+        <select
+          value={nTopics}
+          onChange={e => setNTopics(Number(e.target.value))}
+          style={{ fontSize: 12, padding: "4px 10px", borderRadius: 7, border: `1px solid ${T.border}`,
+            background: "#fff", color: T.text, fontWeight: 500, cursor: "pointer" }}
+        >
+          {[10, 15, 20, 25, 30, 40, 50, 75, 100, 150, 200].map(n => <option key={n} value={n}>{n} topics</option>)}
+        </select>
+        <span style={{ fontSize: 11, color: T.textSoft, marginLeft: "auto" }}>
+          Used for "Generate Topics" on each cluster
+        </span>
+      </div>
+
+      {/* Session content calendar section (when session selected) */}
+      {kw2Session && sessionCalendar.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.teal, marginBottom: 10 }}>
+            📅 Session Content Plan · {sessionLabel}
+          </div>
+          <div style={{ display: "flex", gap: 12, overflowX: "auto", paddingBottom: 4 }}>
+            {sessionCalendar.map((month, i) => (
+              <div key={i} style={{ minWidth: 220, borderRadius: 10, border: `1px solid ${T.border}`,
+                padding: 12, background: "#fff", flexShrink: 0, boxShadow: T.cardShadow }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>
+                  {month.month} — {month.focus_pillar}
+                </div>
+                {(month.articles || []).map((a, j) => (
+                  <div key={j} style={{ padding: "6px 8px", borderRadius: 7, background: "#f8f9fa",
+                    marginBottom: 4, fontSize: 11, border: `0.5px solid ${T.border}` }}>
+                    <div style={{ fontWeight: 600, lineHeight: 1.3, marginBottom: 2 }}>{a.title}</div>
+                    <div style={{ color: T.textSoft, fontSize: 10 }}>
+                      {a.type} · {a.word_count || 1500} words
+                      {a.target_keyword && <span style={{ color: T.purple }}> · {a.target_keyword}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: 18 }}>Content Hub</h2>
@@ -1725,7 +2265,7 @@ function ContentHubPhase({ projectId }) {
                   <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
                     <Btn small variant="outline" onClick={() => setAddTopicIdx(ci)}>+ Add Topic</Btn>
                     <Btn small variant="outline" onClick={() => regenMut.mutate(ci)}
-                      loading={regenMut.isPending}>🔄 Regenerate 15 Topics</Btn>
+                      loading={regenMut.isPending}>🔄 Generate {nTopics} Topics</Btn>
                   </div>
                 )}
               </div>
@@ -1788,7 +2328,7 @@ const KW_SESSION_MODE_STYLE = {
 
 const KW_PHASE_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-function KwSessionCard({ session, projectId, setPage }) {
+function KwSessionCard({ session, projectId, setPage, isSelected, onSelect }) {
   const [expanded, setExpanded] = useState(false)
   const [strategy, setStrategy] = useState(null)
   const [stratLoading, setStratLoading] = useState(false)
@@ -1806,7 +2346,11 @@ function KwSessionCard({ session, projectId, setPage }) {
 
   const toggle = async () => {
     if (!hasStrategy) return
-    if (!expanded && !strategy && !stratError) {
+    // If closed and in error state with no data, clear error to allow retry
+    if (!expanded && stratError && !strategy) {
+      setStratError(null)
+    }
+    if (!expanded && !strategy && !stratError && !stratLoading) {
       setStratLoading(true)
       setStratError(null)
       try {
@@ -1898,9 +2442,24 @@ function KwSessionCard({ session, projectId, setPage }) {
               Complete Phase 9 to generate strategy
             </div>
           )}
+          {/* Set Active / Selected button */}
+          {onSelect && (
+            <button
+              onClick={() => onSelect(isSelected ? null : session.id)}
+              style={{
+                width: "100%", padding: "6px 0", borderRadius: 7, border: "none",
+                background: isSelected ? T.teal : `${T.teal}18`,
+                color: isSelected ? "#fff" : T.teal,
+                fontWeight: 700, fontSize: 11, cursor: "pointer", transition: "all .12s",
+                marginBottom: 4,
+              }}
+            >
+              {isSelected ? "✓ Active Session" : "Set as Active Session"}
+            </button>
+          )}
           {setPage && (
             <button
-              onClick={() => setPage("keywords")}
+              onClick={() => setPage("kw2")}
               style={{
                 width: "100%", padding: "6px 0", borderRadius: 7,
                 border: `1px solid ${st.border}`,
@@ -1936,22 +2495,12 @@ function KwSessionCard({ session, projectId, setPage }) {
 
 // ── KwSessionsOverview ────────────────────────────────────────────────────────
 
-function KwSessionsOverview({ projectId, setPage }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["kw2-sessions", projectId],
-    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/list`),
-    staleTime: 0,
-    enabled: !!projectId,
-  })
-  const sessions = data?.sessions || []
+function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSessionId, onSelectSession, onNavigate }) {
+  const sessions = kw2Sessions
 
-  if (isLoading) {
-    return (
-      <div style={{ padding: 40, textAlign: "center", color: T.textSoft, fontSize: 14 }}>
-        Loading keyword research sessions…
-      </div>
-    )
-  }
+  const totalUniverse = sessions.reduce((s, x) => s + (x.universe_total || 0), 0)
+  const totalValidated = sessions.reduce((s, x) => s + (x.validated_total || 0), 0)
+  const completedCount = sessions.filter(s => s.phase9_done || s._strategy).length
 
   if (sessions.length === 0) {
     return (
@@ -1966,14 +2515,14 @@ function KwSessionsOverview({ projectId, setPage }) {
         </div>
         {setPage && (
           <button
-            onClick={() => setPage("keywords")}
+            onClick={() => setPage("kw2")}
             style={{
               padding: "9px 22px", borderRadius: 9, border: "none",
               background: T.purple, color: "#fff", cursor: "pointer",
               fontWeight: 700, fontSize: 13,
             }}
           >
-            → Go to Keyword Research
+            → Start Keyword Research
           </button>
         )}
       </div>
@@ -1982,17 +2531,16 @@ function KwSessionsOverview({ projectId, setPage }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: 18 }}>Keyword Research Sessions</h2>
           <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textSoft }}>
-            {sessions.length} session{sessions.length !== 1 ? "s" : ""} for this project —
-            click a card to expand its strategy
+            {sessions.length} session{sessions.length !== 1 ? "s" : ""} · select a card to scope all Strategy tabs to that session
           </p>
         </div>
         {setPage && (
           <button
-            onClick={() => setPage("keywords")}
+            onClick={() => setPage("kw2")}
             style={{
               padding: "6px 14px", borderRadius: 7, border: `1px solid ${T.border}`,
               background: "#fff", color: T.purpleDark, cursor: "pointer",
@@ -2004,13 +2552,63 @@ function KwSessionsOverview({ projectId, setPage }) {
         )}
       </div>
 
+      {/* Combined card — aggregated across all sessions */}
+      {sessions.length > 1 && (
+        <div style={{
+          borderRadius: 12, border: `2px dashed ${T.purple}44`,
+          background: `${T.purple}05`, padding: 16, marginBottom: 18,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <span style={{ fontSize: 22 }}>📊</span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.purpleDark }}>All Sessions Combined</div>
+              <div style={{ fontSize: 11, color: T.textSoft }}>
+                Aggregated view across all {sessions.length} keyword research sessions for this project
+              </div>
+            </div>
+            <button
+              onClick={() => onSelectSession && onSelectSession(null)}
+              style={{
+                marginLeft: "auto", padding: "5px 12px", borderRadius: 7, border: `1px solid ${T.purple}44`,
+                background: !selectedSessionId ? T.purple : "transparent",
+                color: !selectedSessionId ? "#fff" : T.purpleDark,
+                fontWeight: 600, fontSize: 11, cursor: "pointer",
+              }}
+            >
+              {!selectedSessionId ? "● Active" : "Set Active"}
+            </button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            {[
+              { label: "Total Sessions", val: sessions.length, color: T.purple },
+              { label: "With Strategy", val: completedCount, color: T.teal },
+              { label: "Combined Universe", val: totalUniverse.toLocaleString(), color: T.purpleDark },
+              { label: "Combined Validated", val: totalValidated.toLocaleString(), color: T.teal },
+            ].map(s => (
+              <div key={s.label} style={{ background: "#fff", borderRadius: 8, padding: "10px 12px", textAlign: "center", boxShadow: T.cardShadow }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.val}</div>
+                <div style={{ fontSize: 10, color: T.textSoft, marginTop: 4, textTransform: "uppercase", letterSpacing: ".05em" }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Individual session cards */}
       <div style={{
         display: "grid",
         gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
         gap: 16,
       }}>
         {sessions.map(s => (
-          <KwSessionCard key={s.id} session={s} projectId={projectId} setPage={setPage} />
+          <KwSessionCard
+            key={s.id}
+            session={s}
+            projectId={projectId}
+            setPage={setPage}
+            isSelected={selectedSessionId === s.id}
+            onSelect={onSelectSession}
+          />
         ))}
       </div>
     </div>
@@ -3131,8 +3729,14 @@ function QuickWinsPhase({ projectId }) {
 }
 
 // ── Phase 6: Link Building ────────────────────────────────────────────────
-function LinkBuildingPhase({ projectId }) {
+function LinkBuildingPhase({ projectId, kw2Session }) {
   const qc = useQueryClient()
+
+  // Session link building plan (if active session has strategy)
+  const sessionLinkPlan = kw2Session?._strategy?.link_building_plan || null
+  const sessionLabel = kw2Session?.name ||
+    (Array.isArray(kw2Session?.seed_keywords) && kw2Session.seed_keywords.length
+      ? kw2Session.seed_keywords.slice(0, 2).join(" · ") : null)
 
   const { data: plan } = useQuery({
     queryKey: ["si-link-plan", projectId],
@@ -3175,9 +3779,54 @@ function LinkBuildingPhase({ projectId }) {
   return (
     <div>
       <h2 style={{ margin: "0 0 4px", fontSize: 18 }}>Link Building</h2>
-      <p style={{ margin: "0 0 20px", fontSize: 13, color: T.textSoft }}>
+      <p style={{ margin: "0 0 16px", fontSize: 13, color: T.textSoft }}>
         Internal linking from clusters, competitor link gaps, money pages, and tracked link opportunities.
       </p>
+
+      {/* Session link building plan */}
+      {sessionLinkPlan && (
+        <Card style={{ marginBottom: 16, border: `1px solid ${T.purple}33`, background: `${T.purple}04` }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>
+            🔗 AI Link Strategy · {sessionLabel || "Active Session"}
+          </div>
+          {typeof sessionLinkPlan === "string" ? (
+            <p style={{ fontSize: 12, color: T.text, lineHeight: 1.6, margin: 0 }}>{sessionLinkPlan}</p>
+          ) : Array.isArray(sessionLinkPlan) ? (
+            <ul style={{ margin: 0, paddingLeft: 16 }}>
+              {sessionLinkPlan.map((item, i) => (
+                <li key={i} style={{ fontSize: 12, marginBottom: 5, lineHeight: 1.4 }}>
+                  {typeof item === "string" ? item : item?.strategy || item?.tactic || JSON.stringify(item)}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div>
+              {sessionLinkPlan.outreach_targets && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, marginBottom: 4 }}>Outreach Targets</div>
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {(sessionLinkPlan.outreach_targets || []).slice(0, 5).map((t, i) => (
+                      <li key={i} style={{ fontSize: 12, marginBottom: 3 }}>{t}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {sessionLinkPlan.strategies && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, marginBottom: 4 }}>Strategies</div>
+                  <ul style={{ margin: 0, paddingLeft: 16 }}>
+                    {(sessionLinkPlan.strategies || []).slice(0, 5).map((s, i) => (
+                      <li key={i} style={{ fontSize: 12, marginBottom: 3 }}>
+                        {typeof s === "string" ? s : s?.name || JSON.stringify(s)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
         {/* Link Building Plan */}
@@ -4343,6 +4992,39 @@ function StrategyResultsPhase({ projectId, setPage }) {
 
 export default function StrategyIntelligenceHub({ projectId, setPage }) {
   const [activePhase, setActivePhase] = useState("overview")
+  const [selectedSessionId, setSelectedSessionId] = useState(null)
+
+  // ── Shared KW2 sessions query (passed to all phases) ──
+  const { data: kw2SessionsData, refetch: refetchHubSessions } = useQuery({
+    queryKey: ["kw2-hub-sessions", projectId],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/list`),
+    enabled: !!projectId,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    refetchInterval: 20_000,
+  })
+  const kw2Sessions = (kw2SessionsData?.sessions || []).map(s => {
+    let _strategy = null
+    const raw = s?.strategy_json
+    if (raw) { try { _strategy = typeof raw === "string" ? JSON.parse(raw) : raw } catch {} }
+    return { ...s, _strategy }
+  })
+  const selectedSession = kw2Sessions.find(s => s.id === selectedSessionId) || null
+
+  // Auto-select first completed session when none chosen
+  useEffect(() => {
+    if (selectedSessionId) return
+    const done = kw2Sessions.filter(s => s.phase9_done || s._strategy)
+    if (done.length > 0) setSelectedSessionId(done[0].id)
+  }, [kw2Sessions.length]) // eslint-disable-line
+
+  const hubSessionLabel = (s) => {
+    if (!s) return ""
+    if (s.name) return s.name
+    if (Array.isArray(s.seed_keywords) && s.seed_keywords.length) return s.seed_keywords.slice(0, 3).join(" · ")
+    return `Session ${(s.id || "").slice(-6)}`
+  }
 
   // Load strategy context
   const { data: strategy, isLoading } = useQuery({
@@ -4395,15 +5077,66 @@ export default function StrategyIntelligenceHub({ projectId, setPage }) {
         ))}
       </div>
 
-      {/* Main content */}
-      <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto" }}>
-        {activePhase === "overview"  && <KwSessionsOverview projectId={projectId} setPage={setPage} />}
-        {activePhase === "keywords"  && <KeywordPillarsPhase projectId={projectId} setPage={setPage} />}
-        {activePhase === "analysis"  && <AnalysisPhase projectId={projectId} strategy={strategy} />}
-        {activePhase === "strategy"  && <StrategyPhase projectId={projectId} setPage={setPage} />}
-        {activePhase === "content"   && <ContentHubPhase projectId={projectId} />}
-        {activePhase === "links"     && <LinkBuildingPhase projectId={projectId} />}
-        {activePhase === "goals"     && <GoalsPhase projectId={projectId} />}
+      {/* Right panel: context bar + content */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {/* ── SESSION CONTEXT BAR ────────────────────────────────────────── */}
+        {kw2Sessions.length > 0 && (
+          <div style={{
+            padding: "7px 20px",
+            borderBottom: `1px solid ${T.border}`,
+            background: selectedSession ? `${T.purple}05` : "#fefefe",
+            display: "flex", alignItems: "center", gap: 10, flexShrink: 0,
+            flexWrap: "wrap",
+          }}>
+            <span style={{ fontSize: 10, color: T.textSoft, fontWeight: 700, textTransform: "uppercase", letterSpacing: .05 }}>Active Session:</span>
+            <select
+              value={selectedSessionId || ""}
+              onChange={e => setSelectedSessionId(e.target.value || null)}
+              style={{
+                fontSize: 12, padding: "3px 8px", borderRadius: 6,
+                border: `1px solid ${T.border}`, background: "#fff",
+                color: T.text, fontWeight: 500, maxWidth: 300, cursor: "pointer",
+              }}
+            >
+              <option value="">— All Sessions —</option>
+              {kw2Sessions.map(s => {
+                const done = [1,2,3,4,5,6,7,8,9].filter(i => s[`phase${i}_done`]).length
+                return (
+                  <option key={s.id} value={s.id}>
+                    {hubSessionLabel(s)} {s.phase9_done ? "✓" : `(${done}/9)`}
+                  </option>
+                )
+              })}
+            </select>
+            {selectedSession && (
+              <>
+                <span style={{ fontSize: 11, color: T.teal, fontWeight: 600 }}>
+                  {(selectedSession.validated_total || 0).toLocaleString()} validated
+                  {" · "}
+                  {(selectedSession.universe_total || 0).toLocaleString()} universe
+                </span>
+                {selectedSession.phase9_done && (
+                  <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 8, background: "#dcfce7", color: T.teal, fontWeight: 700 }}>✓ Strategy Ready</span>
+                )}
+              </>
+            )}
+            <button
+              onClick={() => refetchHubSessions()}
+              style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", borderRadius: 5, border: `1px solid ${T.border}`, background: "transparent", cursor: "pointer", color: T.textSoft }}
+            >↺</button>
+          </div>
+        )}
+
+        {/* Main content */}
+        <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto" }}>
+          {activePhase === "overview"  && <KwSessionsOverview projectId={projectId} setPage={setPage} kw2Sessions={kw2Sessions} selectedSessionId={selectedSessionId} onSelectSession={setSelectedSessionId} onNavigate={setActivePhase} />}
+          {activePhase === "keywords"  && <KeywordPillarsPhase projectId={projectId} setPage={setPage} kw2Session={selectedSession} />}
+          {activePhase === "analysis"  && <AnalysisPhase projectId={projectId} strategy={strategy} kw2Session={selectedSession} />}
+          {activePhase === "strategy"  && <StrategyPhase projectId={projectId} setPage={setPage} selectedSessionId={selectedSessionId} setSelectedSessionId={setSelectedSessionId} kw2Sessions={kw2Sessions} />}
+          {activePhase === "content"   && <ContentHubPhase projectId={projectId} kw2Session={selectedSession} />}
+          {activePhase === "links"     && <LinkBuildingPhase projectId={projectId} kw2Session={selectedSession} />}
+          {activePhase === "goals"     && <GoalsPhase projectId={projectId} />}
+        </div>
       </div>
     </div>
   )
