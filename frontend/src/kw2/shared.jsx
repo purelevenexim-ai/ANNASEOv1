@@ -4,6 +4,7 @@
  */
 import React, { useRef, useEffect, useState, useCallback } from "react"
 import useKw2Store from "./store"
+import { normalizePhaseKey } from "./flow"
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -44,41 +45,90 @@ export function usePhaseRunner(badge) {
 
 /* ───────────────────────── Phase Stepper ───────────────────────── */
 
-export function PhaseStepper({ current, completed, onSelect }) {
-  const phases = [
-    { n: 1, label: "Analyze" },
-    { n: 2, label: "Generate" },
-    { n: 3, label: "Validate" },
-    { n: 4, label: "Score" },
-    { n: 5, label: "Tree" },
-    { n: 6, label: "Graph" },
-    { n: 7, label: "Links" },
-    { n: 8, label: "Calendar" },
-    { n: 9, label: "Strategy" },
-  ]
+export function PhaseStepper({ current, completed, onSelect, flow = null, phaseStatus = {}, mode = "brand" }) {
+  const labelMap = {
+    README: "Guide",
+    1: "Analyze",
+    BI: "Intel",
+    SEARCH: "Search",
+    2: "Generate",
+    3: "Validate",
+    REVIEW: "Review",
+    4: "Score",
+    5: "Tree",
+    6: "Graph",
+    7: "Links",
+    8: "Calendar",
+    9: "Strategy",
+    UNDERSTAND: "Understand",
+    EXPAND: "Expand",
+    ORGANIZE: "Organize",
+    APPLY: "Apply",
+  }
+
+  const iconMap = {
+    README: "📖", BI: "🧠", SEARCH: "🔎", REVIEW: "✅",
+    UNDERSTAND: "🏢", EXPAND: "🌱", ORGANIZE: "📊", APPLY: "🚀",
+  }
+
+  const baseFlow = Array.isArray(flow) && flow.length
+    ? flow.map(normalizePhaseKey)
+    : [1, "BI", "SEARCH", 2, 3, "REVIEW", 4, 5, 6, 7, 8, 9]
+
+  // For v2 flows (no numbered phases) skip the README guide step
+  const hasNumberedPhases = baseFlow.some((p) => typeof p === "number")
+  const stepKeys = hasNumberedPhases ? ["README", ...baseFlow] : baseFlow
+
+  const phases = stepKeys.map((n) => ({ n, label: labelMap[n] || String(n) }))
+  const currentNorm = normalizePhaseKey(current)
+
+  // Parse phaseStatus — may be a JSON string or object
+  let parsedStatus = {}
+  if (typeof phaseStatus === "string") {
+    try { parsedStatus = JSON.parse(phaseStatus) } catch { parsedStatus = {} }
+  } else if (phaseStatus && typeof phaseStatus === "object") {
+    parsedStatus = phaseStatus
+  }
+
+  const V2_PHASES = ["UNDERSTAND", "EXPAND", "ORGANIZE", "APPLY"]
 
   return (
     <div style={{ display: "flex", gap: 4, marginBottom: 16, flexWrap: "wrap" }}>
       {phases.map((p) => {
-        const done = completed >= p.n
-        const active = current === p.n || (current === "REVIEW" && p.n === 3)
+        const isV2Phase = V2_PHASES.includes(p.n)
+        const done = isV2Phase
+          ? parsedStatus[String(p.n).toLowerCase()] === "done"
+          : (typeof p.n === "number" && completed >= p.n) ||
+            (p.n === "REVIEW" && completed >= 3)
+        const active = currentNorm === p.n
+        const icon = iconMap[p.n]
         return (
           <button
             key={p.n}
             onClick={() => onSelect(p.n)}
             style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              border: active ? "2px solid #3b82f6" : "1px solid #e5e7eb",
+              padding: isV2Phase ? "8px 18px" : "6px 14px",
+              borderRadius: isV2Phase ? 8 : 6,
+              border: active
+                ? "2px solid #3b82f6"
+                : done
+                  ? "1px solid #86efac"
+                  : "1px solid #e5e7eb",
               background: done ? "#10b981" : active ? "#eff6ff" : "#fff",
               color: done ? "#fff" : active ? "#3b82f6" : "#6b7280",
               fontWeight: active ? 600 : 400,
-              fontSize: 13,
+              fontSize: isV2Phase ? 13 : 13,
               cursor: "pointer",
               transition: "all 150ms",
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
             }}
           >
-            {p.n}. {p.label} {done && "\u2713"}
+            {icon && <span>{icon}</span>}
+            {!icon && typeof p.n === "number" && <span>{p.n}.</span>}
+            {p.label}
+            {done && <span style={{ fontSize: 11 }}>✓</span>}
           </button>
         )
       })}
@@ -381,40 +431,82 @@ export function ConsolePanel({ filterBadge, maxHeight = 240, defaultOpen = false
 
 export function LiveConsole({ logs, maxHeight = 280 }) {
   const endRef = useRef(null)
+  const { clearLogs } = useKw2Store()
+  const [filterBadge, setFilterBadge] = useState(null)
+  const [open, setOpen] = useState(true)
+
+  const filtered = filterBadge
+    ? logs.filter((l) => l.badge === filterBadge || l.type === "error")
+    : logs
+  const errorCount = (logs || []).filter((l) => l.type === "error").length
+  const badges = [...new Set((logs || []).map((l) => l.badge).filter(Boolean))]
+
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [logs.length])
+    if (open) endRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [filtered.length, open])
+
   if (!logs || !logs.length) return null
 
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: ".5px" }}>
-          Session Console
-        </span>
-        <Badge color="green">{logs.length} events</Badge>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6 }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: ".5px" }}>
+            Session Console
+          </span>
+          <Badge color="green">{filtered.length} events</Badge>
+          {errorCount > 0 && <Badge color="red">{errorCount} error{errorCount > 1 ? "s" : ""}</Badge>}
+          <span style={{ fontSize: 10, color: "#9ca3af" }}>{open ? "▼" : "▶"}</span>
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {badges.length > 1 && (
+            <select
+              value={filterBadge || ""}
+              onChange={(e) => setFilterBadge(e.target.value || null)}
+              style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, border: "1px solid #d1d5db", background: "#f9fafb" }}
+            >
+              <option value="">All phases</option>
+              {badges.map((b) => <option key={b} value={b}>{b}</option>)}
+            </select>
+          )}
+          <button
+            onClick={clearLogs}
+            style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, border: "1px solid #d1d5db", background: "#fff", cursor: "pointer", color: "#6b7280" }}
+          >
+            Clear
+          </button>
+        </div>
       </div>
-      <div style={{
-        background: "#1e1e2e", borderRadius: 8, padding: "10px 14px", maxHeight,
-        overflowY: "auto", fontFamily: "'JetBrains Mono','Fira Code',monospace",
-        fontSize: 12, lineHeight: 1.7, border: "1px solid #313244",
-      }}>
-        {logs.map((entry, i) => {
-          const type = entry.type || "info"
-          return (
-            <div key={i} style={{ color: LOG_COLORS[type] || LOG_COLORS.info, display: "flex", gap: 8 }}>
-              <span style={{ color: "#585b70", flexShrink: 0 }}>{entry.time}</span>
-              {entry.badge && (
-                <span style={{ background: LOG_BADGE_BG[type] || LOG_BADGE_BG.info, color: LOG_COLORS[type] || LOG_COLORS.info, padding: "0 6px", borderRadius: 3, fontSize: 11, flexShrink: 0 }}>
-                  {entry.badge}
-                </span>
-              )}
-              <span>{entry.text}</span>
-            </div>
-          )
-        })}
-        <div ref={endRef} />
-      </div>
+      {open && (
+        <div style={{
+          background: "#1e1e2e", borderRadius: 8, padding: "10px 14px", maxHeight,
+          overflowY: "auto", fontFamily: "'JetBrains Mono','Fira Code',monospace",
+          fontSize: 12, lineHeight: 1.7, border: "1px solid #313244",
+        }}>
+          {filtered.length === 0 ? (
+            <span style={{ color: "#585b70" }}>No events{filterBadge ? ` for ${filterBadge}` : ""}.</span>
+          ) : (
+            filtered.map((entry, i) => {
+              const type = entry.type || "info"
+              return (
+                <div key={i} style={{ color: LOG_COLORS[type] || LOG_COLORS.info, display: "flex", gap: 8 }}>
+                  <span style={{ color: "#585b70", flexShrink: 0 }}>{entry.time}</span>
+                  {entry.badge && (
+                    <span style={{ background: LOG_BADGE_BG[type] || LOG_BADGE_BG.info, color: LOG_COLORS[type] || LOG_COLORS.info, padding: "0 6px", borderRadius: 3, fontSize: 11, flexShrink: 0 }}>
+                      {entry.badge}
+                    </span>
+                  )}
+                  <span>{entry.text}</span>
+                </div>
+              )
+            })
+          )}
+          <div ref={endRef} />
+        </div>
+      )}
     </div>
   )
 }
@@ -449,6 +541,76 @@ export function ToastContainer({ toasts, onDismiss }) {
         )
       })}
       <style>{`@keyframes kw2SlideIn { from{opacity:0;transform:translateX(30px)} to{opacity:1;transform:translateX(0)} }`}</style>
+    </div>
+  )
+}
+
+/* ───────────────────────── Stats Row ───────────────────────── */
+
+/* ───────────────────────── Tag Input ───────────────────────── */
+
+export function TagInput({ tags, onChange, placeholder, color = "#3b82f6", bgColor = "#eff6ff", disabled }) {
+  const [input, setInput] = useState("")
+  const ref = useRef(null)
+
+  const addTags = (raw) => {
+    const newTags = raw.split(",").map((s) => s.trim()).filter(Boolean)
+    if (!newTags.length) return
+    onChange([...new Set([...tags, ...newTags])])
+  }
+
+  const handleKey = (e) => {
+    if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault()
+      addTags(input)
+      setInput("")
+    } else if (e.key === "Backspace" && !input && tags.length) {
+      onChange(tags.slice(0, -1))
+    }
+  }
+
+  const remove = (idx) => onChange(tags.filter((_, i) => i !== idx))
+
+  return (
+    <div
+      onClick={() => ref.current?.focus()}
+      style={{
+        display: "flex", flexWrap: "wrap", gap: 4, padding: "6px 8px",
+        border: "1px solid #d1d5db", borderRadius: 6, minHeight: 38,
+        background: disabled ? "#f3f4f6" : "#fff", cursor: "text",
+      }}
+    >
+      {tags.map((tag, i) => (
+        <span
+          key={`${tag}-${i}`}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            padding: "2px 8px", borderRadius: 12, fontSize: 12, fontWeight: 500,
+            background: bgColor, color, border: `1px solid ${color}33`,
+          }}
+        >
+          {tag}
+          {!disabled && (
+            <button
+              onClick={(e) => { e.stopPropagation(); remove(i) }}
+              style={{ background: "none", border: "none", cursor: "pointer", color, fontSize: 14, lineHeight: 1, padding: 0 }}
+            >×</button>
+          )}
+        </span>
+      ))}
+      <input
+        ref={ref}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={handleKey}
+        onBlur={() => { if (input.trim()) { addTags(input); setInput("") } }}
+        disabled={disabled}
+        placeholder={tags.length === 0 ? placeholder : ""}
+        style={{
+          flex: 1, minWidth: 120, border: "none", outline: "none",
+          fontSize: 13, padding: "2px 4px", background: "transparent",
+        }}
+      />
     </div>
   )
 }
@@ -526,7 +688,63 @@ export function KeywordTable({ keywords, onExplain, maxRows = 50 }) {
 
 export function StreamLog({ events }) {
   if (!events || !events.length) return null
+  return null
+}
+
+// ── StrategyTab — renders a kw2 apply strategy document ───────────────────
+export function StrategyTab({ strategy }) {
+  if (!strategy) {
+    return (
+      <p style={{ fontSize: 13, color: "#9ca3af", textAlign: "center", padding: 16 }}>
+        No strategy generated yet.
+      </p>
+    )
+  }
+
+  if (typeof strategy === "string") {
+    return (
+      <div style={{ whiteSpace: "pre-wrap", fontSize: 13, lineHeight: 1.7, color: "#374151", padding: 8 }}>
+        {strategy}
+      </div>
+    )
+  }
+
+  const sections = strategy.sections ||
+    Object.entries(strategy).filter(([k]) => k !== "id" && k !== "session_id")
+
   return (
-    <ConsolePanel defaultOpen />
+    <div style={{ padding: 8 }}>
+      {strategy.title && (
+        <h3 style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginBottom: 16 }}>
+          {strategy.title}
+        </h3>
+      )}
+      {strategy.summary && (
+        <p style={{ fontSize: 13, color: "#6b7280", marginBottom: 16, lineHeight: 1.6 }}>
+          {strategy.summary}
+        </p>
+      )}
+      {Array.isArray(sections) ? (
+        sections.map((section, i) => {
+          const title = section.title || section.heading || section[0]
+          const content = section.content || section.body || section[1]
+          return (
+            <div key={i} style={{ marginBottom: 20 }}>
+              <h4 style={{ fontSize: 15, fontWeight: 600, color: "#1f2937", marginBottom: 6,
+                borderBottom: "1px solid #e5e7eb", paddingBottom: 4 }}>
+                {typeof title === "string" ? title : JSON.stringify(title)}
+              </h4>
+              <div style={{ fontSize: 13, lineHeight: 1.7, color: "#374151", whiteSpace: "pre-wrap" }}>
+                {typeof content === "string" ? content : JSON.stringify(content, null, 2)}
+              </div>
+            </div>
+          )
+        })
+      ) : (
+        <div style={{ fontSize: 13, lineHeight: 1.7, color: "#374151", whiteSpace: "pre-wrap" }}>
+          {JSON.stringify(strategy, null, 2)}
+        </div>
+      )}
+    </div>
   )
 }
