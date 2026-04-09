@@ -4,6 +4,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { StrategyTab } from "./kw2/shared"
 
 const API = import.meta.env.VITE_API_URL || ""
 function authHeaders() {
@@ -971,6 +972,7 @@ function StrategyPhase({ projectId, setPage }) {
   const [genError, setGenError] = useState("")
   const [showGoals, setShowGoals] = useState(false)
   const [goalForm, setGoalForm] = useState({ goal_type: "traffic", target_metric: 10, timeframe_months: 24, business_outcome: "", business_type: "ecommerce" })
+  const [selectedKw2SessionId, setSelectedKw2SessionId] = useState(null)
 
   const { data: kwBriefData } = useQuery({
     queryKey: ["kw-strategy-brief", projectId],
@@ -982,6 +984,14 @@ function StrategyPhase({ projectId, setPage }) {
   const clusters = kwCtx.content_clusters || []
   const allKws = Object.values(kwBrief?.keywords_json || {}).flat()
 
+  const { data: kw2SessionsData, isLoading: kw2Loading } = useQuery({
+    queryKey: ["kw2-strategy-sessions", projectId],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/list`),
+    enabled: !!projectId,
+    retry: false,
+    staleTime: 30_000,
+  })
+
   const { data: latestStrategy, refetch } = useQuery({
     queryKey: ["latest-strategy-hub", projectId],
     queryFn: async () => {
@@ -992,7 +1002,41 @@ function StrategyPhase({ projectId, setPage }) {
     },
     enabled: !!projectId, retry: false,
   })
-  const strat = latestStrategy?.strategy || latestStrategy?.result_json?.strategy || null
+  const legacyStrat = latestStrategy?.strategy || latestStrategy?.result_json?.strategy || null
+
+  const kw2Sessions = (kw2SessionsData?.sessions || []).map((s) => {
+    let parsed = null
+    const raw = s?.strategy_json
+    if (raw) {
+      try {
+        parsed = typeof raw === "string" ? JSON.parse(raw) : raw
+      } catch {
+        parsed = null
+      }
+    }
+    return { ...s, _strategy: parsed }
+  })
+  const kw2Completed = kw2Sessions.filter((s) => s.phase9_done || s._strategy)
+  const selectedKw2Session = kw2Completed.find((s) => s.id === selectedKw2SessionId) || null
+
+  const { data: selectedKw2Strategy } = useQuery({
+    queryKey: ["kw2-session-strategy", projectId, selectedKw2SessionId],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${selectedKw2SessionId}/strategy`),
+    enabled: !!projectId && !!selectedKw2SessionId,
+    retry: false,
+  })
+
+  const strat = selectedKw2Strategy?.strategy || selectedKw2Session?._strategy || legacyStrat
+
+  useEffect(() => {
+    if (!kw2Completed.length) {
+      if (selectedKw2SessionId) setSelectedKw2SessionId(null)
+      return
+    }
+    if (!selectedKw2SessionId || !kw2Completed.some((s) => s.id === selectedKw2SessionId)) {
+      setSelectedKw2SessionId(kw2Completed[0].id)
+    }
+  }, [kw2Completed, selectedKw2SessionId])
 
   const setGoals = useMutation({
     mutationFn: (body) => apiFetch(`/api/si/${projectId}/goals`, { method: "POST", body: JSON.stringify(body) }),
@@ -1006,6 +1050,19 @@ function StrategyPhase({ projectId, setPage }) {
 
   const set = (k, v) => setGoalForm(f => ({ ...f, [k]: v }))
   const inStyle = { width: "100%", padding: "7px 10px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: "border-box" }
+
+  const sessionLabel = (s) => {
+    if (!s) return ""
+    if (s.name) return s.name
+    if (Array.isArray(s.seed_keywords) && s.seed_keywords.length) return s.seed_keywords.join(", ")
+    return `Session ${(s.id || "").slice(-6)}`
+  }
+  const phaseDoneCount = (s) => [1,2,3,4,5,6,7,8,9].filter((i) => s?.[`phase${i}_done`]).length
+  const shortDate = (v) => {
+    if (!v) return "-"
+    const d = new Date(v)
+    return Number.isNaN(d.getTime()) ? "-" : d.toLocaleDateString()
+  }
 
   const startGeneration = async () => {
     setGenerating(true); setLogs([]); setGenError("")
@@ -1039,12 +1096,41 @@ function StrategyPhase({ projectId, setPage }) {
   const levelColor = l => l === "success" ? T.teal : l === "error" ? T.red : l === "warn" ? T.amber : "#0f0"
   const confColor = c => c >= 80 ? T.teal : c >= 50 ? T.amber : T.red
 
-  const contentCalendar = strat?.content_calendar || []
-  const quickWins = strat?.quick_wins || []
-  const pillarStrategy = strat?.pillar_strategy || []
-  const competitorGaps = strat?.competitor_gaps || []
-  const kpis = strat?.kpis || []
-  const aeoTactics = strat?.aeo_tactics || []
+  const executiveSummary = strat?.executive_summary || strat?.strategy_summary?.headline || "Strategy generated."
+  const contentCalendar = strat?.content_calendar || (strat?.weekly_plan || []).map((w) => ({
+    month: `Week ${w.week || "-"}`,
+    focus_pillar: w.focus_pillar || w.pillar || "General",
+    articles: (w.articles || []).map((a) => {
+      if (typeof a === "string") return { title: a, type: "article", word_count: null }
+      return {
+        title: a?.title || a?.keyword || "Untitled",
+        type: a?.type || a?.intent || "article",
+        word_count: a?.word_count || null,
+      }
+    }),
+  }))
+  const quickWins = (strat?.quick_wins || []).map((w) => {
+    if (typeof w === "string") return w
+    return w?.keyword || w?.title || JSON.stringify(w)
+  })
+  const pillarStrategy = strat?.pillar_strategy || (strat?.priority_pillars || []).map((p) => {
+    if (typeof p === "string") {
+      return { pillar: p, content_type: "priority", monthly_searches: "-", target_rank: null, difficulty: "medium" }
+    }
+    return {
+      pillar: p?.pillar || p?.name || "Untitled",
+      content_type: "priority",
+      monthly_searches: p?.opportunity_score ?? "-",
+      target_rank: null,
+      difficulty: "medium",
+    }
+  })
+  const competitorGaps = (strat?.competitor_gaps || strat?.content_gaps || []).map((g) => {
+    if (typeof g === "string") return g
+    return g?.gap || g?.topic || g?.title || JSON.stringify(g)
+  })
+  const kpis = Array.isArray(strat?.kpis) ? strat.kpis : []
+  const aeoTactics = (strat?.aeo_tactics || []).map((t) => (typeof t === "string" ? t : JSON.stringify(t)))
 
   return (
     <div>
@@ -1060,7 +1146,7 @@ function StrategyPhase({ projectId, setPage }) {
             {showGoals ? "Hide Goals" : "Set Goals"}
           </Btn>
           <Btn small variant="primary" onClick={startGeneration} disabled={generating}>
-            {generating ? "Generating..." : strat ? "Regenerate" : "Generate Strategy"}
+            {generating ? "Generating..." : kw2Completed.length ? "Generate Legacy Strategy" : strat ? "Regenerate" : "Generate Strategy"}
           </Btn>
         </div>
       </div>
@@ -1125,6 +1211,64 @@ function StrategyPhase({ projectId, setPage }) {
         </div>
       )}
 
+      {/* KW2 session grouping + per-session cards */}
+      <Card style={{ marginBottom: 16, border: `1px solid ${T.teal}33` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.teal }}>Keyword Research Sessions (Project Group)</div>
+            <div style={{ fontSize: 11, color: T.textSoft }}>
+              All keyword research for this project is grouped here. Select a session card to view its Phase 9 strategy.
+            </div>
+          </div>
+          <Badge label={`${kw2Completed.length} strategy session${kw2Completed.length !== 1 ? "s" : ""}`} color={T.teal} />
+        </div>
+
+        {kw2Loading ? (
+          <div style={{ fontSize: 12, color: T.textSoft, padding: "6px 0" }}>Loading keyword research sessions...</div>
+        ) : kw2Completed.length === 0 ? (
+          <div style={{ fontSize: 12, color: T.textSoft, padding: "6px 0" }}>
+            No KW2 sessions with Phase 9 strategy yet. Complete all 9 phases in Keywords v2 to populate Strategy Hub cards.
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+            {kw2Completed.map((s) => {
+              const selected = selectedKw2SessionId === s.id
+              const title = sessionLabel(s)
+              const summary = s._strategy?.strategy_summary?.headline || s._strategy?.executive_summary || "Phase 9 strategy ready"
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => setSelectedKw2SessionId(s.id)}
+                  style={{
+                    textAlign: "left",
+                    borderRadius: 10,
+                    border: selected ? `2px solid ${T.teal}` : `1px solid ${T.border}`,
+                    background: selected ? `${T.teal}14` : "#fff",
+                    padding: "10px 12px",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{title}</div>
+                    <Badge label={s.phase9_done ? "Phase 9 Done" : "Draft"} color={s.phase9_done ? T.teal : T.gray} />
+                  </div>
+                  <div style={{ fontSize: 10, color: T.textSoft, marginBottom: 6 }}>
+                    {(s.mode || "brand").toUpperCase()} · {phaseDoneCount(s)}/9 phases · {shortDate(s.created_at)}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                    <Badge label={`${s.universe_total || 0} universe`} color={T.purple} />
+                    <Badge label={`${s.validated_total || 0} validated`} color={T.amber} />
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textSoft, lineHeight: 1.4 }}>
+                    {String(summary).slice(0, 120)}{String(summary).length > 120 ? "..." : ""}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </Card>
+
       {/* Generation console */}
       {(generating || logs.length > 0) && (
         <Card style={{ marginBottom: 16 }}>
@@ -1161,7 +1305,12 @@ function StrategyPhase({ projectId, setPage }) {
           <div style={{ display: "flex", gap: 14, marginBottom: 14 }}>
             <Card style={{ flex: 1, background: T.purpleLight, border: `1px solid ${T.purple}33` }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: T.purpleDark, marginBottom: 6 }}>EXECUTIVE SUMMARY</div>
-              <div style={{ fontSize: 13, color: T.text, lineHeight: 1.6 }}>{strat.executive_summary || "Strategy generated."}</div>
+              {selectedKw2Session && (
+                <div style={{ marginBottom: 6 }}>
+                  <Badge label={`Source: KW2 · ${sessionLabel(selectedKw2Session)}`} color={T.teal} />
+                </div>
+              )}
+              <div style={{ fontSize: 13, color: T.text, lineHeight: 1.6 }}>{executiveSummary}</div>
             </Card>
             {strat.strategy_confidence > 0 && (
               <div style={{ width: 100, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -1183,11 +1332,13 @@ function StrategyPhase({ projectId, setPage }) {
                     padding: "6px 8px", background: T.grayLight, borderRadius: 8, marginBottom: 5 }}>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 600 }}>{p.pillar}</div>
-                      <div style={{ fontSize: 10, color: T.textSoft, marginTop: 1 }}>{p.content_type} · {p.monthly_searches || "??"}/mo</div>
+                      <div style={{ fontSize: 10, color: T.textSoft, marginTop: 1 }}>{p.content_type || "priority"} · {p.monthly_searches ?? "-"}</div>
                     </div>
                     <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: (p.target_rank || 99) <= 3 ? T.teal : T.amber }}>#{p.target_rank}</div>
-                      <div style={{ fontSize: 10, color: p.difficulty === "low" ? T.teal : p.difficulty === "high" ? T.red : T.amber }}>{p.difficulty}</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: p.target_rank ? ((p.target_rank || 99) <= 3 ? T.teal : T.amber) : T.gray }}>
+                        {p.target_rank ? `#${p.target_rank}` : "-"}
+                      </div>
+                      <div style={{ fontSize: 10, color: p.difficulty === "low" ? T.teal : p.difficulty === "high" ? T.red : T.amber }}>{p.difficulty || "medium"}</div>
                     </div>
                   </div>
                 ))}
@@ -1253,8 +1404,8 @@ function StrategyPhase({ projectId, setPage }) {
                 <div style={{ fontSize: 12, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>KPIs</div>
                 {kpis.map((kpi, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 12 }}>
-                    <div style={{ fontWeight: 500 }}>{kpi.metric}</div>
-                    <div style={{ color: T.teal, fontWeight: 600 }}>{kpi.target}</div>
+                    <div style={{ fontWeight: 500 }}>{kpi.metric || kpi.kpi || "Metric"}</div>
+                    <div style={{ color: T.teal, fontWeight: 600 }}>{kpi.target || kpi.goal || "-"}</div>
                   </div>
                 ))}
               </Card>
@@ -1622,6 +1773,246 @@ function ContentHubPhase({ projectId }) {
           </div>
         </Card>
       )}
+    </div>
+  )
+}
+
+// ── Kw Session Card (used by KwSessionsOverview) ─────────────────────────────
+
+const KW_SESSION_MODE_STYLE = {
+  brand:  { bg: "#eff6ff", border: "#bfdbfe", badge: "#1e40af", badgeBg: "#dbeafe", icon: "🏢", label: "Brand Analysis" },
+  expand: { bg: "#f0fdf4", border: "#bbf7d0", badge: "#166534", badgeBg: "#dcfce7", icon: "🌱", label: "Expand" },
+  review: { bg: "#faf5ff", border: "#e9d5ff", badge: "#5b21b6", badgeBg: "#ede9fe", icon: "🔍", label: "Review" },
+  v2:     { bg: "#f0fdfa", border: "#99f6e4", badge: "#0f766e", badgeBg: "#ccfbf1", icon: "⚡", label: "Smart Workflow" },
+}
+
+const KW_PHASE_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+function KwSessionCard({ session, projectId, setPage }) {
+  const [expanded, setExpanded] = useState(false)
+  const [strategy, setStrategy] = useState(null)
+  const [stratLoading, setStratLoading] = useState(false)
+  const [stratError, setStratError] = useState(null)
+
+  const hasStrategy = !!session.phase9_done
+  const st = KW_SESSION_MODE_STYLE[session.mode] || KW_SESSION_MODE_STYLE.brand
+
+  const label = session.name ||
+    (Array.isArray(session.seed_keywords) && session.seed_keywords.length
+      ? session.seed_keywords.slice(0, 3).join(" · ")
+      : `Session ${(session.id || "").slice(-6)}`)
+
+  const donePhasesCount = KW_PHASE_KEYS.filter(i => session[`phase${i}_done`]).length
+
+  const toggle = async () => {
+    if (!hasStrategy) return
+    if (!expanded && !strategy && !stratError) {
+      setStratLoading(true)
+      setStratError(null)
+      try {
+        const data = await apiFetch(`/api/kw2/${projectId}/sessions/${session.id}/apply/strategy`)
+        setStrategy(data)
+      } catch (e) {
+        setStratError(e.message || "Strategy not available")
+      }
+      setStratLoading(false)
+    }
+    setExpanded(e => !e)
+  }
+
+  return (
+    <div style={{
+      borderRadius: 12,
+      border: expanded ? `2px solid ${st.badge}` : `1px solid ${st.border}`,
+      background: st.bg,
+      overflow: "hidden",
+      boxShadow: T.cardShadow,
+      transition: "border .15s",
+    }}>
+      {/* Card header */}
+      <div style={{ padding: 18 }}>
+        {/* Mode badge */}
+        <div style={{ marginBottom: 10 }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            padding: "2px 9px", borderRadius: 20, fontSize: 10, fontWeight: 700,
+            background: st.badgeBg, color: st.badge,
+          }}>
+            {st.icon} {st.label}
+          </span>
+        </div>
+
+        {/* Session name */}
+        <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", lineHeight: 1.3,
+          marginBottom: 8, wordBreak: "break-word" }}>
+          {label}
+        </div>
+
+        {/* Keyword counts */}
+        <div style={{ display: "flex", gap: 16, marginBottom: 10 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: st.badge }}>
+              {(session.universe_total || 0).toLocaleString()}
+            </div>
+            <div style={{ fontSize: 10, color: T.textSoft }}>universe</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 800,
+              color: (session.validated_total || 0) > 0 ? T.teal : "#9ca3af" }}>
+              {(session.validated_total || 0).toLocaleString()}
+            </div>
+            <div style={{ fontSize: 10, color: T.textSoft }}>validated</div>
+          </div>
+        </div>
+
+        {/* Phase dots */}
+        <div style={{ display: "flex", gap: 3, alignItems: "center", marginBottom: 14 }}>
+          {KW_PHASE_KEYS.map(i => (
+            <div key={i} style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: session[`phase${i}_done`] ? T.teal : "#e5e7eb",
+            }} title={`Phase ${i}`} />
+          ))}
+          <span style={{ fontSize: 10, color: T.gray, marginLeft: 4 }}>
+            {donePhasesCount}/9
+          </span>
+        </div>
+
+        {/* Action buttons */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {hasStrategy && (
+            <button
+              onClick={toggle}
+              style={{
+                width: "100%", padding: "7px 0", borderRadius: 7, border: "none",
+                background: expanded ? st.badge : st.badgeBg,
+                color: expanded ? "#fff" : st.badge,
+                fontWeight: 700, fontSize: 12, cursor: "pointer", transition: "all .12s",
+              }}
+            >
+              {expanded ? "Collapse ▲" : "View Strategy ▼"}
+            </button>
+          )}
+          {!hasStrategy && (
+            <div style={{ fontSize: 11, color: T.gray, fontStyle: "italic", marginBottom: 4 }}>
+              Complete Phase 9 to generate strategy
+            </div>
+          )}
+          {setPage && (
+            <button
+              onClick={() => setPage("keywords")}
+              style={{
+                width: "100%", padding: "6px 0", borderRadius: 7,
+                border: `1px solid ${st.border}`,
+                background: "transparent", color: st.badge,
+                fontWeight: 600, fontSize: 11, cursor: "pointer",
+              }}
+            >
+              Go to Research →
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Expanded strategy panel */}
+      {expanded && (
+        <div style={{ borderTop: `1px solid ${st.border}`, padding: 18, background: "#fff" }}>
+          {stratLoading ? (
+            <div style={{ textAlign: "center", padding: 20, color: T.textSoft, fontSize: 13 }}>
+              Loading strategy…
+            </div>
+          ) : stratError ? (
+            <div style={{ color: T.red, fontSize: 13, padding: "8px 0" }}>
+              Strategy not generated yet — complete Phase 9 or run Apply
+            </div>
+          ) : (
+            <StrategyTab strategy={strategy} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── KwSessionsOverview ────────────────────────────────────────────────────────
+
+function KwSessionsOverview({ projectId, setPage }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["kw2-sessions", projectId],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/list`),
+    staleTime: 0,
+    enabled: !!projectId,
+  })
+  const sessions = data?.sessions || []
+
+  if (isLoading) {
+    return (
+      <div style={{ padding: 40, textAlign: "center", color: T.textSoft, fontSize: 14 }}>
+        Loading keyword research sessions…
+      </div>
+    )
+  }
+
+  if (sessions.length === 0) {
+    return (
+      <div style={{ textAlign: "center", padding: 60 }}>
+        <div style={{ fontSize: 48, marginBottom: 16 }}>🔬</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 8 }}>
+          No keyword research sessions yet
+        </div>
+        <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 20, maxWidth: 380, margin: "0 auto 20px" }}>
+          Run keyword research to build your strategy foundation.
+          Each session generates a full SEO strategy document.
+        </div>
+        {setPage && (
+          <button
+            onClick={() => setPage("keywords")}
+            style={{
+              padding: "9px 22px", borderRadius: 9, border: "none",
+              background: T.purple, color: "#fff", cursor: "pointer",
+              fontWeight: 700, fontSize: 13,
+            }}
+          >
+            → Go to Keyword Research
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Keyword Research Sessions</h2>
+          <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textSoft }}>
+            {sessions.length} session{sessions.length !== 1 ? "s" : ""} for this project —
+            click a card to expand its strategy
+          </p>
+        </div>
+        {setPage && (
+          <button
+            onClick={() => setPage("keywords")}
+            style={{
+              padding: "6px 14px", borderRadius: 7, border: `1px solid ${T.border}`,
+              background: "#fff", color: T.purpleDark, cursor: "pointer",
+              fontWeight: 600, fontSize: 12,
+            }}
+          >
+            + New Session
+          </button>
+        )}
+      </div>
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+        gap: 16,
+      }}>
+        {sessions.map(s => (
+          <KwSessionCard key={s.id} session={s} projectId={projectId} setPage={setPage} />
+        ))}
+      </div>
     </div>
   )
 }
@@ -4006,7 +4397,7 @@ export default function StrategyIntelligenceHub({ projectId, setPage }) {
 
       {/* Main content */}
       <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto" }}>
-        {activePhase === "overview"  && <OverviewPhase projectId={projectId} strategy={strategy} onNavigate={setActivePhase} />}
+        {activePhase === "overview"  && <KwSessionsOverview projectId={projectId} setPage={setPage} />}
         {activePhase === "keywords"  && <KeywordPillarsPhase projectId={projectId} setPage={setPage} />}
         {activePhase === "analysis"  && <AnalysisPhase projectId={projectId} strategy={strategy} />}
         {activePhase === "strategy"  && <StrategyPhase projectId={projectId} setPage={setPage} />}
