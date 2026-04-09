@@ -5,6 +5,7 @@
  * SSE steps: links, calendar, strategy
  */
 import React, { useState, useCallback, useEffect, useRef, useMemo } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import useKw2Store from "./store"
 import * as api from "./api"
 import { Card, RunButton, StatsRow, usePhaseRunner, ProgressBar, Badge, Spinner, NotificationList, StrategyTab } from "./shared"
@@ -394,6 +395,7 @@ const tdStyle = { padding: "5px 10px", fontSize: 12 }
 
 export default function PhaseApply({ projectId, sessionId, onComplete }) {
   const { aiProvider, setActivePhase } = useKw2Store()
+  const queryClient = useQueryClient()
   const { loading, setLoading, streamLoading, setStreamLoading, error, setError, notifications, log, toast } = usePhaseRunner("Apply")
 
   const [stepStatus, setStepStatus] = useState({})
@@ -459,6 +461,7 @@ export default function PhaseApply({ projectId, sessionId, onComplete }) {
         log("Apply complete!", "success")
         toast("Apply finished", "success")
         loadResults()
+        queryClient.invalidateQueries({ queryKey: ["kw2-sessions", projectId] })
       }
     }, {
       aiProvider,
