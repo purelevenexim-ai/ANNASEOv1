@@ -2346,11 +2346,8 @@ function KwSessionCard({ session, projectId, setPage, isSelected, onSelect }) {
 
   const toggle = async () => {
     if (!hasStrategy) return
-    // If closed and in error state with no data, clear error to allow retry
-    if (!expanded && stratError && !strategy) {
-      setStratError(null)
-    }
-    if (!expanded && !strategy && !stratError && !stratLoading) {
+    // Fetch when opening and no data yet — !stratError not needed since retries are allowed
+    if (!expanded && !strategy && !stratLoading) {
       setStratLoading(true)
       setStratError(null)
       try {
