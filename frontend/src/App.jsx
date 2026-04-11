@@ -19,6 +19,10 @@ import DashboardPage from "./DashboardPage"
 import ContentPage from "./ContentPage"
 import PromptEditorPage from "./PromptEditorPage"
 import KwPage from "./kw2/KwPage"
+import AuditPage from "./AuditPage"
+import PagesPage from "./PagesPage"
+import GscSetupPage from "./gsc/GscSetupPage"
+import GscSearchPage from "./gsc/GscSearchPage"
 import Notification from "./components/Notification"
 import DebugPanel from "./components/DebugPanel"
 import useDebug from "./store/debug"
@@ -2785,6 +2789,7 @@ const NAV = [
   { id: "kw2",          label: "Keywords v2" },
   { id: "strategy-hub", label: "Strategy Hub" },
   { id: "content",      label: "Content" },
+  { id: "audit",        label: "🔬 Audit" },
   { id: "blogs",        label: "Content Calendar" },
   { id: "graph",        label: "System Graph" },
   { id: "seo-checker",  label: "SEO Checker" },
@@ -2794,6 +2799,9 @@ const NAV = [
   { id: "bug-fixer",    label: "Bug Fixer" },
   { id: "queue",        label: "Queue" },
   { id: "errors",       label: "Errors" },
+  { id: "gsc-setup",    label: "🔍 GSC Setup" },
+  { id: "gsc-search",   label: "🔎 GSC Search" },
+  { id: "pages",        label: "📄 Pages" },
   { id: "settings",     label: "⚙ Settings" },
 ]
 
@@ -2902,6 +2910,7 @@ function SettingsPage() {
       ollama_model: current.ollama_model || prev.ollama_model || "qwen2.5:3b",
       groq_model:   current.groq_model   || prev.groq_model   || "llama-3.3-70b-versatile",
       openrouter_model: current.openrouter_model || prev.openrouter_model || "openai/gpt-4o",
+      google_redirect_uri: current.google_redirect_uri || prev.google_redirect_uri || "",
     }))
   }, [current])
 
@@ -3048,6 +3057,19 @@ function SettingsPage() {
             ))}
           </div>
         )}
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: T.purple }}>
+          🔍 Google Search Console (OAuth)
+        </div>
+        <div style={{ fontSize: 10, color: T.gray, marginBottom: 12 }}>
+          Required to connect GSC and fetch real search data. Get credentials from{" "}
+          <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" style={{ color: T.teal }}>Google Cloud Console</a>.
+        </div>
+        <Field label="Google Client ID" k="google_client_id" placeholder="123456789-xxx.apps.googleusercontent.com" />
+        <Field label="Google Client Secret" k="google_client_secret" type="password" placeholder="GOCSPX-..." />
+        <Field label="Redirect URI" k="google_redirect_uri" placeholder="https://annaseo.pureleven.com/api/gsc/auth/callback" />
       </Card>
 
       <Card>
@@ -3627,7 +3649,11 @@ function App() {
     "new-project":<NewProjectPage/>,
     queue:        <QueueDashboard/>,
     errors:       <ErrorsDashboard/>,
+    "gsc-setup":  <GscSetupPage projectId={activeProject}/>,
+    "gsc-search": <GscSearchPage projectId={activeProject}/>,
     settings:     <SettingsPage/>,
+    pages:        <PagesPage setPage={setPage}/>,
+    audit:        <AuditPage/>,
   }
 
   return (

@@ -12,7 +12,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
-from typing import AsyncGenerator, Dict, List, Optional, Union
+from typing import AsyncGenerator, Any, Dict, List, Optional, Union
 from contextlib import contextmanager
 
 from dotenv import load_dotenv
@@ -444,6 +444,17 @@ def get_db() -> sqlite3.Connection:
         # Page type support (article, homepage, product, about, landing, service)
         "ALTER TABLE content_articles ADD COLUMN page_type TEXT DEFAULT 'article'",
         "ALTER TABLE content_articles ADD COLUMN page_inputs TEXT DEFAULT '{}'",
+        # AI Usage Analytics — extended columns for per-task cost tracking
+        "ALTER TABLE ai_usage ADD COLUMN article_id TEXT DEFAULT ''",
+        "ALTER TABLE ai_usage ADD COLUMN provider TEXT DEFAULT ''",
+        "ALTER TABLE ai_usage ADD COLUMN task_type TEXT DEFAULT ''",
+        "ALTER TABLE ai_usage ADD COLUMN step INTEGER DEFAULT 0",
+        "ALTER TABLE ai_usage ADD COLUMN step_name TEXT DEFAULT ''",
+        "ALTER TABLE ai_usage ADD COLUMN latency_ms INTEGER DEFAULT 0",
+        # Index for fast analytics queries
+        "CREATE INDEX IF NOT EXISTS ix_ai_usage_project ON ai_usage(project_id)",
+        "CREATE INDEX IF NOT EXISTS ix_ai_usage_article ON ai_usage(article_id)",
+        "CREATE INDEX IF NOT EXISTS ix_ai_usage_provider ON ai_usage(provider)",
     ]
     for _m in _migrations:
         try:
@@ -542,6 +553,14 @@ async def startup():
             get_logger("annaseo.main").info("[AnnaSEO] kw2 DB init ready")
         except Exception as e:
             get_logger("annaseo.main").warning(f"kw2 DB init failed: {e}")
+
+        # Seed kw2 prompt registry
+        try:
+            from engines.kw2.prompt_manager import PromptManager as _KW2PromptManager
+            _KW2PromptManager().seed_all()
+            get_logger("annaseo.main").info("[AnnaSEO] kw2 prompt registry seeded")
+        except Exception as e:
+            get_logger("annaseo.main").warning(f"kw2 prompt seed failed: {e}")
 
         # Start alert checker loop
         def _alert_loop():
@@ -684,6 +703,12 @@ def login(form: OAuth2PasswordRequestForm=Depends()):
     u=dict(user)
     return {"access_token":_make_token(u["user_id"],u["email"],u["role"]),"user_id":u["user_id"],"email":u["email"],"role":u["role"]}
 
+@app.post("/api/auth/stream-token", tags=["Auth"])
+def stream_token(user=Depends(current_user)):
+    """Issue a short-lived token (2 min) for SSE streams so the long-lived
+    JWT is never placed in a URL query string (B29)."""
+    return {"stream_token": _make_token(user["user_id"], user["email"], user.get("role", "user"), ttl=2)}
+
 @app.get("/api/auth/me",tags=["Auth"])
 def me(user=Depends(current_user)):
     row=get_db().execute("SELECT user_id,email,name,role FROM users WHERE user_id=?",(user["user_id"],)).fetchone()
@@ -699,8 +724,11 @@ VALID_INDUSTRIES = {
 }
 
 class ProjectBody(BaseModel):
-    name: str; industry: str; description: str=""; seed_keywords: List[str]=[]; language: str="english"; region: str="india"; religion: str="general"
+    name: str; industry: str; description: str=""
+    seed_keywords: List[str]=[]
+    project_id_override: Optional[str] = None # For testing
     wp_url: str=""; wp_user: str=""; wp_password: str=""; shopify_store: str=""; shopify_token: str=""
+    language: str=""; region: str=""; religion: str=""
     custom_accepts: List[str]=[]; custom_rejects: List[str]=[]
     target_languages: List[str]=[]; target_locations: List[str]=[]; business_locations: List[str]=[]; business_type: str="B2C"
     usp: str=""; audience_personas: List[str]=[]; competitor_urls: List[str]=[]; customer_reviews: str=""
@@ -747,6 +775,7 @@ def list_projects(user=Depends(current_user)):
 
 @app.get("/api/projects/{project_id}",tags=["Projects"])
 def get_project(project_id: str,user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
     row=get_db().execute("SELECT * FROM projects WHERE project_id=?",(project_id,)).fetchone()
     if not row: raise HTTPException(404,"Not found")
     p=dict(row)
@@ -768,6 +797,7 @@ def get_project(project_id: str,user=Depends(current_user)):
 
 @app.delete("/api/projects/{project_id}",tags=["Projects"])
 def delete_project(project_id: str,user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
     db = get_db()
     # Hard delete — remove project and all related data from every table
     tables_main = [
@@ -2435,6 +2465,211 @@ def costs(project_id: str):
     arts=db.execute("SELECT COUNT(*) FROM content_articles WHERE project_id=?",(project_id,)).fetchone()[0] or 0
     return {"total_usd":round(total,4),"articles_generated":arts,"cost_per_article":round(total/max(arts,1),4),"monthly_estimate":round(total*30,2),"by_model":[dict(r) for r in rows]}
 
+# ── AI Analytics Endpoints ────────────────────────────────────────────────────
+
+@app.get("/api/projects/{project_id}/ai-analytics", tags=["AI Analytics"])
+def ai_analytics(project_id: str, days: int = 30, user=Depends(current_user)):
+    """
+    Full AI cost analytics for a project:
+    - Summary stats (total cost, total tokens, total requests)
+    - Per-provider breakdown
+    - Per-task (article) breakdown
+    - Per-step breakdown
+    """
+    db = get_db()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    # Summary
+    summary_row = db.execute(
+        "SELECT COUNT(*) as requests, SUM(input_tokens) as input_tok, SUM(output_tokens) as output_tok, SUM(cost_usd) as cost "
+        "FROM ai_usage WHERE project_id=? AND created_at >= ?",
+        (project_id, since),
+    ).fetchone()
+    summary = {
+        "total_requests": summary_row["requests"] or 0,
+        "total_input_tokens": summary_row["input_tok"] or 0,
+        "total_output_tokens": summary_row["output_tok"] or 0,
+        "total_tokens": (summary_row["input_tok"] or 0) + (summary_row["output_tok"] or 0),
+        "total_cost_usd": round(summary_row["cost"] or 0, 6),
+        "days": days,
+    }
+
+    # By provider
+    by_provider = db.execute(
+        "SELECT provider, COUNT(*) as requests, SUM(input_tokens) as input_tok, SUM(output_tokens) as output_tok, SUM(cost_usd) as cost "
+        "FROM ai_usage WHERE project_id=? AND created_at >= ? GROUP BY provider ORDER BY cost DESC",
+        (project_id, since),
+    ).fetchall()
+
+    # By model
+    by_model = db.execute(
+        "SELECT model, provider, COUNT(*) as requests, SUM(input_tokens) as input_tok, SUM(output_tokens) as output_tok, SUM(cost_usd) as cost "
+        "FROM ai_usage WHERE project_id=? AND created_at >= ? GROUP BY model ORDER BY cost DESC",
+        (project_id, since),
+    ).fetchall()
+
+    # By task type
+    by_task_type = db.execute(
+        "SELECT task_type, COUNT(*) as requests, SUM(input_tokens) as input_tok, SUM(output_tokens) as output_tok, SUM(cost_usd) as cost "
+        "FROM ai_usage WHERE project_id=? AND created_at >= ? GROUP BY task_type ORDER BY cost DESC",
+        (project_id, since),
+    ).fetchall()
+
+    # By step (for content_generation tasks)
+    by_step = db.execute(
+        "SELECT step, step_name, provider, COUNT(*) as requests, SUM(input_tokens) as input_tok, SUM(output_tokens) as output_tok, SUM(cost_usd) as cost "
+        "FROM ai_usage WHERE project_id=? AND created_at >= ? AND task_type='content_generation' "
+        "GROUP BY step, step_name ORDER BY step",
+        (project_id, since),
+    ).fetchall()
+
+    # Per-article (most expensive articles)
+    by_article = db.execute(
+        "SELECT u.article_id, a.keyword, a.title, a.status, "
+        "COUNT(*) as requests, SUM(u.input_tokens) as input_tok, SUM(u.output_tokens) as output_tok, SUM(u.cost_usd) as cost "
+        "FROM ai_usage u LEFT JOIN content_articles a ON a.article_id = u.article_id "
+        "WHERE u.project_id=? AND u.created_at >= ? AND u.article_id != '' "
+        "GROUP BY u.article_id ORDER BY cost DESC LIMIT 20",
+        (project_id, since),
+    ).fetchall()
+
+    # Recent log (last 50 entries)
+    recent = db.execute(
+        "SELECT id, created_at, provider, model, task_type, step_name, article_id, "
+        "input_tokens, output_tokens, cost_usd, purpose "
+        "FROM ai_usage WHERE project_id=? AND created_at >= ? ORDER BY id DESC LIMIT 50",
+        (project_id, since),
+    ).fetchall()
+
+    def _row_to_dict(r):
+        d = dict(r)
+        d["cost"] = round(d.get("cost") or 0, 6)
+        d["input_tok"] = d.get("input_tok") or 0
+        d["output_tok"] = d.get("output_tok") or 0
+        return d
+
+    return {
+        "summary": summary,
+        "by_provider": [_row_to_dict(r) for r in by_provider],
+        "by_model": [_row_to_dict(r) for r in by_model],
+        "by_task_type": [_row_to_dict(r) for r in by_task_type],
+        "by_step": [_row_to_dict(r) for r in by_step],
+        "by_article": [dict(r) for r in by_article],
+        "recent": [dict(r) for r in recent],
+    }
+
+
+@app.get("/api/ai-analytics/pricing", tags=["AI Analytics"])
+def ai_pricing_table():
+    """Return current AI provider pricing for all supported models."""
+    from core.ai_pricing import get_pricing_table_for_api
+    return {"pricing": get_pricing_table_for_api()}
+
+
+@app.get("/api/projects/{project_id}/ai-analytics/compare", tags=["AI Analytics"])
+def ai_cost_comparison(project_id: str, task_type: str = "content_generation", user=Depends(current_user)):
+    """
+    Cross-provider cost comparison for a specific task type.
+
+    For each article generated, shows what it would have cost on every other provider.
+    Also aggregates historical totals per provider.
+    """
+    from core.ai_pricing import estimate_cost_for_comparison, PROVIDER_DISPLAY_INFO
+    db = get_db()
+
+    # Get actual provider usage for this task type
+    actual = db.execute(
+        "SELECT provider, model, SUM(input_tokens) as inp, SUM(output_tokens) as out, COUNT(*) as reqs, SUM(cost_usd) as actual_cost "
+        "FROM ai_usage WHERE project_id=? AND task_type=? GROUP BY provider, model",
+        (project_id, task_type),
+    ).fetchall()
+
+    if not actual:
+        return {"comparison": [], "message": "No data for this task type yet"}
+
+    # Calculate what each actual total would have cost on every other provider
+    comparison = []
+    for row in actual:
+        inp = row["inp"] or 0
+        out = row["out"] or 0
+        row_data = {
+            "actual_provider": row["provider"],
+            "actual_model": row["model"],
+            "actual_cost_usd": round(row["actual_cost"] or 0, 6),
+            "total_input_tokens": inp,
+            "total_output_tokens": out,
+            "total_requests": row["reqs"],
+            "alternatives": [],
+        }
+        for alt_provider in PROVIDER_DISPLAY_INFO:
+            if alt_provider == row["provider"]:
+                continue
+            alt_cost = estimate_cost_for_comparison(alt_provider, inp, out)
+            row_data["alternatives"].append({
+                "provider": alt_provider,
+                "label": PROVIDER_DISPLAY_INFO[alt_provider]["label"],
+                "tier": PROVIDER_DISPLAY_INFO[alt_provider]["tier"],
+                "estimated_cost_usd": round(alt_cost, 6),
+                "savings_usd": round((row["actual_cost"] or 0) - alt_cost, 6),
+                "is_cheaper": alt_cost < (row["actual_cost"] or 0),
+            })
+        # Sort alternatives: cheapest first
+        row_data["alternatives"].sort(key=lambda x: x["estimated_cost_usd"])
+        comparison.append(row_data)
+
+    return {"task_type": task_type, "comparison": comparison}
+
+
+@app.get("/api/projects/{project_id}/ai-analytics/articles/{article_id}", tags=["AI Analytics"])
+def article_ai_analytics(project_id: str, article_id: str, user=Depends(current_user)):
+    """Detailed per-article AI usage: every step, its provider, tokens, and cost."""
+    from core.ai_pricing import estimate_cost_for_comparison, PROVIDER_DISPLAY_INFO
+    db = get_db()
+
+    rows = db.execute(
+        "SELECT step, step_name, provider, model, input_tokens, output_tokens, cost_usd, created_at "
+        "FROM ai_usage WHERE project_id=? AND article_id=? ORDER BY step, id",
+        (project_id, article_id),
+    ).fetchall()
+
+    article = db.execute(
+        "SELECT keyword, title, status FROM content_articles WHERE article_id=?",
+        (article_id,),
+    ).fetchone()
+
+    total_inp = sum(r["input_tokens"] or 0 for r in rows)
+    total_out = sum(r["output_tokens"] or 0 for r in rows)
+    total_cost = sum(r["cost_usd"] or 0 for r in rows)
+
+    # Per-provider alternatives for this article's total tokens
+    alternatives = []
+    for prov, info in PROVIDER_DISPLAY_INFO.items():
+        alt_cost = estimate_cost_for_comparison(prov, total_inp, total_out)
+        alternatives.append({
+            "provider": prov,
+            "label": info["label"],
+            "tier": info["tier"],
+            "estimated_cost_usd": round(alt_cost, 6),
+        })
+    alternatives.sort(key=lambda x: x["estimated_cost_usd"])
+
+    return {
+        "article_id": article_id,
+        "keyword": dict(article)["keyword"] if article else "",
+        "title": dict(article)["title"] if article else "",
+        "status": dict(article)["status"] if article else "",
+        "summary": {
+            "total_input_tokens": total_inp,
+            "total_output_tokens": total_out,
+            "total_tokens": total_inp + total_out,
+            "total_cost_usd": round(total_cost, 6),
+            "total_steps": len(rows),
+        },
+        "steps": [dict(r) for r in rows],
+        "cost_comparison": alternatives,
+    }
+
+
 # ── System Status API (1.14) ──────────────────────────────────────────────────
 @app.get("/api/system-status",tags=["System"])
 def system_status():
@@ -3600,6 +3835,19 @@ def get_audit(audit_id: str):
     if not row: raise HTTPException(404,"Not found")
     return dict(row)
 
+@app.post("/api/audit/pages-report", tags=["SEO Audit"])
+async def save_pages_audit_report(body: dict, user=Depends(current_user)):
+    """Save a pages health-check audit report to audits/pages_{datetime}/report.json."""
+    import json as _json
+    from pathlib import Path
+    from datetime import datetime as _dt
+    dt = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+    folder = Path(f"audits/pages_{dt}")
+    folder.mkdir(parents=True, exist_ok=True)
+    report_path = folder / "report.json"
+    report_path.write_text(_json.dumps(body, indent=2))
+    return {"saved_to": str(report_path)}
+
 # ── Rankings ──────────────────────────────────────────────────────────────────
 @app.post("/api/rankings/import",tags=["Rankings"])
 def import_rankings(project_id: str,keywords: List[dict]):
@@ -3728,6 +3976,9 @@ class APIKeySettings(BaseModel):
     ollama_url:         Optional[str] = None
     ollama_model:       Optional[str] = None
     groq_model:         Optional[str] = None
+    google_client_id:       Optional[str] = None   # Google OAuth Client ID (for GSC)
+    google_client_secret:   Optional[str] = None   # Google OAuth Client Secret
+    google_redirect_uri:    Optional[str] = None   # Google OAuth Redirect URI
 
 def _ensure_settings_table(db: sqlite3.Connection):
     db.execute("""CREATE TABLE IF NOT EXISTS api_settings (
@@ -3755,6 +4006,9 @@ def get_api_keys(user=Depends(current_user)):
         "ollama_url":         os.getenv("OLLAMA_URL",      "http://172.235.16.165:8080"),
         "ollama_model":       os.getenv("OLLAMA_MODEL",    "mistral:7b-instruct-q4_K_M"),
         "groq_model":         os.getenv("GROQ_MODEL",      "llama-3.3-70b-versatile"),
+        "google_client_id":       stored.get("google_client_id",       bool(os.getenv("GOOGLE_CLIENT_ID"))),
+        "google_client_secret":   stored.get("google_client_secret",   bool(os.getenv("GOOGLE_CLIENT_SECRET"))),
+        "google_redirect_uri":    os.getenv("GOOGLE_REDIRECT_URI", "https://annaseo.pureleven.com/api/gsc/auth/callback"),
     }
 
 @app.post("/api/settings/api-keys", tags=["Settings"])
@@ -3775,6 +4029,9 @@ def save_api_keys(body: APIKeySettings, user=Depends(current_user)):
         "ollama_url":         ("OLLAMA_URL",              body.ollama_url),
         "ollama_model":       ("OLLAMA_MODEL",            body.ollama_model),
         "groq_model":         ("GROQ_MODEL",              body.groq_model),
+        "google_client_id":       ("GOOGLE_CLIENT_ID",        body.google_client_id),
+        "google_client_secret":   ("GOOGLE_CLIENT_SECRET",    body.google_client_secret),
+        "google_redirect_uri":    ("GOOGLE_REDIRECT_URI",     body.google_redirect_uri),
     }
     saved = []
     from engines.ruflo_20phase_engine import Cfg
@@ -6891,10 +7148,29 @@ try:
         pillar: Optional[str] = None
         intent: Optional[str] = None
 
-    def _validate_project_exists(project_id: str):
+    def _validate_project_exists(project_id: str, user: dict | None = None):
         db = get_db()
         # Primary check: main projects table
-        if db.execute("SELECT 1 FROM projects WHERE project_id=?", (project_id,)).fetchone():
+        row = db.execute("SELECT owner_id FROM projects WHERE project_id=?", (project_id,)).fetchone()
+        if row:
+            if user is not None:
+                uid = user.get("user_id")
+                has_link = db.execute(
+                    "SELECT 1 FROM user_projects WHERE user_id=? AND project_id=?",
+                    (uid, project_id),
+                ).fetchone()
+                is_owner = (row["owner_id"] == uid)
+                if not has_link and not is_owner:
+                    raise HTTPException(404, f"Project not found: {project_id}")
+                if is_owner and not has_link:
+                    try:
+                        db.execute(
+                            "INSERT OR IGNORE INTO user_projects(user_id,project_id,role)VALUES(?,?,?)",
+                            (uid, project_id, "owner"),
+                        )
+                        db.commit()
+                    except Exception:
+                        pass
             return
 
         # Fallback: allow KI-backed projects (legacy or imported) by checking KI DB
@@ -6902,6 +7178,14 @@ try:
             db2 = _ki_db()
             try:
                 if db2.execute("SELECT 1 FROM keyword_input_sessions WHERE project_id=?", (project_id,)).fetchone():
+                    if user is not None:
+                        uid = user.get("user_id")
+                        linked = db.execute(
+                            "SELECT 1 FROM user_projects WHERE user_id=? AND project_id=?",
+                            (uid, project_id),
+                        ).fetchone()
+                        if not linked:
+                            raise HTTPException(404, f"Project not found: {project_id}")
                     return
             finally:
                 try: db2.close()
@@ -6915,7 +7199,7 @@ try:
     @app.post("/api/ki/{project_id}/input", tags=["KeywordInput"])
     def ki_save_input(project_id: str, body: _KIInput, bg: BackgroundTasks, user=Depends(current_user)):
         """Save customer pillar + supporting keywords, trigger cross-multiply, return session_id."""
-        _validate_project_exists(project_id)
+        _validate_project_exists(project_id, user)
         # Normalize business_intent: accept both string and list
         bi = body.business_intent
         if isinstance(bi, list):
@@ -6985,7 +7269,7 @@ try:
     @app.post("/api/ki/{project_id}/generate/{session_id}", tags=["KeywordInput"])
     def ki_generate(project_id: str, session_id: str, bg: BackgroundTasks, user=Depends(current_user)):
         """Trigger universe generation in background."""
-        _validate_project_exists(project_id)
+        _validate_project_exists(project_id, user)
         bg.add_task(
             _kie.generate_universe,
             project_id=project_id,
@@ -6995,7 +7279,7 @@ try:
 
     @app.get("/api/ki/{project_id}/session/{session_id}", tags=["KeywordInput"])
     def ki_get_session(project_id: str, session_id: str, user=Depends(current_user)):
-        _validate_project_exists(project_id)
+        _validate_project_exists(project_id, user)
         """Get session status and counts."""
         db = _ki_db()
         row = db.execute(
@@ -7016,7 +7300,7 @@ try:
     @app.get("/api/ki/{project_id}/pillars", tags=["KeywordInput"])
     def ki_get_pillars(project_id: str, user=Depends(current_user)):
         """List pillar keywords for a project."""
-        _validate_project_exists(project_id)
+        _validate_project_exists(project_id, user)
         db = _ki_db()
         rows = db.execute(
             "SELECT keyword FROM pillar_keywords WHERE project_id=? ORDER BY priority ASC",
@@ -7027,7 +7311,7 @@ try:
     @app.get("/api/ki/{project_id}/latest-session", tags=["KeywordInput"])
     def ki_get_latest_session(project_id: str, user=Depends(current_user)):
         """Return the latest keyword input session for project, including pillar-support mapping."""
-        _validate_project_exists(project_id)
+        _validate_project_exists(project_id, user)
         db = _ki_db()
         row = db.execute(
             "SELECT * FROM keyword_input_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
@@ -7228,8 +7512,8 @@ Return ONLY valid JSON:
 
     # ── Regenerate blog topics for a cluster ───────────────────────────────────
     @app.post("/api/ki/{project_id}/cluster/{cluster_index}/regenerate-topics", tags=["KeywordInput"])
-    def ki_regenerate_cluster_topics(project_id: str, cluster_index: int, user=Depends(current_user)):
-        """Re-generate 15 AI blog topics for a specific cluster."""
+    def ki_regenerate_cluster_topics(project_id: str, cluster_index: int, body: dict = Body(default={}), user=Depends(current_user)):
+        """Re-generate AI blog topics for a specific cluster. Body: {n_topics: 25, provider: 'auto'}"""
         try:
             db = _ki_db()
             row = db.execute(
@@ -7246,38 +7530,59 @@ Return ONLY valid JSON:
 
             cluster = clusters[cluster_index]
             pillar_map_raw = json.loads(r.get("keywords_json", "{}") or "{}")
-            pillar_names_local = list(pillar_map_raw.keys())
+
+            # Parse n_topics (10-200) and provider from body
+            n_topics = max(10, min(200, int(body.get("n_topics", 25))))
+            _provider = str(body.get("provider", "auto")).lower()
 
             _groq_key = os.getenv("GROQ_API_KEY", "")
             if not _groq_key:
                 raise HTTPException(400, "GROQ_API_KEY not configured")
 
             import httpx as _hx_rg
-            kw_list = [k["keyword"] for k in cluster.get("keywords", [])[:15]]
-            _prompt = f"""You are an elite SEO content strategist. Generate EXACTLY 15 unique blog post topics for this keyword cluster.
+            kw_list = [k["keyword"] for k in cluster.get("keywords", [])[:20]]
+            # Intent mix scaled to n_topics
+            n_commercial = max(2, n_topics * 3 // 10)
+            n_informational = max(2, n_topics * 3 // 10)
+            n_comparison = max(1, n_topics * 2 // 10)
+            n_local = max(1, n_topics // 10)
+            n_questions = n_topics - n_commercial - n_informational - n_comparison - n_local
+
+            _prompt = f"""You are an elite SEO content strategist. Generate EXACTLY {n_topics} unique, high-quality blog post topics for this keyword cluster.
 
 BUSINESS: {ctx.get('business_type','B2C')} in {ctx.get('geographic_focus','global')} market
 Brand: {ctx.get('brand_name','') or 'not specified'}
 Website: {ctx.get('customer_url','') or 'not specified'}
 USP: {ctx.get('usp','') or 'not specified'}
 
-CLUSTER: "{cluster['name']}" (commercial value: {cluster['commercial_value']})
+CLUSTER: "{cluster['name']}" (commercial value: {cluster.get('commercial_value','medium')})
 Keywords: {', '.join(kw_list)}
 
-Generate 15 topics with mix: 4 commercial, 4 informational, 3 comparison/review, 2 local/seasonal, 2 long-tail questions.
+Generate exactly {n_topics} topics with this mix:
+- {n_commercial} commercial/transactional (buying intent, product comparison)
+- {n_informational} informational (how-to, guides, education)
+- {n_comparison} comparison/review (vs articles, best-of lists)
+- {n_local} local/seasonal (location-specific or time-sensitive)
+- {n_questions} long-tail questions (What is, How to, Why, When)
 
-Each topic: "title", "target_keyword" (2-6 words), "intent" (transactional|commercial|informational|navigational), "difficulty" (low|medium|high), "word_count" (1500-4000), "ranking_rationale" (1 sentence why this can rank Top 5 in 6 months).
+REQUIREMENTS for each topic:
+- Must be unique (no duplicates or near-duplicates)
+- Must be rankable in 6-12 months
+- Title should be compelling and click-worthy (10-15 words ideal)
+- Target keyword should be 2-6 words, exactly what user would search
 
-Return ONLY a valid JSON array of 15 objects."""
+Each topic must have: "title", "target_keyword" (2-6 words), "intent" (transactional|commercial|informational|navigational), "difficulty" (low|medium|high), "word_count" (1500-4000), "ranking_rationale" (1 sentence why this can rank Top 5).
+
+Return ONLY a valid JSON array of exactly {n_topics} objects. No markdown, no explanation."""
 
             _resp = _hx_rg.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {_groq_key}", "Content-Type": "application/json"},
                 json={"model": "llama-3.3-70b-versatile",
-                      "messages": [{"role": "system", "content": "SEO strategist. Return ONLY valid JSON array."},
+                      "messages": [{"role": "system", "content": "SEO strategist. Return ONLY valid JSON array, no other text."},
                                    {"role": "user", "content": _prompt}],
-                      "temperature": 0.6, "max_tokens": 6000},
-                timeout=90.0,
+                      "temperature": 0.7, "max_tokens": min(n_topics * 350, 32000)},
+                timeout=180.0,
             )
             if _resp.status_code != 200:
                 raise HTTPException(502, f"Groq API error: {_resp.status_code}")
@@ -7290,7 +7595,7 @@ Return ONLY a valid JSON array of 15 objects."""
 
             raw_topics = json.loads(_arr_match.group())
             validated = []
-            for t in raw_topics[:15]:
+            for t in raw_topics[:n_topics]:
                 if not isinstance(t, dict) or not t.get("title"):
                     continue
                 validated.append({
@@ -7303,49 +7608,50 @@ Return ONLY a valid JSON array of 15 objects."""
                     "scores": {},
                 })
 
-            # Score topics
-            import time as _time_rg
-            _time_rg.sleep(3)
-            titles_text = "\n".join(f'{i+1}. "{t["title"]}" (keyword: {t["target_keyword"]})' for i, t in enumerate(validated))
-            _score_prompt = f"""Score each blog topic for: {ctx.get('brand_name','') or 'business'} ({ctx.get('business_type','B2C')}) in {ctx.get('geographic_focus','global')}.
+            # Score topics (batch, skip if too many to save time)
+            if validated and len(validated) <= 30:
+                import time as _time_rg
+                _time_rg.sleep(2)
+                titles_text = "\n".join(f'{i+1}. "{t["title"]}" (keyword: {t["target_keyword"]})' for i, t in enumerate(validated))
+                _score_prompt = f"""Score each blog topic for: {ctx.get('brand_name','') or 'business'} ({ctx.get('business_type','B2C')}) in {ctx.get('geographic_focus','global')}.
 
 {titles_text}
 
-For each topic provide scores (1-100): business_value, relevance, ranking_feasibility, content_uniqueness, ranking_rationale.
+For each topic provide scores (1-100): business_value, relevance, ranking_feasibility, content_uniqueness.
 Return ONLY a valid JSON array of {len(validated)} score objects (same order)."""
 
-            try:
-                _sr = _hx_rg.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {_groq_key}", "Content-Type": "application/json"},
-                    json={"model": "llama-3.3-70b-versatile",
-                          "messages": [{"role": "system", "content": "SEO analyst. Return ONLY valid JSON array."},
-                                       {"role": "user", "content": _score_prompt}],
-                          "temperature": 0.3, "max_tokens": 4000},
-                    timeout=60.0,
-                )
-                if _sr.status_code == 200:
-                    _sraw = _sr.json()["choices"][0]["message"]["content"]
-                    _sm = _re_rg.search(r'\[[\s\S]*\]', _sraw)
-                    if _sm:
-                        scores_list = json.loads(_sm.group())
-                        for i, sc in enumerate(scores_list):
-                            if i < len(validated) and isinstance(sc, dict):
-                                validated[i]["scores"] = {
-                                    "business_value": int(sc.get("business_value", 0)),
-                                    "relevance": int(sc.get("relevance", 0)),
-                                    "ranking_feasibility": int(sc.get("ranking_feasibility", 0)),
-                                    "content_uniqueness": int(sc.get("content_uniqueness", 0)),
-                                }
-                                if sc.get("ranking_rationale"):
-                                    validated[i]["ranking_rationale"] = sc["ranking_rationale"]
-            except Exception:
-                pass
+                try:
+                    _sr = _hx_rg.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {_groq_key}", "Content-Type": "application/json"},
+                        json={"model": "llama-3.3-70b-versatile",
+                              "messages": [{"role": "system", "content": "SEO analyst. Return ONLY valid JSON array."},
+                                           {"role": "user", "content": _score_prompt}],
+                              "temperature": 0.3, "max_tokens": 6000},
+                        timeout=90.0,
+                    )
+                    if _sr.status_code == 200:
+                        _sraw = _sr.json()["choices"][0]["message"]["content"]
+                        _sm = _re_rg.search(r'\[[\s\S]*\]', _sraw)
+                        if _sm:
+                            scores_list = json.loads(_sm.group())
+                            for i, sc in enumerate(scores_list):
+                                if i < len(validated) and isinstance(sc, dict):
+                                    validated[i]["scores"] = {
+                                        "business_value": int(sc.get("business_value", 0)),
+                                        "relevance": int(sc.get("relevance", 0)),
+                                        "ranking_feasibility": int(sc.get("ranking_feasibility", 0)),
+                                        "content_uniqueness": int(sc.get("content_uniqueness", 0)),
+                                    }
+                                    if sc.get("ranking_rationale"):
+                                        validated[i]["ranking_rationale"] = sc["ranking_rationale"]
+                except Exception:
+                    pass
 
             # Preserve any custom topics user added
             old_topics = cluster.get("blog_topics", [])
             custom_topics = [t for t in old_topics if t.get("custom")]
-            cluster["blog_topics"] = validated[:15] + custom_topics
+            cluster["blog_topics"] = validated + custom_topics
             if validated:
                 cluster["blog_title"] = validated[0]["title"]
 
@@ -13548,7 +13854,7 @@ def _fallback_cluster(kws: list, pillar: str) -> list:
 
 def ki_supporting_suggestions(project_id: str, pillar: Optional[str] = None, user=Depends(current_user)):
     """Suggest supporting keywords for a pillar from defaults and existing keywords."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     ki_db = _ki_db()
     existing = [r["keyword"].strip().lower() for r in ki_db.execute(
         "SELECT keyword FROM supporting_keywords WHERE project_id=?", (project_id,)
@@ -14504,6 +14810,146 @@ def ki_pillar_status(project_id: str, user=Depends(current_user)):
             "cluster_count": cluster_count,
         })
     return {"pillars": result}
+
+
+@app.post("/api/ki/{project_id}/blog-brief", tags=["KI"])
+async def ki_blog_brief(project_id: str, body: dict = Body(default={}), user=Depends(current_user)):
+    """Generate a content brief for a single keyword (P15 Blog Suggestions, single-item)."""
+    keyword    = (body.get("keyword") or "").strip()
+    title      = (body.get("title") or keyword).strip()
+    pillar     = (body.get("pillar") or "").strip()
+    session_id = (body.get("session_id") or "").strip()
+    ai_provider = (body.get("ai_provider") or "auto").strip()
+    custom_prompt = (body.get("custom_prompt") or "").strip()
+    if not keyword:
+        raise HTTPException(400, "keyword required")
+
+    # Build business context from audience_profiles (legacy KI) + kw2 biz intel if session provided
+    business_context: dict = {}
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM audience_profiles WHERE project_id=?", (project_id,)).fetchone()
+        if row:
+            business_context = dict(row)
+    finally:
+        db.close()
+
+    if session_id:
+        biz_intel = kw2_db.get_biz_intel(session_id) or {}
+        if biz_intel:
+            business_context.update({
+                "usps": biz_intel.get("usps", []),
+                "goals": biz_intel.get("goals", []),
+                "audience_segments": biz_intel.get("audience_segments", []),
+                "knowledge_summary": biz_intel.get("knowledge_summary", ""),
+                "website_summary": biz_intel.get("website_summary", ""),
+                "custom_prompt": custom_prompt,
+            })
+
+    try:
+        from services.seo_brief_generator import generate_seo_brief
+        brief = generate_seo_brief(keyword=keyword, business_context=business_context)
+    except Exception as e:
+        log.warning(f"[blog-brief] generate_seo_brief failed: {e}")
+        # Lightweight fallback without AI
+        brief = {
+            "keyword": keyword,
+            "intent": "informational",
+            "format": "guide",
+            "depth": "medium",
+            "title_suggestions": [title] if title != keyword else [
+                f"What is {keyword}?",
+                f"Complete Guide to {keyword}",
+                f"{keyword}: Everything You Need to Know",
+            ],
+            "required_sections": [
+                f"Introduction to {keyword}",
+                "Key Benefits",
+                "How It Works",
+                "Common Questions",
+                "Conclusion",
+            ],
+            "hook_ideas": [
+                f"Start with a surprising fact about {keyword}",
+                f"Open with a common misconception about {keyword}",
+            ],
+            "content_gaps": [],
+            "competitive_edge": [],
+            "business_fit": {"score": 2, "reasons": []},
+            "status": "fallback",
+        }
+
+    brief["pillar"] = pillar
+    brief["suggested_title"] = title
+    return brief
+
+
+@app.post("/api/ki/{project_id}/blog-briefs-batch", tags=["KI"])
+async def ki_blog_briefs_batch(project_id: str, body: dict = Body(default={}), user=Depends(current_user)):
+    """Generate content briefs for multiple keywords (batch P15)."""
+    keywords_raw = body.get("keywords", [])
+    if not keywords_raw:
+        raise HTTPException(400, "keywords list required")
+
+    session_id    = (body.get("session_id") or "").strip()
+    ai_provider   = (body.get("ai_provider") or "auto").strip()
+    custom_prompt = (body.get("custom_prompt") or "").strip()
+
+    keywords = [
+        {"keyword": (k if isinstance(k, str) else k.get("keyword", "")).strip(),
+         "title":   (k if isinstance(k, str) else k.get("title", "")).strip() or (k if isinstance(k, str) else k.get("keyword", "")).strip(),
+         "pillar":  ("" if isinstance(k, str) else k.get("pillar", "")).strip()}
+        for k in keywords_raw if (k if isinstance(k, str) else k.get("keyword"))
+    ][:30]  # Cap at 30 per batch
+
+    business_context: dict = {}
+    db = get_db()
+    try:
+        row = db.execute("SELECT * FROM audience_profiles WHERE project_id=?", (project_id,)).fetchone()
+        if row:
+            business_context = dict(row)
+    finally:
+        db.close()
+
+    if session_id:
+        biz_intel = kw2_db.get_biz_intel(session_id) or {}
+        if biz_intel:
+            business_context.update({
+                "usps": biz_intel.get("usps", []),
+                "goals": biz_intel.get("goals", []),
+                "audience_segments": biz_intel.get("audience_segments", []),
+                "knowledge_summary": biz_intel.get("knowledge_summary", ""),
+                "website_summary": biz_intel.get("website_summary", ""),
+                "custom_prompt": custom_prompt,
+            })
+
+    briefs = []
+    try:
+        from services.seo_brief_generator import generate_seo_brief
+        for item in keywords:
+            try:
+                b = generate_seo_brief(keyword=item["keyword"], business_context=business_context)
+                b["pillar"] = item["pillar"]
+                b["suggested_title"] = item["title"]
+                briefs.append(b)
+            except Exception as e:
+                log.warning(f"[blog-briefs-batch] brief failed for {item['keyword']}: {e}")
+                briefs.append({
+                    "keyword": item["keyword"],
+                    "pillar": item["pillar"],
+                    "suggested_title": item["title"],
+                    "intent": "informational",
+                    "format": "guide",
+                    "status": "error",
+                    "title_suggestions": [item["title"]],
+                    "required_sections": [],
+                    "hook_ideas": [],
+                    "content_gaps": [],
+                })
+    except ImportError as e:
+        raise HTTPException(503, f"Brief generator unavailable: {e}")
+
+    return {"briefs": briefs, "count": len(briefs)}
 
 
 @app.post("/api/ki/{project_id}/run-pipeline")
@@ -17015,14 +17461,23 @@ RULES:
 
     system_msg = "You are an SEO strategy expert. Return ONLY valid JSON. No markdown fences. No text outside JSON."
 
-    # Provider order: Groq first (fast & reliable), Ollama second (local fallback, short timeout)
+    # Provider routing — respect preferred_provider from frontend
+    preferred_provider = body.get("preferred_provider", "groq")
     ollama_url = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
     model = os.getenv("OLLAMA_MODEL", "mistral:7b-instruct-q4_K_M")
     groq_key = os.getenv("GROQ_API_KEY", "")
     result = None
 
-    # --- Try Groq first (fast, ~3-5s) ---
-    if groq_key:
+    # --- Try preferred provider first, then fall back ---
+    use_groq_first = preferred_provider in ("groq", "auto", "") or not preferred_provider
+    use_ollama_first = preferred_provider == "ollama"
+    # For Gemini/Claude/OpenAI — fall through to Groq as closest available
+    if preferred_provider in ("gemini_free", "gemini_paid"):
+        use_groq_first = False  # Will try Gemini via existing AIRouter if key available
+        use_ollama_first = False
+
+    # --- Try Groq (fast, ~3-5s) ---
+    if use_groq_first and groq_key:
         try:
             r_groq = await asyncio.to_thread(
                 lambda: _req.post(
@@ -17043,8 +17498,52 @@ RULES:
         except Exception as eg:
             log.warning(f"[ai-suggest] Groq failed: {eg}")
 
-    # --- Ollama fallback (short timeout — don't block server) ---
-    if not result:
+    # --- Ollama (used first if preferred, or as fallback) ---
+    if not result and (use_ollama_first or not use_groq_first):
+        try:
+            combined_prompt = f"{system_msg}\n\n{prompt}"
+            r = await asyncio.to_thread(
+                lambda: _req.post(
+                    f"{ollama_url}/api/generate",
+                    json={"model": model, "stream": False,
+                          "options": {"temperature": 0.5, "num_predict": 3000},
+                          "prompt": combined_prompt},
+                    timeout=20,  # Short timeout — never block server for long
+                )
+            )
+            r.raise_for_status()
+            text = r.json().get("response", "")
+            text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL).strip()
+            m = re.search(r'\{[\s\S]*\}', text)
+            if m:
+                result = json.loads(m.group())
+        except Exception as e:
+            log.warning(f"[ai-suggest] Ollama failed: {e}")
+
+    # --- Groq fallback if Ollama-first and Ollama failed ---
+    if not result and use_ollama_first and groq_key:
+        try:
+            r_groq = await asyncio.to_thread(
+                lambda: _req.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                    json={"model": "llama-3.3-70b-versatile", "temperature": 0.5, "max_tokens": 5000,
+                          "messages": [{"role": "system", "content": system_msg},
+                                       {"role": "user", "content": prompt}]},
+                    timeout=30,
+                )
+            )
+            r_groq.raise_for_status()
+            text_groq = r_groq.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            text_groq = re.sub(r"<think>[\s\S]*?</think>", "", text_groq, flags=re.DOTALL).strip()
+            m_groq = re.search(r'\{[\s\S]*\}', text_groq)
+            if m_groq:
+                result = json.loads(m_groq.group())
+        except Exception as eg:
+            log.warning(f"[ai-suggest] Groq fallback failed: {eg}")
+
+    # --- Ollama fallback if Groq-first and Groq failed ---
+    if not result and use_groq_first:
         try:
             combined_prompt = f"{system_msg}\n\n{prompt}"
             r = await asyncio.to_thread(
@@ -19944,10 +20443,19 @@ from engines.kw2.internal_linker import InternalLinker
 from engines.kw2.content_calendar import ContentCalendar
 from engines.kw2.strategy_engine import StrategyEngine
 
+# DAG engine imports
+from services.phase_registry import REGISTRY as _DAG_REGISTRY
+from services.dag_resolver import get_dag_state as _get_dag_state, get_phase_order as _get_phase_order
+from services.session_graph import SessionGraph as _SessionGraph
+from services.execution_engine import run_phase as _dag_run_phase, HumanGateWaiting as _HumanGateWaiting
+
 # ── KW2 Pydantic Models ─────────────────────────────────────────────────────
 
 class _KW2SessionCreate(BaseModel):
     provider: str = "auto"
+    mode: str = "brand"  # brand | expand | review
+    name: str = ""
+    seed_keywords: list[str] = []
 
 class _KW2ManualInput(BaseModel):
     domain: str = ""
@@ -19967,30 +20475,116 @@ class _KW2CalendarConfig(BaseModel):
     seasonal_overrides: dict = {}
 
 
+class _KW2Phase2Body(BaseModel):
+    confirmed_pillars: list[str] = []
+    confirmed_modifiers: list[str] = []
+
+
+class _KW2ReadmeBody(BaseModel):
+    force: bool = False
+
+
 # ── KW2 Session Routes ──────────────────────────────────────────────────────
 
 @app.post("/api/kw2/{project_id}/sessions", tags=["KW2"])
 async def kw2_create_session(project_id: str, body: _KW2SessionCreate, user=Depends(current_user)):
     """Create a new kw2 session for a project."""
-    _validate_project_exists(project_id)
-    sid = kw2_db.create_session(project_id, body.provider)
-    return {"session_id": sid, "project_id": project_id}
+    _validate_project_exists(project_id, user)
+    mode = (body.mode or "brand").strip().lower()
+    if mode not in {"brand", "expand", "review", "v2"}:
+        raise HTTPException(400, "mode must be one of: brand, expand, review, v2")
+
+    seeds = [s.strip() for s in (body.seed_keywords or []) if s.strip()]
+    sid = kw2_db.create_session(project_id, body.provider, mode,
+                                name=body.name.strip() if body.name else "",
+                                seed_keywords=seeds)
+    session = kw2_db.get_session(sid)
+    return {"session_id": sid, "project_id": project_id, "session": session}
 
 
 @app.get("/api/kw2/{project_id}/sessions", tags=["KW2"])
 async def kw2_list_sessions(project_id: str, user=Depends(current_user)):
-    """Get latest session for a project."""
-    _validate_project_exists(project_id)
+    """Get latest session for a project (backward-compatible)."""
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_latest_session(project_id)
     if not session:
         return {"session": None}
     return {"session": session}
 
 
+@app.get("/api/kw2/{project_id}/sessions/list", tags=["KW2"])
+async def kw2_list_all_sessions(project_id: str, user=Depends(current_user)):
+    """List all kw2 sessions for a project with keyword counts."""
+    _validate_project_exists(project_id, user)
+    sessions = kw2_db.list_sessions(project_id)
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+class _KW2SessionRename(BaseModel):
+    name: str
+
+
+@app.put("/api/kw2/{project_id}/sessions/{session_id}/name", tags=["KW2"])
+async def kw2_rename_session(
+    project_id: str, session_id: str, body: _KW2SessionRename, user=Depends(current_user),
+):
+    """Rename a session."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    kw2_db.update_session(session_id, name=body.name.strip())
+    return {"ok": True, "name": body.name.strip()}
+
+
+class _KW2ImportKeywords(BaseModel):
+    keywords: list[dict] = []
+    seeds: list[str] = []
+    session_name: str = ""
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/import-keywords", tags=["KW2"])
+async def kw2_import_keywords(
+    project_id: str, session_id: str, body: _KW2ImportKeywords, user=Depends(current_user),
+):
+    """Import discovered keywords (from search) into the session's universe."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    items = []
+    for kw in (body.keywords or []):
+        keyword_text = (kw.get("keyword") or "").strip()
+        if not keyword_text:
+            continue
+        items.append({
+            "keyword": keyword_text,
+            "source": kw.get("source", "search_import"),
+            "pillar": (kw.get("pillar", kw.get("_pillar", "")) or "").strip().title(),
+            "raw_score": float(kw.get("score", 0)),
+        })
+
+    if items:
+        kw2_db.bulk_insert_universe(session_id, project_id, items)
+
+    # Update seed_keywords and name if provided
+    updates = {}
+    seeds = [s.strip() for s in (body.seeds or []) if s.strip()]
+    if seeds:
+        updates["seed_keywords"] = json.dumps(seeds)
+    if body.session_name.strip():
+        updates["name"] = body.session_name.strip()
+    if updates:
+        kw2_db.update_session(session_id, **updates)
+
+    return {"imported": len(items), "session_id": session_id}
+
+
 @app.get("/api/kw2/{project_id}/sessions/{session_id}", tags=["KW2"])
 async def kw2_get_session(project_id: str, session_id: str, user=Depends(current_user)):
     """Get session details including phase completion status."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20008,12 +20602,74 @@ async def kw2_set_provider(
     user=Depends(current_user),
 ):
     """Set preferred AI provider for all phases in this session."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     VALID = {"auto", "groq", "ollama", "gemini", "claude"}
     if body.provider not in VALID:
         raise HTTPException(400, f"provider must be one of {sorted(VALID)}")
     kw2_db.update_session(session_id, preferred_provider=body.provider)
     return {"provider": body.provider, "session_id": session_id}
+
+
+class _KW2PhaseStatusBody(BaseModel):
+    phase: str  # understand | expand | organize | apply
+    status: str  # done | reset
+
+
+@app.patch("/api/kw2/{project_id}/sessions/{session_id}/phase-status", tags=["KW2"])
+async def kw2_update_phase_status(
+    project_id: str, session_id: str,
+    body: _KW2PhaseStatusBody,
+    user=Depends(current_user),
+):
+    """Update a single v2 phase status (e.g. understand=done)."""
+    _validate_project_exists(project_id, user)
+    if not kw2_db.get_session(session_id):
+        raise HTTPException(404, "Session not found")
+    VALID_PHASES = {"understand", "expand", "organize", "apply"}
+    VALID_STATUSES = {"done", "reset"}
+    if body.phase not in VALID_PHASES:
+        raise HTTPException(400, f"phase must be one of {sorted(VALID_PHASES)}")
+    if body.status not in VALID_STATUSES:
+        raise HTTPException(400, f"status must be one of {sorted(VALID_STATUSES)}")
+    kw2_db.set_phase_status(session_id, body.phase, body.status)
+    return {"phase": body.phase, "status": body.status, "session_id": session_id}
+
+
+@app.delete("/api/kw2/{project_id}/sessions/{session_id}", tags=["KW2"])
+async def kw2_delete_session(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Permanently delete a session and all its data."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session or session.get("project_id") != project_id:
+        raise HTTPException(404, "Session not found")
+    kw2_db.delete_session(session_id)
+    return {"deleted": session_id}
+
+
+class _KW2BulkDeleteBody(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/kw2/{project_id}/sessions/bulk-delete", tags=["KW2"])
+async def kw2_bulk_delete_sessions(
+    project_id: str,
+    body: _KW2BulkDeleteBody,
+    user=Depends(current_user),
+):
+    """Permanently delete multiple sessions."""
+    _validate_project_exists(project_id, user)
+    if not body.ids:
+        raise HTTPException(400, "ids list is required")
+    deleted = []
+    for sid in body.ids:
+        session = kw2_db.get_session(sid)
+        if session and session.get("project_id") == project_id:
+            kw2_db.delete_session(sid)
+            deleted.append(sid)
+    return {"deleted": deleted, "count": len(deleted)}
 
 
 # ── KW2 Phase 1: Business Analysis ──────────────────────────────────────────
@@ -20025,7 +20681,7 @@ async def kw2_phase1_analyze(
     user=Depends(current_user),
 ):
     """Phase 1: Analyze business — crawl site, extract entities, build profile."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20044,34 +20700,1289 @@ async def kw2_phase1_analyze(
         ai_provider=provider,
         force=True,
     )
-    kw2_db.update_session(session_id, phase1_done=1)
+    kw2_db.update_session(session_id, phase1_done=1, current_phase="BI")
+
+    # Auto-seed competitor URLs into BI competitors table so they appear in Step C
+    if competitor_urls:
+        try:
+            from engines.kw2.deep_intel import DeepIntelEngine as _DIE_seed
+            _die = _DIE_seed()
+            existing = {c.get("domain", "") for c in (kw2_db.get_biz_competitors(session_id) or [])}
+            for curl in competitor_urls:
+                curl = curl.strip()
+                if curl and curl not in existing:
+                    _die.add_competitor(session_id, project_id, curl)
+        except Exception as e:
+            log.warning(f"[kw2] Failed to seed BI competitors: {e}")
+
     return {"profile": result}
 
 
 @app.get("/api/kw2/{project_id}/profile", tags=["KW2"])
 async def kw2_get_profile(project_id: str, user=Depends(current_user)):
     """Get cached business profile."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     profile = kw2_db.load_business_profile(project_id)
     if not profile:
         return {"profile": None}
     return {"profile": profile}
 
 
+@app.patch("/api/kw2/{project_id}/profile", tags=["KW2"])
+async def kw2_patch_profile(project_id: str, patch: dict, user=Depends(current_user)):
+    """Patch (merge) the business profile — used to persist manually added pillars/modifiers."""
+    _validate_project_exists(project_id, user)
+    profile = kw2_db.load_business_profile(project_id) or {}
+    profile.update({k: v for k, v in patch.items() if k in (
+        "pillars", "modifiers", "negative_scope", "universe", "geo_scope", "audience", "domain"
+    )})
+    kw2_db.save_business_profile(project_id, profile)
+    # Reload after save — save_business_profile mutates profile in-place (lists→JSON strings)
+    # returning the mutated dict would send pillars as a raw JSON string to the frontend
+    fresh = kw2_db.load_business_profile(project_id) or profile
+    return {"profile": fresh}
+
+
+class _KW2SuggestFieldsBody(BaseModel):
+    domain: str = ""
+    business_type: str = ""
+    pillars: list[str] = []
+    product_catalog: list[str] = []
+    geo_scope: str = ""
+
+
+@app.post("/api/kw2/{project_id}/suggest-fields", tags=["KW2"])
+async def kw2_suggest_fields(
+    project_id: str,
+    body: _KW2SuggestFieldsBody,
+    user=Depends(current_user),
+):
+    """Use AI to suggest audience segments, keyword modifiers, and negative scope based on business context."""
+    _validate_project_exists(project_id, user)
+    ctx = body.model_dump()
+    pillars_str = ", ".join(ctx.get("pillars") or []) or "not specified"
+    products_str = ", ".join((ctx.get("product_catalog") or [])[:10]) or "not specified"
+    prompt = (
+        "You are an SEO strategist. Given this business context, suggest realistic values for three fields.\n\n"
+        f"Domain: {ctx.get('domain') or 'unknown'}\n"
+        f"Business type: {ctx.get('business_type') or 'unknown'}\n"
+        f"Geo scope: {ctx.get('geo_scope') or 'India'}\n"
+        f"Pillars: {pillars_str}\n"
+        f"Product catalog: {products_str}\n\n"
+        "Return ONLY valid JSON (no markdown) with these three keys:\n"
+        "{\n"
+        '  "audience": ["segment1", "segment2", ...],   // 4-6 specific buyer/user personas\n'
+        '  "modifiers": ["mod1", "mod2", ...],           // 5-8 SEO keyword modifiers (buy, cheap, best, etc.)\n'
+        '  "negative_scope": ["term1", "term2", ...]     // 4-6 terms to exclude from keyword universe\n'
+        "}\n"
+        "Be specific to this exact business. Do not add explanations."
+    )
+    try:
+        from engines.kw2.ai_caller import kw2_ai_call as _kw2_ai_call
+        raw = _kw2_ai_call(prompt, "You are a JSON-only SEO assistant.", provider="auto", max_tokens=400)
+        # Strip markdown code fences if present
+        raw = (raw or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        suggestions = json.loads(raw.strip())
+        for key in ("audience", "modifiers", "negative_scope"):
+            if not isinstance(suggestions.get(key), list):
+                suggestions[key] = []
+        return {"suggestions": suggestions}
+    except Exception as e:
+        log.warning(f"[kw2] suggest-fields AI failed: {e}")
+        # Deterministic fallback based on business type
+        bt = (ctx.get("business_type") or "").lower()
+        fallback = {
+            "audience": ["wholesale buyers", "retail customers", "online shoppers", "B2B procurement"],
+            "modifiers": ["buy", "price", "best", "wholesale", "bulk", "online", "delivery"],
+            "negative_scope": ["recipe", "benefits", "how to", "history", "diy"],
+        }
+        if "ecommerce" in bt or "d2c" in bt:
+            fallback["audience"] = ["home cooks", "health-conscious buyers", "gift shoppers", "food enthusiasts", "organic product seekers"]
+            fallback["modifiers"] = ["buy online", "price", "best", "organic", "premium", "wholesale", "bulk pack"]
+        elif "b2b" in bt or "saas" in bt:
+            fallback["audience"] = ["procurement managers", "operations teams", "enterprise buyers", "decision makers"]
+            fallback["modifiers"] = ["enterprise", "pricing", "vendor", "solution", "platform", "api"]
+        return {"suggestions": fallback, "source": "fallback"}
+
+
+# ── Competitor Keyword Crawl (Phase 1 add-on) ──────────────────────────────
+
+class _KW2CompetitorCrawlBody(BaseModel):
+    competitor_urls: list[str] = []
+    our_pillars: list[str] = []
+    business_type: str = ""
+    geo_scope: str = ""
+
+
+def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scope):
+    """
+    Disk-first competitor keyword crawl pipeline (<200MB RAM).
+    1. Crawl each competitor (homepage + relevant pages, max 15 pages each)
+    2. Extract keywords via YAKE + n-gram from each page (process & discard)
+    3. Deduplicate and clean (remove garbage, product names, too-short)
+    4. AI rank top 100 relevant business keywords
+    5. Extract content ideas from competitor headings
+    Returns dict with pages_crawled, total_keywords, cleaned_count, top_100, content_ideas.
+    """
+    import tempfile, sqlite3, os
+    from urllib.parse import urlparse
+    from engines.intelligent_crawl_engine import IntelligentSiteCrawler
+    from engines.kw2.entity_extractor import extract_entities
+    from engines.kw2.ai_caller import kw2_ai_call as _ai_call
+    from engines.kw2.constants import GARBAGE_WORDS
+
+    crawler = IntelligentSiteCrawler()
+    db_path = tempfile.mktemp(suffix=".db", prefix="comp_kw_")
+    pages_crawled = 0
+    all_headings = []
+
+    try:
+        # ── SQLite temp store (disk-first) ─────────────────────────────
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""CREATE TABLE keywords (
+            keyword TEXT, source TEXT, freq INTEGER DEFAULT 1,
+            PRIMARY KEY (keyword, source))""")
+        conn.execute("""CREATE TABLE headings (
+            heading TEXT, source TEXT)""")
+
+        # ── Phase A: Crawl each competitor & extract ───────────────────
+        for comp_url in competitor_urls[:5]:  # Max 5 competitors
+            comp_url = comp_url.strip()
+            if not comp_url.startswith("http"):
+                continue
+            domain = urlparse(comp_url).netloc or comp_url
+            log.info(f"[competitor-crawl] Crawling {domain}...")
+            try:
+                pages = crawler.crawl_site(comp_url, max_pages=15)
+            except Exception as e:
+                log.warning(f"[competitor-crawl] Failed to crawl {comp_url}: {e}")
+                continue
+
+            for page in pages:
+                pages_crawled += 1
+                text = getattr(page, "body_text", "") or ""
+                title = getattr(page, "title", "") or ""
+                headings = getattr(page, "headings", []) or []
+
+                # Extract headings (content ideas)
+                for h in headings[:10]:
+                    h_clean = h.strip()
+                    if len(h_clean) > 10 and len(h_clean) < 120:
+                        conn.execute("INSERT OR IGNORE INTO headings VALUES (?, ?)",
+                                     (h_clean, domain))
+
+                # Extract keywords from page text + title
+                combined = f"{title}. {text}"[:8000]  # limit text per page
+                if len(combined) < 30:
+                    continue
+                try:
+                    entities, topics = extract_entities(combined)
+                except Exception:
+                    entities, topics = [], []
+
+                all_kw = entities + topics
+                for kw in all_kw:
+                    kw = kw.strip().lower()
+                    if len(kw) < 3 or len(kw) > 60:
+                        continue
+                    try:
+                        conn.execute(
+                            "INSERT INTO keywords (keyword, source, freq) VALUES (?, ?, 1) "
+                            "ON CONFLICT(keyword, source) DO UPDATE SET freq = freq + 1",
+                            (kw, domain))
+                    except Exception:
+                        pass
+                # Flush batch
+                conn.commit()
+
+        # ── Phase B: Aggregate & clean ─────────────────────────────────
+        rows = conn.execute(
+            "SELECT keyword, SUM(freq) as total FROM keywords GROUP BY keyword ORDER BY total DESC"
+        ).fetchall()
+        total_raw = len(rows)
+
+        # Build stop set from business context
+        stop_extra = set()
+        for pillar in our_pillars:
+            # Don't remove the pillar itself, but remove single-word parts if too generic
+            for word in pillar.lower().split():
+                if len(word) <= 3:
+                    stop_extra.add(word)
+
+        cleaned = []
+        seen_stems = set()
+        for kw, freq in rows:
+            # Filter garbage words (single-word only)
+            words = kw.split()
+            if len(words) == 1 and kw in GARBAGE_WORDS:
+                continue
+            # Filter too-short
+            if len(kw) < 4:
+                continue
+            # Filter if all words are garbage
+            non_garbage = [w for w in words if w not in GARBAGE_WORDS and len(w) > 2]
+            if not non_garbage:
+                continue
+            # Filter exact duplicates and near-duplicates by sorted words
+            stem = " ".join(sorted(non_garbage))
+            if stem in seen_stems:
+                continue
+            seen_stems.add(stem)
+
+            cleaned.append({"keyword": kw, "freq": freq})
+
+        cleaned_count = len(cleaned)
+
+        # ── Phase C: AI rank top 100 ───────────────────────────────────
+        # Take top 300 by frequency for AI ranking
+        candidates = cleaned[:300]
+        cand_list = [c["keyword"] for c in candidates]
+
+        pillar_str = ", ".join(our_pillars) if our_pillars else "general"
+        prompt = (
+            f"You are an SEO keyword strategist. A business ({business_type or 'unknown type'}, "
+            f"geo: {geo_scope or 'India'}) has these pillars: {pillar_str}.\n\n"
+            f"From competitor analysis, here are {len(cand_list)} candidate keywords:\n"
+            f"{', '.join(cand_list[:300])}\n\n"
+            "Select the TOP 100 most valuable keywords for this business's SEO strategy.\n"
+            "Criteria: commercial intent, relevance to business pillars, realistic to rank for, "
+            "not too generic or too branded.\n\n"
+            "Return ONLY valid JSON array of objects (no markdown):\n"
+            '[{"keyword": "...", "score": 0-100, "reason": "brief reason"}, ...]\n'
+            "Return exactly 100 items or fewer if not enough quality candidates."
+        )
+        try:
+            import threading as _threading
+            _ai_result = [None]
+            def _do_ai_rank():
+                try:
+                    _ai_result[0] = _ai_call(prompt, "You are a JSON-only SEO keyword ranker.", provider="auto", max_tokens=4000)
+                except Exception as _e:
+                    log.warning(f"[competitor-crawl] AI ranking exception: {_e}")
+            _ai_t = _threading.Thread(target=_do_ai_rank, daemon=True)
+            _ai_t.start()
+            _ai_t.join(90)  # 90s max for AI ranking
+            if _ai_t.is_alive():
+                log.warning("[competitor-crawl] AI ranking timed out after 90s, using frequency fallback")
+                raise TimeoutError("AI ranking timed out")
+            raw = (_ai_result[0] or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            top_100 = json.loads(raw.strip())
+            if not isinstance(top_100, list):
+                top_100 = []
+        except Exception as e:
+            log.warning(f"[competitor-crawl] AI ranking failed: {e}, using frequency-based fallback")
+            top_100 = [{"keyword": c["keyword"], "score": min(100, c["freq"] * 10)} for c in candidates[:100]]
+
+        # ── Phase D: Extract content ideas from headings ───────────────
+        heading_rows = conn.execute(
+            "SELECT heading, COUNT(*) as cnt FROM headings GROUP BY heading ORDER BY cnt DESC LIMIT 30"
+        ).fetchall()
+        content_ideas = [h for h, _ in heading_rows]
+
+        return {
+            "pages_crawled": pages_crawled,
+            "total_keywords": total_raw,
+            "cleaned_count": cleaned_count,
+            "top_100": top_100[:100],
+            "content_ideas": content_ideas[:20],
+        }
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(db_path)
+        except Exception:
+            pass
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/competitor-crawl", tags=["KW2"])
+async def kw2_competitor_crawl(
+    project_id: str,
+    session_id: str,
+    body: _KW2CompetitorCrawlBody,
+    user=Depends(current_user),
+):
+    """Crawl competitor sites, extract keywords, clean & AI-rank top 100."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    if not body.competitor_urls:
+        raise HTTPException(400, "No competitor URLs provided")
+
+    try:
+        result = await asyncio.to_thread(
+            _competitor_crawl_sync,
+            body.competitor_urls,
+            body.our_pillars,
+            body.business_type,
+            body.geo_scope,
+        )
+        return result
+    except Exception as e:
+        log.error(f"[competitor-crawl] Error: {e}", exc_info=True)
+        raise HTTPException(500, f"Competitor crawl failed: {str(e)[:200]}")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/business-readme", tags=["KW2"])
+async def kw2_get_business_readme(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Get generated business README markdown for this session."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return {
+        "readme": session.get("business_readme") or "",
+        "updated_at": session.get("readme_updated_at") or "",
+        "has_readme": bool(session.get("business_readme")),
+    }
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/business-readme", tags=["KW2"])
+async def kw2_generate_business_readme(
+    project_id: str, session_id: str,
+    body: _KW2ReadmeBody,
+    user=Depends(current_user),
+):
+    """Generate (or refresh) a comprehensive Business Intelligence README."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    existing = session.get("business_readme") or ""
+    if existing and not body.force:
+        kw2_db.update_session(session_id, current_phase="SEARCH")
+        return {
+            "readme": existing,
+            "source": "cached",
+            "updated_at": session.get("readme_updated_at") or "",
+        }
+
+    profile = kw2_db.load_business_profile(project_id)
+    if not profile:
+        raise HTTPException(400, "No business profile found. Complete Analyze first.")
+
+    intel = _DeepIntelEngine().get_full_intel(session_id, project_id)
+    provider = session.get("preferred_provider", "auto")
+
+    knowledge = intel.get("knowledge") or {}
+    strategy = intel.get("strategy") or {}
+    pages = intel.get("pages") or []
+    competitors = intel.get("competitors") or []
+
+    # Build rich summaries for the prompt
+    pages_summary = ""
+    if pages:
+        lines = []
+        for p in pages[:15]:
+            kws = p.get("keywords_extracted", [])
+            kw_str = ", ".join(kws[:5]) if isinstance(kws, list) else str(kws)[:60]
+            lines.append(f"- [{p.get('page_type','other')}] {p.get('primary_topic','')} | {p.get('url','')} | Keywords: {kw_str}")
+        pages_summary = "\n".join(lines)
+    else:
+        pages_summary = "No website pages analyzed yet."
+
+    competitors_summary = ""
+    if competitors:
+        lines = []
+        for c in competitors:
+            strengths = ", ".join(c.get("strengths", [])[:3]) if isinstance(c.get("strengths"), list) else ""
+            weaknesses = ", ".join(c.get("weaknesses", [])[:3]) if isinstance(c.get("weaknesses"), list) else ""
+            lines.append(f"- {c.get('domain','?')} | Audience: {c.get('target_audience','')} | Strengths: {strengths} | Weaknesses: {weaknesses}")
+        competitors_summary = "\n".join(lines)
+    else:
+        competitors_summary = "No competitor data yet."
+
+    readme = ""
+    source = "template"
+    try:
+        from engines.kw2.ai_caller import kw2_ai_call as _kw2_ai_call
+        from engines.kw2.prompts import BIZ_README_SYSTEM, BIZ_README_USER
+
+        # Sanitize profile for JSON serialization
+        safe_profile = {}
+        for k, v in profile.items():
+            if k in ("raw_ai_json", "manual_input"):
+                continue  # skip large nested blobs
+            safe_profile[k] = v
+
+        prompt = BIZ_README_USER.format(
+            profile_json=json.dumps(safe_profile, indent=2, default=str),
+            knowledge_json=json.dumps(knowledge, indent=2, default=str),
+            strategy_json=json.dumps(strategy, indent=2, default=str),
+            pages_summary=pages_summary,
+            competitors_summary=competitors_summary,
+        )
+        ai_text = _kw2_ai_call(prompt, BIZ_README_SYSTEM, provider=provider, max_tokens=3500)
+        if isinstance(ai_text, str) and len(ai_text.strip()) > 200:
+            readme = ai_text.strip()
+            source = f"ai:{provider}"
+    except Exception as e:
+        log.warning(f"AI README generation failed: {e}")
+
+    if not readme:
+        # Rich deterministic template fallback
+        pillars = profile.get("pillars") or []
+        products = profile.get("product_catalog") or []
+        audience = profile.get("audience") or []
+        modifiers = profile.get("modifiers") or []
+        neg = profile.get("negative_scope") or []
+        geo = profile.get("geo_scope") or "Global"
+        btype = profile.get("business_type") or "Ecommerce"
+        domain = profile.get("domain") or "N/A"
+        universe = profile.get("universe") or "Business"
+
+        # Extract knowledge sections
+        bi = knowledge.get("business_identity", {})
+        gi = knowledge.get("geographic_intelligence", {})
+        pi = knowledge.get("product_intelligence", {})
+        sci = knowledge.get("supply_chain_insight", {})
+        aseg = knowledge.get("audience_segmentation", {})
+        cis = knowledge.get("commercial_intent_signals", {})
+        coe = knowledge.get("content_opportunity_engine", {})
+        skc = knowledge.get("strategic_keyword_clusters", {})
+        cl = knowledge.get("competitive_landscape", {})
+
+        sections = []
+        sections.append("# Business Intelligence README\n")
+
+        # Section 1
+        sections.append("## 1. Business Identity & Positioning")
+        sections.append(f"- **Domain:** {domain}")
+        sections.append(f"- **Business Type:** {btype}")
+        sections.append(f"- **Universe:** {universe}")
+        if bi.get("positioning"):
+            sections.append(f"- **Positioning:** {bi['positioning']}")
+        if bi.get("value_proposition"):
+            sections.append(f"- **Value Proposition:** {bi['value_proposition']}")
+        if bi.get("brand_story"):
+            sections.append(f"- **Brand Story:** {bi['brand_story']}")
+        if bi.get("trust_signals"):
+            sections.append(f"- **Trust Signals:** {', '.join(bi['trust_signals'])}")
+        if bi.get("differentiators"):
+            sections.append(f"- **Differentiators:** {', '.join(bi['differentiators'])}")
+        sections.append("")
+
+        # Section 2
+        sections.append("## 2. Geographic & Source Intelligence")
+        sections.append(f"- **Geo Scope:** {geo}")
+        if gi.get("production_region"):
+            sections.append(f"- **Production Region:** {gi['production_region']}")
+        if gi.get("geo_seo_advantage"):
+            sections.append(f"- **SEO Advantage:** {gi['geo_seo_advantage']}")
+        if gi.get("micro_regions"):
+            sections.append(f"- **Micro-Regions:** {', '.join(gi['micro_regions'])}")
+        if gi.get("geo_keyword_patterns"):
+            sections.append(f"- **Geo Keyword Patterns:** {', '.join(gi['geo_keyword_patterns'])}")
+        sections.append("")
+
+        # Section 3
+        sections.append("## 3. Product Intelligence")
+        if products:
+            sections.append(f"- **Products:** {', '.join(products)}")
+        if pillars:
+            sections.append(f"- **Pillars:** {', '.join(pillars)}")
+        if pi.get("quality_markers"):
+            sections.append(f"- **Quality Markers:** {', '.join(pi['quality_markers'])}")
+        if pi.get("product_comparison_angles"):
+            sections.append(f"- **Comparison Angles:** {', '.join(pi['product_comparison_angles'])}")
+        attrs = pi.get("product_attributes", [])
+        if attrs:
+            sections.append("- **Product Attributes:**")
+            for attr in attrs[:8]:
+                if isinstance(attr, dict):
+                    sections.append(f"  - {attr.get('attribute','')}: {attr.get('value','')} → {attr.get('keyword_impact','')}")
+        sections.append("")
+
+        # Section 4
+        sections.append("## 4. Supply Chain & Trust Layer")
+        if sci.get("sourcing_model"):
+            sections.append(f"- **Sourcing Model:** {sci['sourcing_model']}")
+        if sci.get("processing_type"):
+            sections.append(f"- **Processing:** {sci['processing_type']}")
+        if sci.get("freshness_angle"):
+            sections.append(f"- **Freshness Angle:** {sci['freshness_angle']}")
+        if sci.get("keyword_opportunities"):
+            sections.append(f"- **Keywords Enabled:** {', '.join(sci['keyword_opportunities'])}")
+        sections.append("")
+
+        # Section 5
+        sections.append("## 5. Target Customer Intelligence (ICP)")
+        if audience:
+            sections.append(f"- **Primary Audience:** {', '.join(audience)}")
+        b2c = aseg.get("b2c_segments", [])
+        if b2c:
+            sections.append("- **B2C Segments:**")
+            for seg in b2c[:5]:
+                if isinstance(seg, dict):
+                    sections.append(f"  - {seg.get('segment','')}: trigger={seg.get('buying_trigger','')} → \"{seg.get('keyword_pattern','')}\"")
+        b2b = aseg.get("b2b_segments", [])
+        if b2b:
+            sections.append("- **B2B Segments:**")
+            for seg in b2b[:5]:
+                if isinstance(seg, dict):
+                    sections.append(f"  - {seg.get('segment','')}: trigger={seg.get('buying_trigger','')} → \"{seg.get('keyword_pattern','')}\"")
+        sections.append("")
+
+        # Section 6
+        sections.append("## 6. Commercial Intent Mapping")
+        if cis.get("high_intent_modifiers"):
+            sections.append(f"- **High-Intent Modifiers:** {', '.join(cis['high_intent_modifiers'])}")
+        if cis.get("transactional_patterns"):
+            sections.append(f"- **Transactional Patterns:** {', '.join(cis['transactional_patterns'])}")
+        if cis.get("comparison_patterns"):
+            sections.append(f"- **Comparison Patterns:** {', '.join(cis['comparison_patterns'])}")
+        if modifiers:
+            sections.append(f"- **Configured Modifiers:** {', '.join(modifiers)}")
+        sections.append("- **Intent Priority:** purchase > commercial > informational")
+        sections.append("")
+
+        # Section 7
+        sections.append("## 7. Strategic Keyword Clusters")
+        if skc:
+            for cluster_name, cluster_data in skc.items():
+                if isinstance(cluster_data, dict):
+                    primary = cluster_data.get("primary", [])
+                    mods = cluster_data.get("modifiers", [])
+                    sections.append(f"- **{cluster_name.replace('_',' ').title()}:** {', '.join(primary)} | Modifiers: {', '.join(mods)}")
+        sections.append("")
+
+        # Section 8
+        sections.append("## 8. Content Opportunities")
+        ideas = coe.get("commercial_content_ideas", [])
+        if ideas:
+            for idea in ideas[:5]:
+                if isinstance(idea, dict):
+                    sections.append(f"- [{idea.get('page_type','page')}] **{idea.get('title','')}** → kw: {idea.get('target_keyword','')}")
+        comps = coe.get("comparison_content", [])
+        if comps:
+            for c in comps[:3]:
+                if isinstance(c, dict):
+                    sections.append(f"- [comparison] **{c.get('title','')}** → {', '.join(c.get('keywords',[]))}")
+        sections.append("")
+
+        # Section 9
+        sections.append("## 9. Competitive Landscape")
+        if cl.get("competing_against"):
+            sections.append(f"- **Competing Against:** {', '.join(cl['competing_against'])}")
+        if cl.get("our_advantages"):
+            sections.append(f"- **Our Advantages:** {', '.join(cl['our_advantages'])}")
+        if cl.get("gaps_to_exploit"):
+            sections.append(f"- **Gaps to Exploit:** {', '.join(cl['gaps_to_exploit'])}")
+        if cl.get("counter_strategy"):
+            sections.append(f"- **Counter-Strategy:** {cl['counter_strategy']}")
+        sections.append("")
+
+        # Section 10
+        sections.append("## 10. SEO Execution Notes")
+        if neg:
+            sections.append(f"- **Negative Scope:** {', '.join(neg)}")
+        sections.append("- Confirm pillars before generation")
+        sections.append("- Generate only for confirmed pillars")
+        sections.append("- Validate aggressively and rebalance pillar coverage")
+        qw = knowledge.get("quick_wins", strategy.get("quick_wins", []))
+        if qw:
+            sections.append("- **Quick Wins:**")
+            for w in qw[:5]:
+                sections.append(f"  - {w}")
+
+        readme = "\n".join(sections)
+
+    updated_at = datetime.now(timezone.utc).isoformat()
+    kw2_db.update_session(
+        session_id,
+        business_readme=readme,
+        readme_updated_at=updated_at,
+        current_phase="SEARCH",
+    )
+    return {"readme": readme, "source": source, "updated_at": updated_at}
+
+
+# ── KW2 Business Intelligence (Deep) Stage ──────────────────────────────────
+
+from engines.kw2.deep_intel import DeepIntelEngine as _DeepIntelEngine
+
+# In-process progress store: {session_id: {running, pct, step, message, steps_done, error}}
+_BI_PROGRESS: dict = {}
+
+class _BizIntelProfileBody(BaseModel):
+    goals: list[str] = []
+    pricing_model: str = "mid-range"
+    usps: list[str] = []
+    audience_segments: list[str] = []
+
+class _AddCompetitorBody(BaseModel):
+    domain: str
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/biz-intel", tags=["KW2"])
+async def kw2_get_biz_intel(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Get full Business Intelligence state for a session."""
+    _validate_project_exists(project_id, user)
+    if not kw2_db.get_session(session_id):
+        raise HTTPException(404, "Session not found")
+    engine = _DeepIntelEngine()
+    return engine.get_full_intel(session_id, project_id)
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/profile", tags=["KW2"])
+async def kw2_save_biz_profile(
+    project_id: str, session_id: str,
+    body: _BizIntelProfileBody,
+    user=Depends(current_user),
+):
+    """Save extended user inputs for Business Intelligence stage."""
+    _validate_project_exists(project_id, user)
+    if not kw2_db.get_session(session_id):
+        raise HTTPException(404, "Session not found")
+    engine = _DeepIntelEngine()
+    result = engine.save_user_inputs(session_id, project_id, body.dict())
+    return result
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/run-all", tags=["KW2"])
+async def kw2_biz_run_all(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Start full BI analysis (website + competitors + strategy) in background. Poll /progress for updates."""
+    import threading as _threading
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    if _BI_PROGRESS.get(session_id, {}).get("running"):
+        return {"status": "already_running", "progress": _BI_PROGRESS[session_id]}
+
+    provider = session.get("preferred_provider", "auto")
+
+    def _parse_sse_event(raw: str) -> dict:
+        try:
+            for line in raw.strip().splitlines():
+                if line.startswith("data: "):
+                    return json.loads(line[6:])
+        except Exception:
+            pass
+        return {}
+
+    def _run():
+        import time as _time
+        prog = {
+            "running": True, "pct": 0, "step": "website",
+            "message": "Starting website analysis...", "steps_done": [],
+            "error": None, "last_updated": _time.time(), "started_at": _time.time(),
+        }
+        _BI_PROGRESS[session_id] = prog
+
+        def _upd(**kwargs):
+            prog.update(**kwargs)
+            prog["last_updated"] = _time.time()
+
+        engine = _DeepIntelEngine()
+
+        try:
+            # ── Step B: Website crawl ─────────────────────────────────────
+            _upd(step="website", pct=3, message="Crawling your website...")
+            for raw in engine.crawl_website_stream(session_id, project_id, ai_provider=provider):
+                ev = _parse_sse_event(raw)
+                t = ev.get("type", "")
+                if t == "classifying":
+                    total = ev.get("total", 1)
+                    current = ev.get("page", 1)
+                    pct = int(3 + (current / max(total, 1)) * 28)
+                    _upd(pct=pct, message=f"Website: analyzing page {current}/{total}...")
+                elif t == "page_classified":
+                    url = ev.get("url", "")[:60]
+                    _upd(message=f"Classified: {url}")
+                elif t in ("website_done", "error"):
+                    if t == "website_done":
+                        _upd(pct=33, message="Website analysis complete ✓")
+                        prog["steps_done"].append("website")
+                    else:
+                        _upd(pct=33, message=f"Website: {ev.get('message', 'skipped')}")
+                    break
+
+            # ── Step C: Competitor crawl ──────────────────────────────────
+            _upd(step="competitors", pct=35, message="Starting competitor analysis...")
+            comp_count = 0
+            for raw in engine.crawl_competitors_stream(session_id, project_id, ai_provider=provider):
+                ev = _parse_sse_event(raw)
+                t = ev.get("type", "")
+                if t == "competitor_start":
+                    _upd(message=f"Crawling {ev.get('domain', 'competitor')}...")
+                elif t == "competitor_page":
+                    _upd(message=f"Competitor page: {ev.get('page_type', '')} — {ev.get('url', '')[:50]}")
+                elif t == "competitor_done":
+                    comp_count += 1
+                    _upd(pct=min(35 + comp_count * 15, 65), message=f"Competitor {comp_count} analyzed ✓ ({ev.get('domain', '')})")
+                elif t in ("competitors_all_done", "error"):
+                    if t == "competitors_all_done":
+                        _upd(pct=68, message="Competitor analysis complete ✓")
+                        prog["steps_done"].append("competitors")
+                    break
+
+            # ── Step D: Strategy synthesis ────────────────────────────────
+            _upd(step="strategy", pct=70, message="AI synthesizing business intelligence...")
+            for raw in engine.build_strategy_stream(session_id, project_id, ai_provider=provider):
+                ev = _parse_sse_event(raw)
+                t = ev.get("type", "")
+                if t == "progress":
+                    # heartbeat — keeps last_updated alive during long AI calls
+                    _upd(message=ev.get("message", "AI processing..."))
+                elif t == "knowledge_done":
+                    _upd(pct=85, message="Knowledge synthesized, building SEO strategy...")
+                elif t == "strategy_done":
+                    _upd(pct=97, message="Strategy generation complete ✓")
+                    prog["steps_done"].append("strategy")
+                elif t in ("done", "error"):
+                    break
+
+            _upd(running=False, pct=100, step="done", message="BI analysis complete ✓")
+
+        except Exception as exc:
+            log.error(f"[biz-intel/run-all] {session_id}: {exc}")
+            _upd(running=False, step="error", message=str(exc), error=str(exc))
+
+    t = _threading.Thread(target=_run, daemon=True)
+    t.start()
+    return {"status": "started"}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/progress", tags=["KW2"])
+async def kw2_biz_progress(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Return current BI analysis progress for polling."""
+    import time as _time
+    _validate_project_exists(project_id, user)
+    prog = _BI_PROGRESS.get(session_id, {})
+    if not prog:
+        return {"running": False, "pct": 0, "step": "idle", "message": "", "steps_done": []}
+    # If running but no update in >5 minutes, mark as stale/failed
+    if prog.get("running") and prog.get("last_updated"):
+        elapsed = _time.time() - prog["last_updated"]
+        if elapsed > 360:
+            prog["running"] = False
+            prog["step"] = "error"
+            prog["message"] = f"Job appears to have died — no update in {int(elapsed)}s"
+    return prog
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/crawl-website/stream", tags=["KW2"])
+async def kw2_biz_crawl_website_stream(
+    project_id: str, session_id: str,
+    token: str = None,
+    user=Depends(current_user_or_qs),
+):
+    """Stream website deep crawl and page classification."""
+    _validate_project_exists(project_id, user)
+    # Block if run-all background job is already running — prevents parallel AI overload from old cached JS
+    if _BI_PROGRESS.get(session_id, {}).get("running"):
+        async def _busy():
+            yield f'data: {json.dumps({"type": "error", "message": "run-all job already running — use /biz-intel/progress to poll"})!s}\n\n'
+        return StreamingResponse(_busy(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    provider = session.get("preferred_provider", "auto")
+    engine = _DeepIntelEngine()
+
+    import queue as _queue
+    q: _queue.Queue = _queue.Queue()
+
+    def _run_sync():
+        try:
+            for event in engine.crawl_website_stream(session_id, project_id, ai_provider=provider):
+                q.put(event)
+        except Exception as exc:
+            q.put(f'data: {json.dumps({"type": "error", "message": str(exc)})}\n\n')
+        finally:
+            q.put(None)
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(None, _run_sync)
+        while True:
+            item = await loop.run_in_executor(None, q.get)
+            if item is None:
+                break
+            yield item
+        await task
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/competitor", tags=["KW2"])
+async def kw2_add_competitor(
+    project_id: str, session_id: str,
+    body: _AddCompetitorBody,
+    user=Depends(current_user),
+):
+    """Add a competitor domain for analysis."""
+    _validate_project_exists(project_id, user)
+    if not kw2_db.get_session(session_id):
+        raise HTTPException(404, "Session not found")
+    engine = _DeepIntelEngine()
+    cid = engine.add_competitor(session_id, project_id, body.domain)
+    competitors = kw2_db.get_biz_competitors(session_id)
+    return {"competitor_id": cid, "competitors": competitors}
+
+
+@app.delete("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/competitor/{comp_id}", tags=["KW2"])
+async def kw2_remove_competitor(
+    project_id: str, session_id: str, comp_id: str,
+    user=Depends(current_user),
+):
+    """Remove a competitor."""
+    _validate_project_exists(project_id, user)
+    conn = kw2_db.get_conn()
+    try:
+        conn.execute("DELETE FROM kw2_biz_competitors WHERE id=? AND session_id=?", (comp_id, session_id))
+        conn.execute("DELETE FROM kw2_biz_competitor_keywords WHERE competitor_id=? AND session_id=?", (comp_id, session_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"deleted": True}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/crawl-competitors/stream", tags=["KW2"])
+async def kw2_biz_crawl_competitors_stream(
+    project_id: str, session_id: str,
+    token: str = None,
+    user=Depends(current_user_or_qs),
+):
+    """Stream competitor crawl + AI analysis."""
+    _validate_project_exists(project_id, user)
+    if _BI_PROGRESS.get(session_id, {}).get("running"):
+        async def _busy():
+            yield f'data: {json.dumps({"type": "error", "message": "run-all job already running — use /biz-intel/progress to poll"})!s}\n\n'
+        return StreamingResponse(_busy(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    provider = session.get("preferred_provider", "auto")
+    engine = _DeepIntelEngine()
+
+    import queue as _queue
+    q: _queue.Queue = _queue.Queue()
+
+    def _run_sync():
+        try:
+            for event in engine.crawl_competitors_stream(session_id, project_id, ai_provider=provider):
+                q.put(event)
+        except Exception as exc:
+            q.put(f'data: {json.dumps({"type": "error", "message": str(exc)})}\n\n')
+        finally:
+            q.put(None)  # sentinel
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(None, _run_sync)
+        while True:
+            item = await loop.run_in_executor(None, q.get)
+            if item is None:
+                break
+            yield item
+        await task
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/biz-intel/strategy/stream", tags=["KW2"])
+async def kw2_biz_strategy_stream(
+    project_id: str, session_id: str,
+    token: str = None,
+    user=Depends(current_user_or_qs),
+):
+    """Stream knowledge synthesis + SEO strategy generation."""
+    _validate_project_exists(project_id, user)
+    if _BI_PROGRESS.get(session_id, {}).get("running"):
+        async def _busy():
+            yield f'data: {json.dumps({"type": "error", "message": "run-all job already running — use /biz-intel/progress to poll"})!s}\n\n'
+        return StreamingResponse(_busy(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    provider = session.get("preferred_provider", "auto")
+    engine = _DeepIntelEngine()
+
+    import queue as _queue
+    q: _queue.Queue = _queue.Queue()
+
+    def _run_sync():
+        try:
+            for event in engine.build_strategy_stream(session_id, project_id, ai_provider=provider):
+                q.put(event)
+        except Exception as exc:
+            q.put(f'data: {json.dumps({"type": "error", "message": str(exc)})}\n\n')
+        finally:
+            q.put(None)
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(None, _run_sync)
+        while True:
+            item = await loop.run_in_executor(None, q.get)
+            if item is None:
+                break
+            yield item
+        await task
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ── KW2 Phase 2: Keyword Universe ───────────────────────────────────────────
+
+def _kw2_apply_confirmed_pillars(project_id: str, confirmed_pillars: list[str] | None,
+                                  session_id: str | None = None) -> list[str]:
+    """Persist user-confirmed pillars. For expand sessions, also save to session seed_keywords."""
+    pillars = [str(p).strip() for p in (confirmed_pillars or []) if str(p).strip()]
+    if not pillars:
+        return []
+    profile = kw2_db.load_business_profile(project_id)
+    if not profile:
+        return []
+    profile["pillars"] = pillars
+    kw2_db.save_business_profile(project_id, profile)
+    # Also update session seed_keywords so expand sessions track their own pillars
+    if session_id:
+        kw2_db.update_session(session_id, seed_keywords=json.dumps(pillars))
+    return pillars
+
+
+def _kw2_get_session_pillars(session: dict, project_id: str) -> list[str]:
+    """Get pillars for a session: expand/review uses seed_keywords, brand uses project profile."""
+    mode = (session.get("mode") or "brand").lower()
+    # For expand sessions, prefer seed_keywords stored on the session
+    if mode in {"expand", "review"}:
+        seeds = session.get("seed_keywords", [])
+        if isinstance(seeds, list) and seeds:
+            return seeds
+    # Fallback: project-level profile
+    profile = kw2_db.load_business_profile(project_id)
+    if profile:
+        return profile.get("pillars", [])
+    return []
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/pillar-audit", tags=["KW2"])
+async def kw2_pillar_audit(project_id: str, session_id: str, user=Depends(current_user)):
+    """Audit pillar + modifier extraction against current profile. Saves report to audits/."""
+    import time as _time
+    _validate_project_exists(project_id, user)
+    profile = kw2_db.load_business_profile(project_id)
+    if not profile:
+        raise HTTPException(404, "No business profile found — run Phase 1 first")
+
+    from engines.kw2.pillar_extractor import PillarExtractor
+    from engines.kw2.modifier_extractor import ModifierExtractor
+
+    products = profile.get("product_catalog", [])
+    stored_pillars = profile.get("pillars", [])
+    stored_modifiers = profile.get("modifiers", [])
+
+    # ── Pillar extraction ─────────────────────────────────────
+    t0 = _time.perf_counter()
+    fresh_pillars = PillarExtractor().extract(products) if products else []
+    pillar_ms = round((_time.perf_counter() - t0) * 1000, 1)
+
+    stored_set = {p.lower() for p in stored_pillars}
+    fresh_set = {p.lower() for p in fresh_pillars}
+    pillar_diff = {
+        "matched": sorted(stored_set & fresh_set),
+        "only_stored": sorted(stored_set - fresh_set),
+        "only_fresh": sorted(fresh_set - stored_set),
+    }
+
+    # ── Modifier extraction (use universe keywords if available) ──
+    universe_keywords: list[str] = []
+    try:
+        rows = kw2_db.load_universe_items(session_id)
+        universe_keywords = [r.get("keyword", "") for r in (rows or []) if r.get("keyword")][:300]
+    except Exception:
+        pass
+
+    mod_input = universe_keywords or stored_modifiers
+    t0 = _time.perf_counter()
+    me = ModifierExtractor()
+    fresh_structured = me.extract(mod_input)
+    fresh_flat = me.to_flat_list(fresh_structured)
+    modifier_ms = round((_time.perf_counter() - t0) * 1000, 1)
+
+    stored_mod_set = {m.lower() for m in stored_modifiers}
+    fresh_mod_set = {m.lower() for m in fresh_flat}
+    modifier_diff = {
+        "matched": sorted(stored_mod_set & fresh_mod_set),
+        "only_stored": sorted(stored_mod_set - fresh_mod_set),
+        "only_fresh": sorted(fresh_mod_set - stored_mod_set),
+    }
+
+    # ── Test cases ─────────────────────────────────────────────
+    TEST_CASES = [
+        ("Kerala Black Pepper 200gm", "black pepper"),
+        ("Premium Cardamom 8mm - Free Delivery", "cardamom"),
+        ("Organic Turmeric Powder 500gm", "turmeric powder"),
+        ("Best Ceylon Cinnamon Sticks - India", "cinnamon"),
+        ("Malabar Ginger Root - Farm Fresh", "ginger"),
+        ("100g Cold Pressed Coconut Oil", "coconut oil"),
+        ("Aromatic True Cloves Whole - 50gm", "cloves"),
+    ]
+    extractor = PillarExtractor()
+    test_results = []
+    for raw, expected in TEST_CASES:
+        got = extractor._clean(raw)
+        passed = got == expected or expected in got
+        test_results.append({"input": raw, "expected": expected, "got": got, "pass": passed})
+
+    tests_passed = sum(1 for t in test_results if t["pass"])
+    total_union = len(stored_set | fresh_set)
+
+    # ── Build report ──────────────────────────────────────────
+    report = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "project_id": project_id,
+        "session_id": session_id,
+        "summary": {
+            "products_count": len(products),
+            "stored_pillars": len(stored_pillars),
+            "fresh_pillars": len(fresh_pillars),
+            "pillar_match_pct": round(len(pillar_diff["matched"]) / max(total_union, 1) * 100),
+            "tests_passed": tests_passed,
+            "tests_total": len(TEST_CASES),
+            "pillar_ms": pillar_ms,
+            "modifier_ms": modifier_ms,
+        },
+        "pillars": {
+            "stored": stored_pillars,
+            "fresh": fresh_pillars,
+            "diff": pillar_diff,
+            "timing_ms": pillar_ms,
+        },
+        "modifiers": {
+            "stored": stored_modifiers,
+            "fresh_structured": fresh_structured,
+            "fresh_flat": fresh_flat,
+            "diff": modifier_diff,
+            "input_source": "universe" if universe_keywords else "stored_modifiers",
+            "input_count": len(mod_input),
+            "timing_ms": modifier_ms,
+        },
+        "tests": {
+            "results": test_results,
+            "passed": tests_passed,
+            "total": len(TEST_CASES),
+        },
+    }
+
+    # ── Save to file ──────────────────────────────────────────
+    os.makedirs("audits", exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fname = f"audits/pillar_audit_{project_id[:8]}_{ts}.json"
+    with open(fname, "w") as f:
+        json.dump(report, f, indent=2)
+    report["saved_to"] = fname
+
+    return report
+
+
+@app.get("/api/kw2/{project_id}/audit", tags=["KW2"])
+async def kw2_project_audit(project_id: str, user=Depends(current_user)):
+    """Project-level pillar + modifier audit. Uses the most recent session automatically."""
+    import time as _time
+    _validate_project_exists(project_id, user)
+
+    # Pick most recent session
+    sessions = kw2_db.list_sessions(project_id)
+    session_id = sessions[0]["id"] if sessions else None
+
+    profile = kw2_db.load_business_profile(project_id)
+    if not profile:
+        return {"error": "No business profile found — run Phase 1 first", "has_profile": False}
+
+    from engines.kw2.pillar_extractor import PillarExtractor
+    from engines.kw2.modifier_extractor import ModifierExtractor
+
+    products = profile.get("product_catalog", [])
+    stored_pillars = profile.get("pillars", [])
+    stored_modifiers = profile.get("modifiers", [])
+
+    # ── Pillar extraction ─────────────────────────────────────
+    t0 = _time.perf_counter()
+    fresh_pillars = PillarExtractor().extract(products) if products else []
+    pillar_ms = round((_time.perf_counter() - t0) * 1000, 1)
+
+    stored_set = {p.lower() for p in stored_pillars}
+    fresh_set = {p.lower() for p in fresh_pillars}
+    pillar_diff = {
+        "matched": sorted(stored_set & fresh_set),
+        "only_stored": sorted(stored_set - fresh_set),
+        "only_fresh": sorted(fresh_set - stored_set),
+    }
+
+    # ── Modifier extraction ───────────────────────────────────
+    universe_keywords: list[str] = []
+    if session_id:
+        try:
+            rows = kw2_db.load_universe_items(session_id)
+            universe_keywords = [r.get("keyword", "") for r in (rows or []) if r.get("keyword")][:300]
+        except Exception:
+            pass
+
+    mod_input = universe_keywords or stored_modifiers
+    t0 = _time.perf_counter()
+    me = ModifierExtractor()
+    fresh_structured = me.extract(mod_input)
+    fresh_flat = me.to_flat_list(fresh_structured)
+    modifier_ms = round((_time.perf_counter() - t0) * 1000, 1)
+
+    stored_mod_set = {m.lower() for m in stored_modifiers}
+    fresh_mod_set = {m.lower() for m in fresh_flat}
+    modifier_diff = {
+        "matched": sorted(stored_mod_set & fresh_mod_set),
+        "only_stored": sorted(stored_mod_set - fresh_mod_set),
+        "only_fresh": sorted(fresh_mod_set - stored_mod_set),
+    }
+
+    # ── Test cases ────────────────────────────────────────────
+    TEST_CASES = [
+        ("Kerala Black Pepper 200gm", "black pepper"),
+        ("Premium Cardamom 8mm - Free Delivery", "cardamom"),
+        ("Organic Turmeric Powder 500gm", "turmeric powder"),
+        ("Best Ceylon Cinnamon Sticks - India", "cinnamon"),
+        ("Malabar Ginger Root - Farm Fresh", "ginger"),
+        ("100g Cold Pressed Coconut Oil", "coconut oil"),
+        ("Aromatic True Cloves Whole - 50gm", "cloves"),
+    ]
+    extractor = PillarExtractor()
+    test_results = []
+    for raw, expected in TEST_CASES:
+        got = extractor._clean(raw)
+        passed = got == expected or expected in got
+        test_results.append({"input": raw, "expected": expected, "got": got, "pass": passed})
+
+    tests_passed = sum(1 for t in test_results if t["pass"])
+    total_union = len(stored_set | fresh_set)
+
+    report = {
+        "has_profile": True,
+        "timestamp": datetime.utcnow().isoformat(),
+        "project_id": project_id,
+        "session_id": session_id,
+        "summary": {
+            "products_count": len(products),
+            "stored_pillars": len(stored_pillars),
+            "fresh_pillars": len(fresh_pillars),
+            "pillar_match_pct": round(len(pillar_diff["matched"]) / max(total_union, 1) * 100),
+            "tests_passed": tests_passed,
+            "tests_total": len(TEST_CASES),
+            "pillar_ms": pillar_ms,
+            "modifier_ms": modifier_ms,
+        },
+        "pillars": {
+            "stored": stored_pillars,
+            "fresh": fresh_pillars,
+            "diff": pillar_diff,
+            "timing_ms": pillar_ms,
+        },
+        "modifiers": {
+            "stored": stored_modifiers,
+            "fresh_structured": fresh_structured,
+            "fresh_flat": fresh_flat,
+            "diff": modifier_diff,
+            "input_source": "universe" if universe_keywords else "stored_modifiers",
+            "input_count": len(mod_input),
+            "timing_ms": modifier_ms,
+        },
+        "tests": {
+            "results": test_results,
+            "passed": tests_passed,
+            "total": len(TEST_CASES),
+        },
+    }
+
+    os.makedirs("audits", exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fname = f"audits/pillar_audit_{project_id[:8]}_{ts}.json"
+    with open(fname, "w") as f:
+        json.dump(report, f, indent=2)
+    report["saved_to"] = fname
+
+    return report
+
 
 @app.post("/api/kw2/{project_id}/sessions/{session_id}/phase2", tags=["KW2"])
 async def kw2_phase2_generate(
     project_id: str, session_id: str,
+    body: _KW2Phase2Body | None = None,
     user=Depends(current_user),
 ):
     """Phase 2: Generate keyword universe (seeds + rules + suggest + competitor + AI)."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
-    if not session.get("phase1_done"):
-        raise HTTPException(400, "Phase 1 not complete")
+
+    mode = (session.get("mode") or "brand").lower()
+    profile = kw2_db.load_business_profile(project_id)
+    if mode == "brand" and not session.get("phase1_done"):
+        raise HTTPException(400, "Phase 1 not complete for brand mode")
+    if mode in {"expand", "review"} and not profile:
+        # For expand mode without profile, create a minimal profile from seed_keywords
+        seeds = session.get("seed_keywords", [])
+        if seeds:
+            profile = {"pillars": seeds, "universe": ", ".join(seeds), "modifiers": [],
+                        "negative_scope": [], "audience": [], "geo_scope": "", "domain": ""}
+            kw2_db.save_business_profile(project_id, profile)
+        else:
+            raise HTTPException(400, "No business profile found. Run Analyze once for this project before Generate.")
+
+    confirmed = _kw2_apply_confirmed_pillars(project_id, (body.confirmed_pillars if body else []),
+                                              session_id=session_id)
+    if not confirmed:
+        # Use session-scoped pillars for expand mode
+        confirmed = _kw2_get_session_pillars(session, project_id)
+    if confirmed:
+        # Ensure profile has the right pillars for this session
+        profile = kw2_db.load_business_profile(project_id)
+        if profile:
+            profile["pillars"] = confirmed
+            kw2_db.save_business_profile(project_id, profile)
+        kw2_db.update_session(session_id, current_phase="2")
+
+    # Apply confirmed modifiers to business profile if provided
+    if body and body.confirmed_modifiers:
+        profile = kw2_db.load_business_profile(project_id)
+        if profile:
+            profile["modifiers"] = body.confirmed_modifiers
+            kw2_db.save_business_profile(project_id, profile)
 
     provider = session.get("preferred_provider", "auto")
     gen = KeywordUniverseGenerator()
@@ -20079,27 +21990,81 @@ async def kw2_phase2_generate(
         gen.generate, project_id, session_id,
         competitor_urls=None, ai_provider=provider,
     )
+    kw2_db.update_session(session_id, current_phase="3")
     return {"universe": result}
 
 
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/phase2/stream", tags=["KW2"])
 async def kw2_phase2_stream(
     project_id: str, session_id: str,
+    confirmed_pillars: str = "",
+    confirmed_modifiers: str = "",
+    reset: bool = False,
     token: str = None,
     user=Depends(current_user_or_qs),
 ):
     """Phase 2: Stream keyword generation progress via SSE."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
 
+    mode = (session.get("mode") or "brand").lower()
+
+    if confirmed_pillars.strip():
+        _kw2_apply_confirmed_pillars(project_id,
+            [p.strip() for p in confirmed_pillars.split(",") if p.strip()],
+            session_id=session_id)
+        kw2_db.update_session(session_id, current_phase="2")
+    else:
+        # For expand sessions without confirmed_pillars param, use session seeds
+        session_pillars = _kw2_get_session_pillars(session, project_id)
+        if session_pillars:
+            profile = kw2_db.load_business_profile(project_id)
+            if not profile:
+                # Create minimal profile from seeds
+                profile = {"pillars": session_pillars, "universe": ", ".join(session_pillars),
+                            "modifiers": [], "negative_scope": [], "audience": [], "geo_scope": "", "domain": ""}
+            profile["pillars"] = session_pillars
+            kw2_db.save_business_profile(project_id, profile)
+
+    # Apply confirmed modifiers to business profile if provided
+    if confirmed_modifiers.strip():
+        mod_list = [m.strip() for m in confirmed_modifiers.split(",") if m.strip()]
+        profile = kw2_db.load_business_profile(project_id)
+        if profile:
+            profile["modifiers"] = mod_list
+            kw2_db.save_business_profile(project_id, profile)
+
+    # If reset=true, clear existing universe data so a fresh run starts from scratch
+    if reset:
+        kw2_db.clear_universe(session_id)
+        kw2_db.update_session(session_id, phase2_done=0, universe_count=0)
+
     provider = session.get("preferred_provider", "auto")
     gen = KeywordUniverseGenerator()
 
+    import queue as _queue
+    import threading as _threading
+
+    q = _queue.Queue()
+
+    def _run_sync():
+        try:
+            for event in gen.generate_stream(project_id, session_id, ai_provider=provider):
+                q.put(event)
+        except Exception as exc:
+            q.put(f"data: {json.dumps({'type': 'error', 'msg': str(exc)})}\n\n")
+        finally:
+            q.put(None)  # sentinel
+
+    _threading.Thread(target=_run_sync, daemon=True).start()
+
     async def event_stream():
-        for event in gen.generate_stream(project_id, session_id, ai_provider=provider):
-            # generate_stream yields raw SSE strings: 'data: {...}\n\n'
+        while True:
+            event = await asyncio.to_thread(q.get)
+            if event is None:
+                break
             yield event
         yield f"data: {json.dumps({'done': True})}\n\n"
 
@@ -20113,7 +22078,7 @@ async def kw2_phase2_stream(
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/universe", tags=["KW2"])
 async def kw2_get_universe(project_id: str, session_id: str, user=Depends(current_user)):
     """Get all universe keywords for a session."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     items = kw2_db.load_universe_items(session_id)
     return {"items": items, "count": len(items)}
 
@@ -20126,7 +22091,7 @@ async def kw2_phase3_validate(
     user=Depends(current_user),
 ):
     """Phase 3: Validate and filter keywords (rules + AI + semantic dedup + category balance)."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20136,6 +22101,7 @@ async def kw2_phase3_validate(
     provider = session.get("preferred_provider", "auto")
     val = KeywordValidator()
     result = await asyncio.to_thread(val.validate, project_id, session_id, provider)
+    kw2_db.update_session(session_id, current_phase="REVIEW")
     return {"validation": result}
 
 
@@ -20145,8 +22111,8 @@ async def kw2_phase3_stream(
     token: str = None,
     user=Depends(current_user_or_qs),
 ):
-    """Phase 3: Stream validation progress via SSE."""
-    _validate_project_exists(project_id)
+    """Phase 3: Stream validation progress via SSE (non-blocking)."""
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20154,11 +22120,28 @@ async def kw2_phase3_stream(
     provider = session.get("preferred_provider", "auto")
     val = KeywordValidator()
 
+    import queue as _queue
+    q = _queue.Queue()
+
+    def _run_sync():
+        try:
+            for event in val.validate_stream(project_id, session_id, ai_provider=provider):
+                q.put(event)
+        except Exception as exc:
+            q.put(f"data: {json.dumps({'type': 'error', 'msg': str(exc)})}\n\n")
+        finally:
+            q.put(None)
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_sync)
+
     async def event_stream():
-        for event in val.validate_stream(project_id, session_id, ai_provider=provider):
-            # validate_stream yields raw SSE strings: 'data: {...}\n\n'
-            yield event
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        while True:
+            item = await loop.run_in_executor(None, q.get)
+            if item is None:
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                break
+            yield item
 
     return StreamingResponse(
         event_stream(),
@@ -20170,7 +22153,7 @@ async def kw2_phase3_stream(
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/validated", tags=["KW2"])
 async def kw2_get_validated(project_id: str, session_id: str, user=Depends(current_user)):
     """Get all validated keywords."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     items = kw2_db.load_validated_keywords(session_id)
     return {"items": items, "count": len(items)}
 
@@ -20189,7 +22172,7 @@ async def kw2_update_keyword(
     user=Depends(current_user),
 ):
     """Update a validated keyword (pillar, intent, text, mapped_page)."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     import sqlite3 as _sqlite3
     from engines.kw2.db import get_conn as _kw2_conn
     conn = _kw2_conn()
@@ -20219,7 +22202,7 @@ async def kw2_delete_keyword(
     user=Depends(current_user),
 ):
     """Delete a validated keyword from the review set."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     from engines.kw2.db import get_conn as _kw2_conn
     conn = _kw2_conn()
     try:
@@ -20231,6 +22214,34 @@ async def kw2_delete_keyword(
     finally:
         conn.close()
     return {"ok": True, "deleted": keyword_id}
+
+
+class _KW2RejectBody(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/keywords/reject", tags=["KW2"])
+async def kw2_reject_keywords(
+    project_id: str, session_id: str,
+    body: _KW2RejectBody,
+    user=Depends(current_user),
+):
+    """Soft-delete (reject) a batch of validated keywords. Top-100 protection is
+    enforced on the frontend; this endpoint unconditionally sets rejected=1."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="ids list is required")
+    _validate_project_exists(project_id, user)
+    from engines.kw2.db import get_conn as _kw2_conn
+    conn = _kw2_conn()
+    try:
+        conn.executemany(
+            "UPDATE kw2_validated_keywords SET rejected=1 WHERE id=? AND session_id=?",
+            [(kid, session_id) for kid in body.ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "rejected": len(body.ids)}
 
 
 class _KW2KeywordAdd(BaseModel):
@@ -20247,7 +22258,7 @@ async def kw2_add_keyword(
     user=Depends(current_user),
 ):
     """Manually add a keyword to the validated set."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     import uuid as _uuid
     from engines.kw2.db import get_conn as _kw2_conn
     conn = _kw2_conn()
@@ -20268,12 +22279,12 @@ async def kw2_add_keyword(
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/pillar-stats", tags=["KW2"])
 async def kw2_pillar_stats(project_id: str, session_id: str, user=Depends(current_user)):
     """Get per-pillar keyword counts for review page."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     from engines.kw2.db import get_conn as _kw2_conn
     conn = _kw2_conn()
     try:
         rows = conn.execute(
-            "SELECT pillar, COUNT(*) as cnt FROM kw2_validated_keywords WHERE session_id=? GROUP BY pillar ORDER BY cnt DESC",
+            "SELECT pillar, COUNT(*) as count FROM kw2_validated_keywords WHERE session_id=? GROUP BY pillar ORDER BY count DESC",
             (session_id,),
         ).fetchall()
         return {"pillars": [dict(r) for r in rows]}
@@ -20289,7 +22300,7 @@ async def kw2_phase4_score_cluster(
     user=Depends(current_user),
 ):
     """Phase 4: Score all validated keywords + cluster them semantically."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20307,6 +22318,7 @@ async def kw2_phase4_score_cluster(
     cluster_result = await asyncio.to_thread(
         clusterer.cluster, project_id, session_id, provider
     )
+    kw2_db.update_session(session_id, current_phase="5")
 
     return {"scoring": score_result, "clustering": cluster_result}
 
@@ -20319,7 +22331,7 @@ async def kw2_phase5_tree(
     user=Depends(current_user),
 ):
     """Phase 5: Build content tree + balanced top-100 selection."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20329,6 +22341,7 @@ async def kw2_phase5_tree(
     provider = session.get("preferred_provider", "auto")
     builder = TreeBuilder()
     tree = await asyncio.to_thread(builder.build_tree, project_id, session_id, provider)
+    kw2_db.update_session(session_id, current_phase="6")
     return {"tree": tree}
 
 
@@ -20338,7 +22351,7 @@ async def kw2_get_top100(
     user=Depends(current_user),
 ):
     """Get balanced top-100 keywords, optionally filtered by pillar."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     builder = TreeBuilder()
     items = builder.get_top100(session_id, pillar)
     return {"items": items, "count": len(items)}
@@ -20347,7 +22360,7 @@ async def kw2_get_top100(
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/tree", tags=["KW2"])
 async def kw2_get_tree(project_id: str, session_id: str, user=Depends(current_user)):
     """Get cached content tree."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     builder = TreeBuilder()
     tree = builder.get_tree(session_id)
     return {"tree": tree}
@@ -20356,7 +22369,7 @@ async def kw2_get_tree(project_id: str, session_id: str, user=Depends(current_us
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/dashboard", tags=["KW2"])
 async def kw2_dashboard(project_id: str, session_id: str, user=Depends(current_user)):
     """Get kw2 pipeline dashboard stats."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     builder = TreeBuilder()
     return builder.get_dashboard(project_id, session_id)
 
@@ -20367,7 +22380,7 @@ async def kw2_explain_keyword(
     user=Depends(current_user),
 ):
     """Get AI explanation for why a keyword is valuable."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     provider = session.get("preferred_provider", "auto") if session else "auto"
     builder = TreeBuilder()
@@ -20383,7 +22396,7 @@ async def kw2_phase6_graph(
     user=Depends(current_user),
 ):
     """Phase 6: Build SEO knowledge graph."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20392,13 +22405,14 @@ async def kw2_phase6_graph(
 
     graph_builder = KnowledgeGraphBuilder()
     result = await asyncio.to_thread(graph_builder.build, project_id, session_id)
+    kw2_db.update_session(session_id, current_phase="7")
     return {"graph": result}
 
 
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/graph", tags=["KW2"])
 async def kw2_get_graph(project_id: str, session_id: str, user=Depends(current_user)):
     """Get knowledge graph edges grouped by type."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     graph_builder = KnowledgeGraphBuilder()
     return {"graph": graph_builder.get_graph(session_id)}
 
@@ -20411,7 +22425,7 @@ async def kw2_phase7_links(
     user=Depends(current_user),
 ):
     """Phase 7: Generate internal link map."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20420,6 +22434,7 @@ async def kw2_phase7_links(
 
     linker = InternalLinker()
     result = await asyncio.to_thread(linker.build, project_id, session_id)
+    kw2_db.update_session(session_id, current_phase="8")
     return {"links": result}
 
 
@@ -20429,7 +22444,7 @@ async def kw2_get_links(
     user=Depends(current_user),
 ):
     """Get internal link suggestions, optionally filtered by type."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     linker = InternalLinker()
     items = linker.get_links(session_id, link_type)
     return {"items": items, "count": len(items)}
@@ -20444,7 +22459,7 @@ async def kw2_phase8_calendar(
     user=Depends(current_user),
 ):
     """Phase 8: Build content calendar with inter-pillar scheduling."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20457,6 +22472,7 @@ async def kw2_phase8_calendar(
         body.blogs_per_week, body.duration_weeks,
         body.start_date, body.seasonal_overrides,
     )
+    kw2_db.update_session(session_id, current_phase="9")
     return {"calendar": result}
 
 
@@ -20466,7 +22482,7 @@ async def kw2_get_calendar(
     user=Depends(current_user),
 ):
     """Get content calendar entries."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     cal = ContentCalendar()
     items = cal.get_calendar(session_id, pillar)
     return {"items": items, "count": len(items)}
@@ -20474,34 +22490,1052 @@ async def kw2_get_calendar(
 
 # ── KW2 Phase 9: Strategy ───────────────────────────────────────────────────
 
+class _Phase9Body(BaseModel):
+    ai_provider: Optional[str] = None
+    blogs_per_week: Optional[int] = None
+    duration_weeks: Optional[int] = None
+    content_mix: Optional[dict] = None
+    publishing_cadence: Optional[list] = None
+    extra_prompt: Optional[str] = None
+
 @app.post("/api/kw2/{project_id}/sessions/{session_id}/phase9", tags=["KW2"])
 async def kw2_phase9_strategy(
     project_id: str, session_id: str,
+    body: _Phase9Body = _Phase9Body(),
     user=Depends(current_user),
 ):
     """Phase 9: Generate AI-powered SEO strategy."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
     if not session.get("phase8_done"):
         raise HTTPException(400, "Phase 8 not complete")
 
-    provider = session.get("preferred_provider", "auto")
+    provider = body.ai_provider or session.get("preferred_provider", "auto")
+    content_params = {
+        "blogs_per_week": body.blogs_per_week,
+        "duration_weeks": body.duration_weeks,
+        "content_mix": body.content_mix,
+        "publishing_cadence": body.publishing_cadence,
+        "extra_prompt": body.extra_prompt,
+    }
+    import time as _time_mod
+    _t0 = _time_mod.time()
     strat = StrategyEngine()
-    result = await asyncio.to_thread(strat.generate, project_id, session_id, provider)
-    return {"strategy": result}
+    result = await asyncio.to_thread(strat.generate, project_id, session_id, provider, content_params)
+    _elapsed = round(_time_mod.time() - _t0, 1)
+    kw2_db.update_session(session_id, current_phase="9")
+
+    # Collect AI usage from llm_audit_logs for this run window
+    _ai_usage: list[dict] = []
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        _t0_str = _dt.fromtimestamp(_t0, tz=_tz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        with get_db() as _conn:
+            _rows = _conn.execute(
+                "SELECT step, model, tokens_used, cost_usd FROM llm_audit_logs WHERE created_at >= ? ORDER BY id ASC LIMIT 20",
+                (_t0_str,),
+            ).fetchall()
+            _ai_usage = [
+                {"step": r["step"] or "", "model": r["model"] or "unknown",
+                 "tokens": r["tokens_used"] or 0, "cost_usd": round(r["cost_usd"] or 0, 5)}
+                for r in _rows
+            ]
+    except Exception:
+        pass
+
+    _total_tokens = sum(u["tokens"] for u in _ai_usage)
+    _models_used  = list(dict.fromkeys(u["model"] for u in _ai_usage if u["model"] != "unknown"))
+
+    return {
+        "strategy": result,
+        "meta": {
+            "elapsed_seconds": _elapsed,
+            "provider_requested": provider,
+            "models_used": _models_used,
+            "modules_run": 4,
+            "module_names": ["2A: Business Analysis", "2B: Keyword Intelligence", "2C: Strategy Builder", "2D: Action Mapping"],
+            "total_tokens": _total_tokens,
+            "ai_usage": _ai_usage,
+        },
+    }
 
 
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/strategy", tags=["KW2"])
 async def kw2_get_strategy(project_id: str, session_id: str, user=Depends(current_user)):
     """Get cached strategy."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     strat = StrategyEngine()
     strategy = strat.get_strategy(session_id)
     if not strategy:
         return {"strategy": None}
     return {"strategy": strategy}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/strategy/versions", tags=["KW2"])
+async def kw2_strategy_list_versions(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """List all strategy versions for a session."""
+    _validate_project_exists(project_id, user)
+    strat = StrategyEngine()
+    versions = strat.list_versions(session_id)
+    return {"versions": versions}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/strategy/versions/{version_id}", tags=["KW2"])
+async def kw2_strategy_get_version(
+    project_id: str, session_id: str, version_id: str, user=Depends(current_user)
+):
+    """Get a specific strategy version with full module outputs."""
+    _validate_project_exists(project_id, user)
+    strat = StrategyEngine()
+    version = strat.get_version(version_id)
+    if not version:
+        raise HTTPException(404, "Strategy version not found")
+    return {"version": version}
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/strategy/activate/{version_id}", tags=["KW2"])
+async def kw2_strategy_activate_version(
+    project_id: str, session_id: str, version_id: str, user=Depends(current_user)
+):
+    """Set a specific version as active."""
+    _validate_project_exists(project_id, user)
+    strat = StrategyEngine()
+    ok = strat.activate_version(session_id, version_id)
+    if not ok:
+        raise HTTPException(404, "Version not found")
+    return {"ok": True}
+
+
+class _StrategyEditBody(BaseModel):
+    version_id: str
+    field_path: str
+    old_value: Any = None
+    new_value: Any = None
+    edited_by: str = "user"
+
+
+@app.patch("/api/kw2/{project_id}/sessions/{session_id}/strategy/edit", tags=["KW2"])
+async def kw2_strategy_save_edit(
+    project_id: str, session_id: str,
+    body: _StrategyEditBody,
+    user=Depends(current_user),
+):
+    """Record a user edit to a strategy field."""
+    _validate_project_exists(project_id, user)
+    strat = StrategyEngine()
+    edit_id = strat.save_edit(
+        session_id, body.version_id, body.field_path,
+        body.old_value, body.new_value, body.edited_by,
+    )
+    return {"edit_id": edit_id}
+
+
+# ── Question Intelligence Engine routes (Phase 3) ────────────────────────────
+
+from engines.kw2.question_engine import QuestionEngine as _QuestionEngine
+
+
+class _QuestionRunBody(BaseModel):
+    ai_provider: str = "auto"
+    modules: list[str] | None = None
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/questions/run", tags=["KW2"])
+async def kw2_questions_run(
+    project_id: str, session_id: str,
+    body: _QuestionRunBody = _QuestionRunBody(),
+    user=Depends(current_user),
+):
+    """Run question intelligence modules (Q1–Q7) for the session."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    engine = _QuestionEngine()
+    result = await asyncio.to_thread(
+        engine.run, project_id, session_id,
+        body.ai_provider, body.modules,
+    )
+    return result
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/questions/enrich", tags=["KW2"])
+async def kw2_questions_enrich(
+    project_id: str, session_id: str,
+    body: _QuestionRunBody = _QuestionRunBody(),
+    user=Depends(current_user),
+):
+    """Phase 5: Enrich questions with intent, funnel, geo metadata."""
+    _validate_project_exists(project_id, user)
+    engine = _QuestionEngine()
+    result = await asyncio.to_thread(
+        engine.run_enrichment, project_id, session_id, body.ai_provider,
+    )
+    return result
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/questions", tags=["KW2"])
+async def kw2_questions_list(
+    project_id: str, session_id: str,
+    module: str | None = None,
+    enriched_only: bool = False,
+    limit: int = 500,
+    user=Depends(current_user),
+):
+    """List intelligence questions for a session."""
+    _validate_project_exists(project_id, user)
+    engine = _QuestionEngine()
+    questions = engine.list_questions(session_id, module, enriched_only, limit)
+    return {"questions": questions, "count": len(questions)}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/questions/summary", tags=["KW2"])
+async def kw2_questions_summary(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Get question counts by module and enrichment status."""
+    _validate_project_exists(project_id, user)
+    engine = _QuestionEngine()
+    return engine.get_summary(session_id)
+
+
+@app.delete("/api/kw2/{project_id}/sessions/{session_id}/questions/{question_id}", tags=["KW2"])
+async def kw2_questions_delete(
+    project_id: str, session_id: str, question_id: str, user=Depends(current_user)
+):
+    """Delete a question."""
+    _validate_project_exists(project_id, user)
+    engine = _QuestionEngine()
+    engine.delete_question(question_id, session_id)
+    return {"ok": True}
+
+
+# ── Expansion Engine routes (Phase 4) ────────────────────────────────────────
+
+from engines.kw2.expansion_engine import ExpansionEngine as _ExpansionEngine
+from engines.kw2.dedup_engine import DedupEngine as _DedupEngine
+from engines.kw2.scoring_engine import ScoringEngine as _ScoringEngine
+
+
+class _ExpansionRunBody(BaseModel):
+    ai_provider: str = "auto"
+    max_depth: int = 2
+    max_per_node: int = 5
+    max_total: int = 5000
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/expansion/discover-dimensions", tags=["KW2"])
+async def kw2_expansion_discover(
+    project_id: str, session_id: str,
+    body: _QuestionRunBody = _QuestionRunBody(),
+    user=Depends(current_user),
+):
+    """Discover expansion dimensions for this business (AI-driven, no hardcoding)."""
+    _validate_project_exists(project_id, user)
+    engine = _ExpansionEngine()
+    result = await asyncio.to_thread(
+        engine.discover_dimensions, project_id, session_id, body.ai_provider,
+    )
+    return result
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/expansion/run", tags=["KW2"])
+async def kw2_expansion_run(
+    project_id: str, session_id: str,
+    body: _ExpansionRunBody = _ExpansionRunBody(),
+    user=Depends(current_user),
+):
+    """Expand seed questions across discovered dimensions."""
+    _validate_project_exists(project_id, user)
+    engine = _ExpansionEngine()
+    result = await asyncio.to_thread(
+        engine.run, project_id, session_id,
+        body.ai_provider, body.max_depth, body.max_per_node, body.max_total,
+    )
+    return result
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/expansion/config", tags=["KW2"])
+async def kw2_expansion_config(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Get expansion config (discovered dimensions, max depth, etc.)."""
+    _validate_project_exists(project_id, user)
+    engine = _ExpansionEngine()
+    return engine.get_config(session_id)
+
+
+# ── Dedup + Cluster routes (Phase 6) ─────────────────────────────────────────
+
+
+class _DedupBody(BaseModel):
+    threshold: float = 0.85
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/dedup/run", tags=["KW2"])
+async def kw2_dedup_run(
+    project_id: str, session_id: str,
+    body: _DedupBody = _DedupBody(),
+    user=Depends(current_user),
+):
+    """Run deduplication on all questions."""
+    _validate_project_exists(project_id, user)
+    engine = _DedupEngine()
+    result = await asyncio.to_thread(engine.run_dedup, session_id, body.threshold)
+    return result
+
+
+class _ClusterBody(BaseModel):
+    ai_provider: str = "auto"
+    max_clusters: int = 30
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/dedup/cluster", tags=["KW2"])
+async def kw2_dedup_cluster(
+    project_id: str, session_id: str,
+    body: _ClusterBody = _ClusterBody(),
+    user=Depends(current_user),
+):
+    """Cluster deduplicated questions into content topic clusters."""
+    _validate_project_exists(project_id, user)
+    engine = _DedupEngine()
+    result = await asyncio.to_thread(
+        engine.run_clustering, project_id, session_id,
+        body.ai_provider, body.max_clusters,
+    )
+    return result
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/dedup/clusters", tags=["KW2"])
+async def kw2_dedup_clusters(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """List content clusters."""
+    _validate_project_exists(project_id, user)
+    engine = _DedupEngine()
+    return {"clusters": engine.list_clusters(session_id)}
+
+
+# ── Scoring Engine routes (Phase 7) ──────────────────────────────────────────
+
+
+class _ScoringRunBody(BaseModel):
+    weights: dict | None = None
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/scoring/run", tags=["KW2"])
+async def kw2_scoring_run(
+    project_id: str, session_id: str,
+    body: _ScoringRunBody = _ScoringRunBody(),
+    user=Depends(current_user),
+):
+    """Score all questions using weighted formula."""
+    _validate_project_exists(project_id, user)
+    engine = _ScoringEngine()
+    result = await asyncio.to_thread(engine.run, session_id, project_id, body.weights)
+    return result
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/scoring/config", tags=["KW2"])
+async def kw2_scoring_config(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Get scoring weights used for this session."""
+    _validate_project_exists(project_id, user)
+    engine = _ScoringEngine()
+    return engine.get_config(session_id)
+
+
+@app.patch("/api/kw2/{project_id}/sessions/{session_id}/scoring/config", tags=["KW2"])
+async def kw2_scoring_update_config(
+    project_id: str, session_id: str,
+    body: _ScoringRunBody,
+    user=Depends(current_user),
+):
+    """Update scoring weights for this session."""
+    _validate_project_exists(project_id, user)
+    if not body.weights:
+        raise HTTPException(400, "weights required")
+    engine = _ScoringEngine()
+    engine.update_config(session_id, body.weights)
+    return {"ok": True}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/scoring/ranked", tags=["KW2"])
+async def kw2_scoring_ranked(
+    project_id: str, session_id: str,
+    limit: int = 200,
+    intent: str | None = None,
+    funnel: str | None = None,
+    user=Depends(current_user),
+):
+    """Get questions ranked by final_score."""
+    _validate_project_exists(project_id, user)
+    engine = _ScoringEngine()
+    questions = engine.get_ranked(session_id, limit, intent, funnel)
+    return {"questions": questions, "count": len(questions)}
+
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5 — Selection Engine
+# ---------------------------------------------------------------------------
+
+from engines.kw2.selection_engine import SelectionEngine as _SelectionEngine
+
+
+class _SelectionRunBody(BaseModel):
+    n: int = 50
+    max_per_cluster: int = 5
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/selection/run", tags=["KW2"])
+async def kw2_selection_run(
+    project_id: str, session_id: str, body: _SelectionRunBody, user=Depends(current_user)
+):
+    """Select the top N diversity-balanced questions."""
+    _validate_project_exists(project_id, user)
+    engine = _SelectionEngine()
+    result = engine.run(
+        session_id,
+        project_id,
+        target_count=body.n,
+        max_per_cluster=body.max_per_cluster,
+    )
+    return result
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/selection/list", tags=["KW2"])
+async def kw2_selection_list(project_id: str, session_id: str, user=Depends(current_user)):
+    """List selected questions in rank order."""
+    _validate_project_exists(project_id, user)
+    engine = _SelectionEngine()
+    return {"selected": engine.list_selected(session_id)}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline status — single endpoint returning per-stage readiness counts
+# ---------------------------------------------------------------------------
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/pipeline/status", tags=["KW2"])
+async def kw2_pipeline_status(project_id: str, session_id: str, user=Depends(current_user)):
+    """Return counts and readiness for every Intelligence stage in one call.
+
+    Response shape:
+      {
+        "questions":   {"count": int, "enriched": int, "unenriched": int},
+        "expansion":   {"has_dimensions": bool, "dim_count": int, "expanded": int},
+        "dedup":       {"duplicates_removed": int, "unique": int},
+        "clusters":    {"count": int},
+        "scoring":     {"scored": int},
+        "selection":   {"count": int},
+        "stages": {
+          "generate":  "done"|"ready"|"blocked",
+          "enrich":    "done"|"ready"|"blocked",
+          "discover":  "done"|"ready"|"blocked",
+          "expand":    "done"|"ready"|"blocked",
+          "dedup":     "done"|"ready"|"blocked",
+          "cluster":   "done"|"ready"|"blocked",
+          "score":     "done"|"ready"|"blocked",
+          "select":    "done"|"ready"|"blocked",
+        }
+      }
+    """
+    _validate_project_exists(project_id, user)
+    from engines.kw2 import db as _kw2_db_mod
+    import sqlite3 as _sl3
+
+    db_path = _kw2_db_mod._db_path()
+
+    def _fetch(query, params=()):
+        with _sl3.connect(db_path) as conn:
+            conn.row_factory = _sl3.Row
+            cur = conn.execute(query, params)
+            return cur.fetchall()
+
+    # Questions
+    q_rows = _fetch(
+        "SELECT question, intent, is_duplicate, expansion_depth, final_score "
+        "FROM kw2_intelligence_questions WHERE session_id=?", (session_id,)
+    )
+    total_q      = len(q_rows)
+    enriched     = sum(1 for r in q_rows if r["intent"])
+    unenriched   = total_q - enriched
+    expanded_n   = sum(1 for r in q_rows if (r["expansion_depth"] or 0) > 0)
+    unique_n     = sum(1 for r in q_rows if not r["is_duplicate"])
+    dup_removed  = total_q - unique_n
+    scored_n     = sum(1 for r in q_rows if (r["final_score"] or 0) > 0)
+
+    # Expansion config — discovered dimensions
+    exp_rows = _fetch(
+        "SELECT discovered_dimensions FROM kw2_expansion_config WHERE session_id=?", (session_id,)
+    )
+    discovered_dims = {}
+    if exp_rows:
+        import json as _json
+        raw = exp_rows[0]["discovered_dimensions"] or "{}"
+        try:
+            discovered_dims = _json.loads(raw)
+        except Exception:
+            discovered_dims = {}
+
+    # Clusters
+    cl_rows = _fetch(
+        "SELECT id FROM kw2_content_clusters WHERE session_id=?", (session_id,)
+    )
+    cluster_count = len(cl_rows)
+
+    # Selected
+    sel_rows = _fetch(
+        "SELECT id FROM kw2_selected_questions WHERE session_id=?", (session_id,)
+    )
+    selected_count = len(sel_rows)
+
+    has_dims = bool(discovered_dims)
+    dim_count = len(discovered_dims)
+
+    def _stage(name):
+        if name == "generate":
+            return "done" if total_q > 0 else "ready"
+        if name == "enrich":
+            if total_q == 0: return "blocked"
+            return "done" if unenriched == 0 else "ready"
+        if name == "discover":
+            if total_q == 0: return "blocked"
+            return "done" if has_dims else "ready"
+        if name == "expand":
+            if not has_dims: return "blocked"
+            return "done" if expanded_n > 0 else "ready"
+        if name == "dedup":
+            if total_q == 0: return "blocked"
+            return "done" if dup_removed > 0 else "ready"
+        if name == "cluster":
+            if total_q == 0: return "blocked"
+            return "done" if cluster_count > 0 else "ready"
+        if name == "score":
+            if cluster_count == 0: return "blocked"
+            return "done" if scored_n > 0 else "ready"
+        if name == "select":
+            if scored_n == 0: return "blocked"
+            return "done" if selected_count > 0 else "ready"
+        return "ready"
+
+    return {
+        "questions":  {"count": total_q, "enriched": enriched, "unenriched": unenriched},
+        "expansion":  {"has_dimensions": has_dims, "dim_count": dim_count, "expanded": expanded_n},
+        "dedup":      {"duplicates_removed": dup_removed, "unique": unique_n},
+        "clusters":   {"count": cluster_count},
+        "scoring":    {"scored": scored_n},
+        "selection":  {"count": selected_count},
+        "stages": {name: _stage(name) for name in
+                   ["generate","enrich","discover","expand","dedup","cluster","score","select"]},
+    }
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/selection/include/{question_id}",
+    tags=["KW2"],
+)
+async def kw2_selection_include(
+    project_id: str, session_id: str, question_id: str, user=Depends(current_user)
+):
+    """Manually include a question in the selected set."""
+    _validate_project_exists(project_id, user)
+    engine = _SelectionEngine()
+    engine.include_question(session_id, question_id)
+    return {"ok": True}
+
+
+@app.delete(
+    "/api/kw2/{project_id}/sessions/{session_id}/selection/{question_id}",
+    tags=["KW2"],
+)
+async def kw2_selection_remove(
+    project_id: str, session_id: str, question_id: str, user=Depends(current_user)
+):
+    """Remove a question from the selected set."""
+    _validate_project_exists(project_id, user)
+    engine = _SelectionEngine()
+    engine.remove_question(session_id, question_id)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5 — Content Title Engine
+# ---------------------------------------------------------------------------
+
+from engines.kw2.content_title_engine import ContentTitleEngine as _ContentTitleEngine
+
+
+class _TitleUpdateBody(BaseModel):
+    title: Optional[str] = None
+    meta_title: Optional[str] = None
+    slug: Optional[str] = None
+    content_type: Optional[str] = None
+    word_count_target: Optional[int] = None
+    status: Optional[str] = None
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/content-titles/generate",
+    tags=["KW2"],
+)
+async def kw2_titles_generate(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Generate SEO titles for all selected questions."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    engine = _ContentTitleEngine()
+    ai_provider = session.get("preferred_provider") or session.get("ai_provider") or "auto"
+    result = await asyncio.to_thread(engine.generate, project_id, session_id, ai_provider)
+    return result
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/content-titles",
+    tags=["KW2"],
+)
+async def kw2_titles_list(
+    project_id: str,
+    session_id: str,
+    pillar: Optional[str] = None,
+    content_type: Optional[str] = None,
+    limit: int = 200,
+    user=Depends(current_user),
+):
+    """List generated content titles with optional filters."""
+    _validate_project_exists(project_id, user)
+    engine = _ContentTitleEngine()
+    titles = engine.list_titles(session_id, pillar=pillar, content_type=content_type, limit=limit)
+    return {"titles": titles, "count": len(titles)}
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/content-titles/stats",
+    tags=["KW2"],
+)
+async def kw2_titles_stats(project_id: str, session_id: str, user=Depends(current_user)):
+    """Get title generation stats by pillar, content type, etc."""
+    _validate_project_exists(project_id, user)
+    engine = _ContentTitleEngine()
+    return engine.get_stats(session_id)
+
+
+@app.patch(
+    "/api/kw2/{project_id}/sessions/{session_id}/content-titles/{title_id}",
+    tags=["KW2"],
+)
+async def kw2_titles_update(
+    project_id: str,
+    session_id: str,
+    title_id: str,
+    body: _TitleUpdateBody,
+    user=Depends(current_user),
+):
+    """Update a content title field (human edit)."""
+    _validate_project_exists(project_id, user)
+    engine = _ContentTitleEngine()
+    updates = {k: v for k, v in body.dict().items() if v is not None}
+    engine.update_title(title_id, updates)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 6 — Prompt Manager
+# ---------------------------------------------------------------------------
+
+from engines.kw2.prompt_manager import PromptManager as _KW2PM
+
+
+class _PromptUpdateBody(BaseModel):
+    template: str
+
+
+@app.get("/api/kw2/prompts", tags=["KW2"])
+async def kw2_prompts_list(user=Depends(current_user)):
+    """List all prompts in the kw2 prompt registry."""
+    pm = _KW2PM()
+    return {"prompts": pm.list_prompts()}
+
+
+@app.get("/api/kw2/prompts/{prompt_key}", tags=["KW2"])
+async def kw2_prompts_detail(prompt_key: str, user=Depends(current_user)):
+    """Get full detail for a single prompt including current template."""
+    pm = _KW2PM()
+    detail = pm.get_prompt_detail(prompt_key)
+    if not detail:
+        raise HTTPException(404, f"Prompt '{prompt_key}' not found")
+    return detail
+
+
+@app.patch("/api/kw2/prompts/{prompt_key}", tags=["KW2"])
+async def kw2_prompts_update(
+    prompt_key: str, body: _PromptUpdateBody, user=Depends(current_user)
+):
+    """Update a prompt template (creates a new version)."""
+    pm = _KW2PM()
+    pm.update_template(prompt_key, body.template, edited_by=user.get("email", "unknown"))
+    return {"ok": True}
+
+
+@app.get("/api/kw2/prompts/{prompt_key}/versions", tags=["KW2"])
+async def kw2_prompts_versions(prompt_key: str, user=Depends(current_user)):
+    """List version history for a prompt."""
+    pm = _KW2PM()
+    return {"versions": pm.list_versions(prompt_key)}
+
+
+@app.post("/api/kw2/prompts/{prompt_key}/restore/{version_number}", tags=["KW2"])
+async def kw2_prompts_restore(
+    prompt_key: str, version_number: int, user=Depends(current_user)
+):
+    """Restore a previous prompt version."""
+    pm = _KW2PM()
+    ok = pm.restore_version(prompt_key, version_number)
+    if not ok:
+        raise HTTPException(404, "Version not found")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7 — Feedback Engine
+# ---------------------------------------------------------------------------
+
+from engines.kw2.feedback_engine import FeedbackEngine as _FeedbackEngine
+
+
+class _PerformanceRecordBody(BaseModel):
+    content_title_id: str
+    tracked_date: str
+    google_position: float = 0.0
+    organic_clicks: int = 0
+    impressions: int = 0
+    ctr: float = 0.0
+    conversions: int = 0
+    article_id: str = ""
+    data_source: str = "manual"
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/performance/record",
+    tags=["KW2"],
+)
+async def kw2_performance_record(
+    project_id: str,
+    session_id: str,
+    body: _PerformanceRecordBody,
+    user=Depends(current_user),
+):
+    """Record performance metrics for a content title."""
+    _validate_project_exists(project_id, user)
+    engine = _FeedbackEngine()
+    pid = engine.record_performance(
+        session_id=session_id,
+        content_title_id=body.content_title_id,
+        tracked_date=body.tracked_date,
+        google_position=body.google_position,
+        organic_clicks=body.organic_clicks,
+        impressions=body.impressions,
+        ctr=body.ctr,
+        conversions=body.conversions,
+        article_id=body.article_id,
+        data_source=body.data_source,
+    )
+    return {"id": pid}
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/performance/summary",
+    tags=["KW2"],
+)
+async def kw2_performance_summary(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Get aggregate performance stats for a session."""
+    _validate_project_exists(project_id, user)
+    engine = _FeedbackEngine()
+    return engine.get_summary(session_id)
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/performance",
+    tags=["KW2"],
+)
+async def kw2_performance_list(
+    project_id: str, session_id: str, limit: int = 100, user=Depends(current_user)
+):
+    """List all performance records for a session."""
+    _validate_project_exists(project_id, user)
+    engine = _FeedbackEngine()
+    return {"records": engine.list_performance(session_id, limit=limit)}
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/performance/apply-learnings",
+    tags=["KW2"],
+)
+async def kw2_performance_apply_learnings(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Apply performance learnings to adjust scoring weights (Bayesian update)."""
+    _validate_project_exists(project_id, user)
+    engine = _FeedbackEngine()
+    result = engine.apply_learnings(session_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8 — Learning Engine (Real AI: Pattern Memory + ROI + Decisions)
+# ---------------------------------------------------------------------------
+
+from engines.kw2.learning_engine import (
+    FeedbackLoop as _FeedbackLoop,
+    PatternMemory as _PatternMemory,
+    ROIEngine as _ROIEngine,
+    DecisionEngine as _DecisionEngine,
+    ContentMixOptimizer as _ContentMixOptimizer,
+    classify_title_type as _classify_title_type,
+)
+
+
+class _PerformanceRecordV2Body(BaseModel):
+    """Extended record body with revenue, cost, bounce_rate, time_on_page."""
+    content_title_id: str
+    tracked_date: str
+    google_position: float = 0.0
+    organic_clicks: int = 0
+    impressions: int = 0
+    ctr: float = 0.0
+    conversions: int = 0
+    revenue: float = 0.0
+    cost: float = 0.0
+    bounce_rate: float = 0.0
+    time_on_page_seconds: int = 0
+    article_id: str = ""
+    data_source: str = "manual"
+
+
+class _DecisionOverrideBody(BaseModel):
+    entity_id: str
+    new_decision: str
+    reason: str = ""
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/performance/record-v2",
+    tags=["KW2 Learning"],
+)
+async def kw2_performance_record_v2(
+    project_id: str,
+    session_id: str,
+    body: _PerformanceRecordV2Body,
+    user=Depends(current_user),
+):
+    """
+    Record extended performance metrics including revenue, cost, bounce_rate
+    and time_on_page — required for ROI engine.
+    """
+    _validate_project_exists(project_id, user)
+    import sqlite3
+    from engines.kw2.db import get_conn, _uid as _kw2_uid
+    from datetime import datetime, timezone
+    pid = _kw2_uid("cp_")
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO kw2_content_performance
+               (id, session_id, content_title_id, article_id, tracked_date,
+                google_position, organic_clicks, impressions, ctr, conversions,
+                revenue, cost, bounce_rate, time_on_page_seconds,
+                data_source, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (pid, session_id, body.content_title_id, body.article_id, body.tracked_date,
+             body.google_position, body.organic_clicks, body.impressions, body.ctr,
+             body.conversions, body.revenue, body.cost, body.bounce_rate,
+             body.time_on_page_seconds, body.data_source, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": pid}
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/learning/run",
+    tags=["KW2 Learning"],
+)
+async def kw2_learning_run(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """
+    Run the full learning pipeline:
+    Pattern Extraction → Scoring → Memory → ROI → Decisions → Strategy State.
+    Requires performance data (use /performance/record-v2 first).
+    """
+    _validate_project_exists(project_id, user)
+    loop = _FeedbackLoop()
+    return await asyncio.get_event_loop().run_in_executor(
+        None, loop.run, session_id, project_id
+    )
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/learning/patterns",
+    tags=["KW2 Learning"],
+)
+async def kw2_learning_patterns(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Return all extracted patterns sorted by pattern_score desc."""
+    _validate_project_exists(project_id, user)
+    memory = _PatternMemory()
+    patterns = memory.get_all(session_id)
+    return {"patterns": patterns, "count": len(patterns)}
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/learning/roi",
+    tags=["KW2 Learning"],
+)
+async def kw2_learning_roi(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Return ROI metrics per content piece + session-level summary."""
+    _validate_project_exists(project_id, user)
+    roi_engine = _ROIEngine()
+    roi_list = roi_engine.compute_for_session(session_id)
+    return {
+        "items": roi_list,
+        "summary": roi_engine.summary(roi_list),
+    }
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/learning/decisions",
+    tags=["KW2 Learning"],
+)
+async def kw2_learning_decisions(
+    project_id: str, session_id: str,
+    entity_type: str | None = None,
+    user=Depends(current_user),
+):
+    """Return scale/kill/optimize decisions for content and clusters."""
+    _validate_project_exists(project_id, user)
+    engine = _DecisionEngine()
+    decisions = engine.get_decisions(session_id, entity_type=entity_type)
+    summary = {
+        "scale": sum(1 for d in decisions if d["decision"] == "scale"),
+        "optimize": sum(1 for d in decisions if d["decision"] == "optimize"),
+        "kill": sum(1 for d in decisions if d["decision"] == "kill"),
+        "fade": sum(1 for d in decisions if d["decision"] == "fade"),
+        "maintain": sum(1 for d in decisions if d["decision"] == "maintain"),
+    }
+    return {"decisions": decisions, "summary": summary}
+
+
+@app.post(
+    "/api/kw2/{project_id}/sessions/{session_id}/learning/decisions/override",
+    tags=["KW2 Learning"],
+)
+async def kw2_learning_decision_override(
+    project_id: str,
+    session_id: str,
+    body: _DecisionOverrideBody,
+    user=Depends(current_user),
+):
+    """Manually override an AI decision (human-in-the-loop correction)."""
+    _validate_project_exists(project_id, user)
+    engine = _DecisionEngine()
+    ok = engine.override(session_id, body.entity_id, body.new_decision, body.reason)
+    return {"ok": ok}
+
+
+@app.get(
+    "/api/kw2/{project_id}/sessions/{session_id}/learning/strategy-state",
+    tags=["KW2 Learning"],
+)
+async def kw2_learning_strategy_state(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """
+    Return current strategy state:
+    content_mix, cluster_priorities, expansion_candidates, roi_summary.
+    """
+    _validate_project_exists(project_id, user)
+    loop = _FeedbackLoop()
+    state = loop.get_strategy_state(session_id)
+    return state or {"message": "No strategy state yet — run learning first"}
+
+
+async def kw2_session_ai_usage(project_id: str, session_id: str, user=Depends(current_user)):
+    """Get AI usage log and cost summary for a session."""
+    _validate_project_exists(project_id, user)
+    entries = kw2_db.get_ai_usage(session_id)
+    summary = kw2_db.get_project_ai_usage_summary(project_id)
+    return {"entries": entries, "summary": summary}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/biz-context-preview", tags=["KW2"])
+async def kw2_biz_context_preview(project_id: str, session_id: str, user=Depends(current_user)):
+    """Return collected business context that will be used in AI generation."""
+    _validate_project_exists(project_id, user)
+    profile = kw2_db.load_business_profile(project_id) or {}
+    biz_intel = kw2_db.get_biz_intel(session_id) or {}
+    biz_pages = kw2_db.get_biz_pages(session_id) or []
+    biz_competitors = kw2_db.get_biz_competitors(session_id) or []
+    keywords = kw2_db.load_validated_keywords(session_id) or []
+    pillar_stats = {}
+    for kw in keywords:
+        p = kw.get("pillar", "unknown")
+        pillar_stats[p] = pillar_stats.get(p, 0) + 1
+    return {
+        "profile": {
+            "universe": profile.get("universe", ""),
+            "business_type": profile.get("business_type", ""),
+            "pillars": profile.get("pillars", []),
+            "audience": profile.get("audience", []),
+            "geo_scope": profile.get("geo_scope", ""),
+        },
+        "biz_intel": {
+            "usps": biz_intel.get("usps", []),
+            "goals": biz_intel.get("goals", []),
+            "audience_segments": biz_intel.get("audience_segments", []),
+            "pricing_model": biz_intel.get("pricing_model", ""),
+            "website_summary": (biz_intel.get("website_summary", "") or "")[:400],
+            "knowledge_summary": (biz_intel.get("knowledge_summary", "") or "")[:600],
+            "seo_strategy": (biz_intel.get("seo_strategy", "") or "")[:400],
+            "has_website_crawl": bool(biz_intel.get("website_crawl_done")),
+            "has_competitor_crawl": bool(biz_intel.get("competitor_crawl_done")),
+        },
+        "pages_count": len(biz_pages),
+        "pages_sample": [
+            {
+                "page_type": p.get("page_type", ""),
+                "primary_topic": p.get("primary_topic", ""),
+                "search_intent": p.get("search_intent", ""),
+                "funnel_stage": p.get("funnel_stage", ""),
+            }
+            for p in biz_pages[:10]
+        ],
+        "competitors": [
+            {
+                "domain": c.get("domain", ""),
+                "missed_opportunities": c.get("missed_opportunities", []),
+                "weaknesses": c.get("weaknesses", []),
+                "top_keywords": c.get("top_keywords", []),
+            }
+            for c in biz_competitors[:5]
+        ],
+        "keywords_validated": len(keywords),
+        "pillar_distribution": pillar_stats,
+    }
 
 
 # ── KW2 Run All (Convenience) ───────────────────────────────────────────────
@@ -20514,7 +23548,7 @@ async def kw2_run_all(
     user=Depends(current_user),
 ):
     """Run the full kw2 pipeline (phases 1-9) as a background task."""
-    _validate_project_exists(project_id)
+    _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -20555,3 +23589,1231 @@ async def kw2_run_all(
 
     bg.add_task(asyncio.to_thread, _run_pipeline)
     return {"status": "started", "session_id": session_id}
+
+
+# ── KW2 DAG Engine Endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/dag", tags=["KW2-DAG"])
+async def kw2_dag_state(project_id: str, session_id: str, user=Depends(current_user)):
+    """Return full DAG state: topology + phase statuses for this session."""
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    mode = sess.get("mode", "brand")
+    dag = _get_dag_state(mode)
+
+    # Load persisted graph to merge live statuses
+    raw = kw2_db.load_session_graph(session_id)
+    if raw:
+        sg = _SessionGraph.from_json(raw)
+        dag["statuses"] = sg.statuses
+        dag["version"] = sg.version
+        dag["cost_tokens"] = sg.cost_tokens
+    else:
+        dag["statuses"] = {}
+        dag["version"] = 0
+        dag["cost_tokens"] = {}
+
+    return dag
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/dag/run/{phase_id}", tags=["KW2-DAG"])
+async def kw2_dag_run_phase(
+    project_id: str, session_id: str, phase_id: str,
+    user=Depends(current_user),
+):
+    """Execute a single DAG phase."""
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    mode = sess.get("mode", "brand")
+
+    if phase_id not in _DAG_REGISTRY:
+        raise HTTPException(400, f"unknown phase: {phase_id}")
+    spec = _DAG_REGISTRY[phase_id]
+    if mode not in spec.modes:
+        raise HTTPException(400, f"phase {phase_id} not available in mode {mode}")
+
+    # Load or create session graph
+    raw = kw2_db.load_session_graph(session_id)
+    sg = _SessionGraph.from_json(raw) if raw else _SessionGraph(session_id, mode)
+
+    try:
+        output = await _dag_run_phase(sg, phase_id, context={"project_id": project_id})
+    except _HumanGateWaiting:
+        kw2_db.save_session_graph(session_id, sg.to_json())
+        return {"status": "waiting", "phase_id": phase_id, "message": "human gate — awaiting approval"}
+    except Exception as exc:
+        kw2_db.save_session_graph(session_id, sg.to_json())
+        raise HTTPException(500, f"phase {phase_id} failed: {exc}")
+
+    kw2_db.save_session_graph(session_id, sg.to_json())
+    return {"status": "done", "phase_id": phase_id, "output": output}
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/dag/approve/{phase_id}", tags=["KW2-DAG"])
+async def kw2_dag_approve_gate(
+    project_id: str, session_id: str, phase_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Approve a human gate (e.g. confirm_pillars, review)."""
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    mode = sess.get("mode", "brand")
+
+    spec = _DAG_REGISTRY.get(phase_id)
+    if not spec or not spec.is_human_gate:
+        raise HTTPException(400, f"{phase_id} is not a human gate")
+
+    raw = kw2_db.load_session_graph(session_id)
+    sg = _SessionGraph.from_json(raw) if raw else _SessionGraph(session_id, mode)
+
+    sg.store_output(phase_id, body)
+    sg.set_status(phase_id, "done")
+    kw2_db.save_session_graph(session_id, sg.to_json())
+
+    return {"status": "approved", "phase_id": phase_id}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/dag/order", tags=["KW2-DAG"])
+async def kw2_dag_order(project_id: str, session_id: str, user=Depends(current_user)):
+    """Return the flat execution order for the session's mode."""
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    mode = sess.get("mode", "brand")
+    return {"mode": mode, "order": _get_phase_order(mode)}
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  KW2 v2 — Keyword Brain (Expand + Review)
+# ════════════════════════════════════════════════════════════════════════
+
+from engines.kw2.keyword_brain import KeywordBrain as _KeywordBrain
+_keyword_brain = _KeywordBrain()
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/expand", tags=["KW2-v2"])
+async def kw2_v2_expand(
+    project_id: str, session_id: str,
+    body: dict = Body(default={}),
+    user=Depends(current_user),
+):
+    """Run the full keyword expansion pipeline (sync)."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    competitor_urls = body.get("competitor_urls", [])
+    ai_provider = body.get("ai_provider", "auto")
+    try:
+        result = _keyword_brain.expand(
+            project_id, session_id,
+            competitor_urls=competitor_urls,
+            ai_provider=ai_provider,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Expansion failed: {e}")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/expand/stream", tags=["KW2-v2"])
+async def kw2_v2_expand_stream(
+    request: Request,
+    project_id: str, session_id: str,
+    competitor_urls: str = "",
+    ai_provider: str = "auto",
+    user=Depends(current_user_or_qs),
+):
+    """SSE stream of keyword expansion progress."""
+    from starlette.responses import StreamingResponse
+    from engines.kw2.keyword_brain import _CancelToken
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    urls = [u.strip() for u in competitor_urls.split(",") if u.strip()] if competitor_urls else []
+    cancel = _CancelToken()
+
+    async def event_generator():
+        for chunk in _keyword_brain.expand_stream(
+            project_id, session_id,
+            competitor_urls=urls or None,
+            ai_provider=ai_provider,
+            cancel=cancel,
+        ):
+            if await request.is_disconnected():
+                cancel.cancel()
+                return
+            yield chunk
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/expand/clusters", tags=["KW2-v2"])
+async def kw2_v2_review_data(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Get cluster-organized keywords for the review UI."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    return _keyword_brain.get_review_data(session_id)
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/expand/review", tags=["KW2-v2"])
+async def kw2_v2_approve_clusters(
+    project_id: str, session_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Approve or reject clusters from the review UI."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    approved = body.get("approved_cluster_ids", [])
+    rejected = body.get("rejected_cluster_ids", [])
+    if not approved and not rejected:
+        raise HTTPException(400, "Provide approved_cluster_ids or rejected_cluster_ids")
+    result = _keyword_brain.approve_clusters(
+        session_id, project_id,
+        approved_cluster_ids=approved,
+        rejected_cluster_ids=rejected,
+    )
+    return result
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/expand/keyword", tags=["KW2-v2"])
+async def kw2_v2_add_keyword(
+    project_id: str, session_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Manually add a keyword during review."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    keyword_text = body.get("keyword", "").strip()
+    pillars = body.get("pillars", [])
+    if not keyword_text:
+        raise HTTPException(400, "keyword is required")
+    result = _keyword_brain.add_manual_keyword(session_id, project_id, keyword_text, pillars)
+    return result
+
+
+@app.put("/api/kw2/{project_id}/sessions/{session_id}/expand/keyword/{keyword_id}/pillars", tags=["KW2-v2"])
+async def kw2_v2_move_keyword_pillar(
+    project_id: str, session_id: str, keyword_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Move a keyword to different pillars."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    new_pillars = body.get("pillars", [])
+    if not new_pillars:
+        raise HTTPException(400, "pillars list is required")
+    _keyword_brain.move_keyword_pillar(keyword_id, new_pillars)
+    return {"status": "ok", "keyword_id": keyword_id, "pillars": new_pillars}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/keywords", tags=["KW2-v2"])
+async def kw2_v2_list_keywords(
+    project_id: str, session_id: str,
+    page: int = 1, per_page: int = 50,
+    sort: str = "final_score", order: str = "desc",
+    status: str = None, pillar: str = None,
+    intent: str = None, search: str = None,
+    user=Depends(current_user),
+):
+    """Paginated keyword listing with filters, sort, search."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    conn = kw2_db.get_conn()
+    try:
+        clauses = ["session_id = ?"]
+        params = [session_id]
+        if status:
+            clauses.append("status = ?"); params.append(status)
+        if intent:
+            clauses.append("intent = ?"); params.append(intent)
+        if pillar:
+            clauses.append("pillars LIKE ?"); params.append(f'%"{pillar}"%')
+        if search:
+            clauses.append("keyword LIKE ?"); params.append(f"%{search}%")
+        where = " AND ".join(clauses)
+        allowed_sort = {"final_score", "keyword", "intent", "status", "role", "created_at",
+                        "ai_relevance", "buyer_readiness", "commercial_score"}
+        sort_col = sort if sort in allowed_sort else "final_score"
+        sort_dir = "ASC" if order.lower() == "asc" else "DESC"
+        total = conn.execute(f"SELECT COUNT(*) FROM kw2_keywords WHERE {where}", params).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM kw2_keywords WHERE {where} ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?",
+            params + [per_page, (page - 1) * per_page],
+        ).fetchall()
+        import json as _json
+        items = []
+        for r in rows:
+            d = dict(r)
+            for fld in ("pillars", "sources", "variants"):
+                try: d[fld] = _json.loads(d.get(fld) or "[]")
+                except Exception: d[fld] = []
+            try: d["metadata"] = _json.loads(d.get("metadata") or "{}")
+            except Exception: d["metadata"] = {}
+            items.append(d)
+        return {"items": items, "total": total, "page": page, "per_page": per_page, "pages": -(-total // per_page)}
+    finally:
+        conn.close()
+
+
+@app.put("/api/kw2/{project_id}/sessions/{session_id}/keywords/bulk-update", tags=["KW2-v2"])
+async def kw2_v2_bulk_update(
+    project_id: str, session_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Bulk update fields on selected keywords.
+    Body: { ids: [...], fields: {intent: "commercial", ...} }"""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    ids = body.get("ids", [])
+    fields = body.get("fields", {})
+    if not ids or not fields:
+        raise HTTPException(400, "ids and fields required")
+    allowed = {"intent", "role", "status", "pillars", "mapped_page", "reject_reason"}
+    for k in fields:
+        if k not in allowed:
+            raise HTTPException(400, f"Field '{k}' not allowed for bulk update")
+    import json as _json
+    conn = kw2_db.get_conn()
+    try:
+        set_parts = []
+        vals = []
+        for k, v in fields.items():
+            set_parts.append(f"{k} = ?")
+            vals.append(_json.dumps(v) if isinstance(v, (list, dict)) else v)
+        placeholders = ",".join("?" for _ in ids)
+        sql = f"UPDATE kw2_keywords SET {', '.join(set_parts)} WHERE id IN ({placeholders}) AND session_id = ?"
+        conn.execute(sql, vals + ids + [session_id])
+        conn.commit()
+        return {"status": "ok", "updated": len(ids)}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/kw2/{project_id}/sessions/{session_id}/keywords/bulk-delete", tags=["KW2-v2"])
+async def kw2_v2_bulk_delete(
+    project_id: str, session_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Bulk delete keywords by ids.  Body: { ids: [...] }"""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(400, "ids required")
+    conn = kw2_db.get_conn()
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(
+            f"DELETE FROM kw2_keywords WHERE id IN ({placeholders}) AND session_id = ?",
+            ids + [session_id],
+        )
+        conn.commit()
+        return {"status": "ok", "deleted": len(ids)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/keywords/bulk-approve", tags=["KW2-v2"])
+async def kw2_v2_bulk_approve(
+    project_id: str, session_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Bulk approve / reject keywords.
+    Body: { ids: [...], action: "approve" | "reject", reject_reason?: "..." }"""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    ids = body.get("ids", [])
+    action = body.get("action", "approve")
+    if not ids:
+        raise HTTPException(400, "ids required")
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be 'approve' or 'reject'")
+    new_status = "approved" if action == "approve" else "rejected"
+    reason = body.get("reject_reason", "") if action == "reject" else ""
+    kw2_db.bulk_update_keyword_status(ids, new_status, reason)
+    return {"status": "ok", "action": action, "count": len(ids)}
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  KW2 v2 — Organizer (Score + Cluster + Graph + Top-100)
+# ════════════════════════════════════════════════════════════════════════
+
+from engines.kw2.organizer import Organizer as _Organizer
+_organizer = _Organizer()
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/organize", tags=["KW2-v2"])
+async def kw2_v2_organize(
+    project_id: str, session_id: str,
+    body: dict = Body(default={}),
+    user=Depends(current_user),
+):
+    """Run the full organize pipeline (score, cluster, graph, top-100)."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    ai_provider = body.get("ai_provider", "auto")
+    try:
+        result = _organizer.organize(project_id, session_id, ai_provider=ai_provider)
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Organize failed: {e}")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/organize/stream", tags=["KW2-v2"])
+async def kw2_v2_organize_stream(
+    project_id: str, session_id: str,
+    ai_provider: str = "auto",
+    user=Depends(current_user_or_qs),
+):
+    """SSE stream of organize pipeline progress."""
+    from starlette.responses import StreamingResponse
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+
+    def event_generator():
+        for chunk in _organizer.organize_stream(project_id, session_id,
+                                                ai_provider=ai_provider):
+            yield chunk
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/organize/graph", tags=["KW2-v2"])
+async def kw2_v2_graph(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Return keyword graph data (nodes + edges) for visualization."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    return _organizer.get_graph_data(session_id)
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/organize/top100", tags=["KW2-v2"])
+async def kw2_v2_top100(
+    project_id: str, session_id: str,
+    pillar: str = "",
+    user=Depends(current_user),
+):
+    """Return top-100 keywords, optionally filtered by pillar."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    return _organizer.get_top100(session_id, pillar=pillar or None)
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/organize/summary", tags=["KW2-v2"])
+async def kw2_v2_organize_summary(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Return organize phase summary (stats, clusters, intent distribution)."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    return _organizer.get_organize_summary(session_id)
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  KW2 v2 — Applicator (Links + Calendar + Strategy)
+# ════════════════════════════════════════════════════════════════════════
+
+from engines.kw2.applicator import Applicator as _Applicator
+_applicator = _Applicator()
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/apply", tags=["KW2-v2"])
+async def kw2_v2_apply(
+    project_id: str, session_id: str,
+    body: dict = Body(default={}),
+    user=Depends(current_user),
+):
+    """Run the full apply pipeline (links, calendar, strategy)."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    try:
+        result = _applicator.apply(
+            project_id, session_id,
+            ai_provider=body.get("ai_provider", "auto"),
+            blogs_per_week=body.get("blogs_per_week", 3),
+            duration_weeks=body.get("duration_weeks", 52),
+            start_date=body.get("start_date"),
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Apply failed: {e}")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/apply/stream", tags=["KW2-v2"])
+async def kw2_v2_apply_stream(
+    project_id: str, session_id: str,
+    ai_provider: str = "auto",
+    blogs_per_week: int = 3,
+    duration_weeks: int = 52,
+    start_date: str = "",
+    user=Depends(current_user_or_qs),
+):
+    """SSE stream of apply pipeline progress."""
+    from starlette.responses import StreamingResponse
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+
+    def event_generator():
+        for chunk in _applicator.apply_stream(
+            project_id, session_id,
+            ai_provider=ai_provider,
+            blogs_per_week=blogs_per_week,
+            duration_weeks=duration_weeks,
+            start_date=start_date or None,
+        ):
+            yield chunk
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/apply/links", tags=["KW2-v2"])
+async def kw2_v2_links(
+    project_id: str, session_id: str,
+    link_type: str = "",
+    user=Depends(current_user),
+):
+    """Return internal link suggestions."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    return _applicator.get_links(session_id, link_type=link_type or None)
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/apply/calendar", tags=["KW2-v2"])
+async def kw2_v2_calendar(
+    project_id: str, session_id: str,
+    pillar: str = "",
+    user=Depends(current_user),
+):
+    """Return content calendar entries."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    return _applicator.get_calendar(session_id, pillar=pillar or None)
+
+
+@app.put("/api/kw2/{project_id}/sessions/{session_id}/apply/calendar/{entry_id}", tags=["KW2-v2"])
+async def kw2_v2_update_calendar(
+    project_id: str, session_id: str, entry_id: str,
+    body: dict = Body(...),
+    user=Depends(current_user),
+):
+    """Update a calendar entry (reschedule, change status)."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    allowed = {"scheduled_date", "status", "title"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(400, "No valid fields to update")
+    _applicator.update_calendar_entry(entry_id, **updates)
+    return {"status": "ok"}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/apply/strategy", tags=["KW2-v2"])
+async def kw2_v2_strategy(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Return generated strategy document."""
+    _validate_project_exists(project_id, user)
+    sess = kw2_db.get_session(session_id)
+    if not sess or sess["project_id"] != project_id:
+        raise HTTPException(404, "session not found")
+    strategy = _applicator.get_strategy(session_id)
+    if not strategy:
+        raise HTTPException(404, "Strategy not generated yet")
+    return strategy
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  GSC — Google Search Console Engine
+#  Stage between PhaseBI (Intel) and Phase 2 (Generate)
+# ════════════════════════════════════════════════════════════════════════
+
+from engines.gsc import GscEngine as _GscEngine, gsc_db as _gsc_db
+
+_gsc = _GscEngine()
+
+# ── Status & Auth ─────────────────────────────────────────────────────────────
+
+@app.get("/api/gsc/{project_id}/status", tags=["GSC"])
+async def gsc_status(project_id: str, user=Depends(current_user)):
+    """Return GSC integration status for the project."""
+    _validate_project_exists(project_id, user)
+    return _gsc.get_status(project_id)
+
+
+@app.get("/api/gsc/{project_id}/auth/url", tags=["GSC"])
+async def gsc_auth_url(project_id: str, user=Depends(current_user)):
+    """Return the Google OAuth URL to redirect the user to."""
+    _validate_project_exists(project_id, user)
+    try:
+        url = _gsc.get_auth_url(project_id)
+        return {"auth_url": url}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/gsc/auth/callback", tags=["GSC"])
+async def gsc_auth_callback(code: str, state: str):
+    """
+    OAuth callback — Google redirects here after user authorizes.
+    state = project_id.
+    Returns HTML page that closes the popup and notifies the opener.
+    """
+    from fastapi.responses import HTMLResponse
+    project_id = state
+    try:
+        _gsc.handle_callback(code, project_id)
+        html = """<!DOCTYPE html><html><body>
+        <script>
+          if (window.opener) {
+            window.opener.postMessage({type:'gsc_auth_success',projectId:'""" + project_id + """'}, '*');
+            window.close();
+          } else {
+            document.write('<p>Connected! You can close this window.</p>');
+          }
+        </script>
+        <p>Google Search Console connected successfully. Closing...</p>
+        </body></html>"""
+        return HTMLResponse(content=html)
+    except Exception as e:
+        log.error(f"GSC callback error: {e}", exc_info=True)
+        html = f"""<!DOCTYPE html><html><body>
+        <script>
+          if (window.opener) {{
+            window.opener.postMessage({{type:'gsc_auth_error',error:{repr(str(e))}}}, '*');
+            window.close();
+          }}
+        </script>
+        <p>Connection failed: {str(e)}</p></body></html>"""
+        return HTMLResponse(content=html, status_code=400)
+
+
+@app.delete("/api/gsc/{project_id}/disconnect", tags=["GSC"])
+async def gsc_disconnect(project_id: str, user=Depends(current_user)):
+    """Remove OAuth tokens and disconnect GSC."""
+    _validate_project_exists(project_id, user)
+    _gsc.disconnect(project_id)
+    return {"status": "disconnected"}
+
+
+@app.get("/api/gsc/{project_id}/test-connection", tags=["GSC"])
+async def gsc_test_connection(project_id: str, user=Depends(current_user)):
+    """
+    Test the live GSC connection. Returns detailed status including:
+    - whether tokens are present
+    - whether the GSC API responds
+    - site list (if connected)
+    """
+    _validate_project_exists(project_id, user)
+    from engines.gsc import gsc_db as _gdb, gsc_client as _gc
+    integration = _gdb.get_integration(project_id)
+    if not integration:
+        return {"ok": False, "reason": "not_connected", "message": "No GSC integration found. Authorize first."}
+    status = integration.get("status", "disconnected")
+    if status not in ("connected",):
+        return {
+            "ok": False, "reason": "not_connected",
+            "message": f"Status is '{status}'. Authorize via OAuth to connect live GSC.",
+        }
+    if not integration.get("access_token"):
+        return {"ok": False, "reason": "no_token", "message": "No access token stored. Re-authenticate."}
+    try:
+        sites = _gc.list_sites(project_id)
+        return {
+            "ok": True,
+            "status": "connected",
+            "site_url": integration.get("site_url"),
+            "sites_count": len(sites),
+            "sites": sites[:5],
+            "message": f"Connected. Found {len(sites)} site(s) in your GSC account.",
+        }
+    except Exception as e:
+        err = str(e)
+        reason = "token_expired" if "expired" in err.lower() or "401" in err else "api_error"
+        return {"ok": False, "reason": reason, "message": err}
+
+
+# ── Site Management ───────────────────────────────────────────────────────────
+
+@app.get("/api/gsc/{project_id}/sites", tags=["GSC"])
+async def gsc_list_sites(project_id: str, user=Depends(current_user)):
+    """List all verified sites in the connected GSC account."""
+    _validate_project_exists(project_id, user)
+    try:
+        sites = _gsc.list_sites(project_id)
+        return {"sites": sites}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"GSC API error: {e}")
+
+
+@app.post("/api/gsc/{project_id}/site", tags=["GSC"])
+async def gsc_set_site(project_id: str, body: dict, user=Depends(current_user)):
+    """Set the active site URL for GSC data fetch."""
+    _validate_project_exists(project_id, user)
+    site_url = body.get("site_url", "").strip()
+    if not site_url:
+        raise HTTPException(400, "site_url required")
+    _gsc.set_site(project_id, site_url)
+    return {"status": "ok", "site_url": site_url}
+
+
+# ── Data Sync ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/gsc/{project_id}/sync", tags=["GSC"])
+async def gsc_sync(project_id: str, body: dict = {}, user=Depends(current_user)):
+    """
+    Fetch all GSC queries for the project's site.
+    1 API call — paginates internally up to 25,000 rows.
+    body: { days: 90 }  (optional, default 90)
+    """
+    _validate_project_exists(project_id, user)
+    days = int(body.get("days", 90))
+    try:
+        result = _gsc.sync(project_id, days=days)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.error(f"GSC sync error: {e}", exc_info=True)
+        raise HTTPException(502, f"GSC API error: {e}")
+
+
+# ── Intelligence Processing ───────────────────────────────────────────────────
+
+@app.post("/api/gsc/{project_id}/process", tags=["GSC"])
+async def gsc_process(project_id: str, body: dict = {}, user=Depends(current_user)):
+    """
+    Run intent classification + scoring on raw GSC data.
+    Uses stored AI ProjectConfig if available.
+    body: { pillars: ["cardamom", "turmeric", ...] }  ← optional override
+    """
+    _validate_project_exists(project_id, user)
+    pillars = body.get("pillars", [])
+
+    # Auto-fetch pillars from kw2 profile if neither config nor body has pillars
+    if not pillars:
+        try:
+            cfg = _gsc.get_config(project_id)
+            if cfg and cfg.get("pillars"):
+                pillars = cfg["pillars"]
+        except Exception:
+            pass
+
+    if not pillars:
+        try:
+            profile = kw2_db.load_business_profile(project_id)
+            if profile:
+                import json as _json
+                raw = profile.get("pillar_keywords") or profile.get("pillars") or "[]"
+                if isinstance(raw, str):
+                    pillars = _json.loads(raw)
+                elif isinstance(raw, list):
+                    pillars = raw
+        except Exception:
+            pass
+
+    try:
+        result = _gsc.process(project_id, pillars or None)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.error(f"GSC process error: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+# ── Project Intelligence Config ───────────────────────────────────────────────
+
+class _GscConfigGenerateBody(BaseModel):
+    business_description: str
+    goal: str = "sales"
+    seed_keywords: list[str] = []
+    target_audience: str = ""
+
+
+@app.post("/api/gsc/{project_id}/config/generate", tags=["GSC"])
+async def gsc_config_generate(
+    project_id: str,
+    body: _GscConfigGenerateBody,
+    user=Depends(current_user),
+):
+    """
+    STEP 1 — Run AI prompt to generate a structured ProjectConfig from the
+    business description. Stores result in gsc_project_config table.
+
+    Returns the generated config (pillars, intent signals, synonyms, etc.)
+    which will be used to drive all downstream GSC processing.
+    """
+    _validate_project_exists(project_id, user)
+    if not body.business_description.strip():
+        raise HTTPException(400, "business_description is required")
+    try:
+        config = _gsc.generate_config(
+            project_id=project_id,
+            business_description=body.business_description,
+            goal=body.goal,
+            seed_keywords=body.seed_keywords or None,
+            target_audience=body.target_audience,
+        )
+        return {"status": "ok", "config": config}
+    except Exception as e:
+        log.error(f"GSC config generate error: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/gsc/{project_id}/config", tags=["GSC"])
+async def gsc_config_get(project_id: str, user=Depends(current_user)):
+    """Get the stored AI project config for this project."""
+    _validate_project_exists(project_id, user)
+    config = _gsc.get_config(project_id)
+    if not config:
+        return {"config": None}
+    return {"config": config}
+
+
+@app.put("/api/gsc/{project_id}/config", tags=["GSC"])
+async def gsc_config_update(project_id: str, body: dict, user=Depends(current_user)):
+    """Manually update/override specific fields in the project config."""
+    _validate_project_exists(project_id, user)
+    try:
+        config = _gsc.update_config(project_id, body)
+        return {"status": "ok", "config": config}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+# ── Output ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/gsc/{project_id}/keywords", tags=["GSC"])
+async def gsc_keywords(project_id: str, pillar: str = None, user=Depends(current_user)):
+    """Get processed keywords, optionally filtered by pillar."""
+    _validate_project_exists(project_id, user)
+    keywords = _gsc.get_keywords(project_id, pillar=pillar)
+    return {"keywords": keywords, "count": len(keywords)}
+
+
+@app.get("/api/gsc/{project_id}/top100", tags=["GSC"])
+async def gsc_top100(project_id: str, user=Depends(current_user)):
+    """Get the top 100 keywords per pillar (business-prioritized scoring)."""
+    _validate_project_exists(project_id, user)
+    items = _gsc.get_top100(project_id)
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/gsc/{project_id}/tree", tags=["GSC"])
+async def gsc_tree(project_id: str, user=Depends(current_user)):
+    """Get tree-structured GSC output: Universe → Pillar → Intent Group → Keyword."""
+    _validate_project_exists(project_id, user)
+    tree = _gsc.get_tree(project_id)
+    return {"tree": tree}
+
+
+# ── Phase 2: Intelligence Layer ───────────────────────────────────────────────
+
+@app.post("/api/gsc/{project_id}/intelligence/run", tags=["GSC"])
+async def gsc_intelligence_run(project_id: str, body: dict = {}, user=Depends(current_user)):
+    """
+    Run the full Phase 2 intelligence pipeline:
+    Embeddings → AI Intent → Clustering → Graph → Scoring v2 → Insights → Authority.
+
+    body: { force_embeddings: false }  ← optional, re-embed all if true
+    """
+    _validate_project_exists(project_id, user)
+    force = bool(body.get("force_embeddings", False))
+    try:
+        result = _gsc.run_intelligence(project_id, force_embeddings=force)
+        return {"status": "ok", **result}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.error(f"GSC intelligence error: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/gsc/{project_id}/clusters", tags=["GSC"])
+async def gsc_clusters(project_id: str, user=Depends(current_user)):
+    """Get keyword clusters (HDBSCAN + LLM named)."""
+    _validate_project_exists(project_id, user)
+    clusters = _gsc.get_clusters(project_id)
+    return {"clusters": clusters, "count": len(clusters)}
+
+
+@app.get("/api/gsc/{project_id}/graph", tags=["GSC"])
+async def gsc_graph(project_id: str, min_similarity: float = 0.3, user=Depends(current_user)):
+    """Get keyword relationship graph (nodes + links)."""
+    _validate_project_exists(project_id, user)
+    graph = _gsc.get_graph(project_id, min_similarity=min_similarity)
+    return {"graph": graph}
+
+
+@app.get("/api/gsc/{project_id}/insights", tags=["GSC"])
+async def gsc_insights(project_id: str, type: str = None, user=Depends(current_user)):
+    """Get SEO insights (quick_wins, money_keywords, content_gaps, linking, opportunities, authority)."""
+    _validate_project_exists(project_id, user)
+    insights = _gsc.get_insights(project_id, insight_type=type)
+    return {"insights": insights}
+
+
+@app.get("/api/gsc/{project_id}/authority", tags=["GSC"])
+async def gsc_authority(project_id: str, user=Depends(current_user)):
+    """Get pillar authority scores."""
+    _validate_project_exists(project_id, user)
+    authority = _gsc.get_authority(project_id)
+    return {"authority": authority}
+
+
+@app.post("/api/gsc/{project_id}/search", tags=["GSC"])
+async def gsc_search(project_id: str, body: dict, user=Depends(current_user)):
+    """
+    Search GSC for queries containing a keyword.
+    body: { query: str, days: int = 90, limit: int = 100 }
+    Returns top matching queries sorted by impressions, with intent classification.
+    Requires live GSC connection (not stage-import).
+    """
+    _validate_project_exists(project_id, user)
+    query_filter = (body.get("query") or "").strip()
+    if not query_filter:
+        raise HTTPException(400, "query field required")
+
+    days  = int(body.get("days", 90))
+    limit = min(int(body.get("limit", 100)), 500)
+
+    from engines.gsc import gsc_client as _gc, gsc_db as _gdb
+    from engines.gsc.gsc_processor import classify_intent, score_keyword
+
+    integration = _gdb.get_integration(project_id)
+    if not integration or integration.get("status") not in ("connected", "connected_stages"):
+        raise HTTPException(400, "GSC not connected — authorize first via OAuth or import stage keywords")
+    site_url = integration.get("site_url") or "stage-import"
+    gsc_status = integration.get("status")
+
+    enriched = []
+
+    if gsc_status == "connected" and site_url and site_url != "stage-import":
+        # ── Live GSC API search ──────────────────────────────────────────────
+        try:
+            rows = _gc.search_keyword(project_id, site_url, query_filter, days=days, row_limit=limit)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            log.error(f"GSC search error: {e}", exc_info=True)
+            raise HTTPException(502, f"GSC API error: {str(e)}")
+
+        for kw in rows[:limit]:
+            intent = classify_intent(kw["keyword"])
+            scored = score_keyword({**kw, "pillar": query_filter, "intent": intent, "angle": None})
+            enriched.append({**kw, "intent": intent, "score": scored["score"],
+                             "opportunity_score": scored.get("opportunity_score", 0)})
+    else:
+        # ── Stage-import fallback: search local processed keywords DB ────────
+        all_kws = _gdb.get_processed_keywords(project_id)
+        q_lower = query_filter.lower()
+        matched = [kw for kw in all_kws if q_lower in kw.get("keyword", "").lower()]
+        matched.sort(key=lambda k: k.get("impressions", 0), reverse=True)
+        for kw in matched[:limit]:
+            row = {
+                "keyword":           kw["keyword"],
+                "clicks":            kw.get("clicks", 0),
+                "impressions":       kw.get("impressions", 0),
+                "ctr":               kw.get("ctr", 0),
+                "position":          kw.get("position", 0),
+                "intent":            kw.get("intent") or classify_intent(kw["keyword"]),
+                "score":             kw.get("score", 0),
+                "opportunity_score": kw.get("opportunity_score", 0),
+            }
+            enriched.append(row)
+
+    return {
+        "query": query_filter,
+        "site_url": site_url,
+        "days": days,
+        "total": len(enriched),
+        "keywords": enriched,
+        "source": "live_gsc" if gsc_status == "connected" else "local_db",
+    }
+
+
+@app.post("/api/kw/global-suggest", tags=["Keywords"])
+async def global_keyword_suggest(body: dict, user=Depends(current_user)):
+    """
+    Discover global keyword ideas using Google Autocomplete (free, no API key).
+    Expands seed with alphabet + common intent modifiers, deduplicates, classifies intent.
+    body: { seed: str, limit: int = 100, country: str = "us" }
+    """
+    seed = (body.get("seed") or "").strip().lower()
+    if not seed:
+        raise HTTPException(400, "seed field required")
+    limit = min(int(body.get("limit", 100)), 200)
+    country = body.get("country", "us")
+
+    # ── Clean seed: strip product descriptors so Google gets a clean keyword ──
+    # Remove: weights (200gm, 100g, 300ml), sizes, parenthetical combo descriptions,
+    # dashes+numbers, promotional words, special characters
+    import re as _re
+    # Remove content inside parentheses (e.g. "(100g)" or "(OFFER)")
+    _clean = _re.sub(r"\([^)]*\)", " ", seed)
+    # Remove weight/size patterns: 100g, 200gm, 300ml, 1kg, 500g, 8mm etc.
+    _clean = _re.sub(r"\b\d+\s*(?:gm?|kg|ml|l|oz|lb|mm|cm|inch)\b", " ", _clean)
+    # Remove lone numbers
+    _clean = _re.sub(r"\b\d+\b", " ", _clean)
+    # Remove punctuation and noise words
+    _clean = _re.sub(r"[-_,&+]+", " ", _clean)
+    # Remove trailing/leading noise words
+    _NOISE = {"free", "delivery", "premium", "offer", "true", "aromatic", "pure", "mini", "combo"}
+    _words = [w for w in _clean.split() if len(w) > 2 and w not in _NOISE]
+    # If cleaning leaves nothing useful, fall back to first 3 words of original seed
+    if not _words:
+        _words = seed.split()[:3]
+    seed = " ".join(_words[:4])  # max 4 words for Google Suggest
+
+    import httpx as _hx
+    from engines.gsc.gsc_processor import classify_intent, score_keyword
+
+    BASE = "https://suggestqueries.google.com/complete/search"
+    # Build query expansion: alphabet + intent modifiers
+    DEFAULT_MODIFIERS = [
+        "", "buy", "best", "cheap", "organic", "wholesale", "bulk",
+        "benefits", "uses", "oil", "powder", "dried", "fresh",
+        "for cooking", "where to buy", "online", "price",
+        "vs", "how to use", "near me", "supplement",
+    ]
+    custom_mods = body.get("modifiers") or []
+    MODIFIERS = DEFAULT_MODIFIERS + [m for m in custom_mods if m and m not in DEFAULT_MODIFIERS]
+    queries = []
+    for mod in MODIFIERS:
+        queries.append(f"{seed} {mod}".strip())
+    # alphabet expansion (a-z suffix)
+    for letter in "abcdefghijklmnopqrstuvwxyz":
+        queries.append(f"{seed} {letter}")
+
+    suggestions: set[str] = set()
+    async with _hx.AsyncClient(timeout=8, follow_redirects=True) as client:
+        for q in queries[:60]:          # max 60 API round-trips
+            try:
+                r = await client.get(BASE, params={
+                    "client": "firefox", "q": q, "hl": "en", "gl": country
+                })
+                data = r.json()
+                if isinstance(data, list) and len(data) > 1:
+                    for s in data[1]:
+                        if isinstance(s, str):
+                            kw = s.strip().lower()
+                            # only keep suggestions that contain the seed word
+                            if seed.split()[0] in kw:
+                                suggestions.add(kw)
+            except Exception:
+                continue
+
+    # Enrich: intent + score (custom scoring for suggest data without GSC metrics)
+    def _suggest_score(kw_text: str, intent: str, seed_str: str) -> float:
+        """Score suggest keywords using text signals since we have no GSC data."""
+        score = 5.0  # base
+        # Intent boost
+        intent_boosts = {"purchase": 5, "wholesale": 4, "transactional": 4, "commercial": 3, "local": 2, "informational": 1, "navigational": 0}
+        score += intent_boosts.get(intent, 0)
+        # Word count bonus: 2-4 word keywords are ideal for SEO
+        words = kw_text.split()
+        wc = len(words)
+        if 2 <= wc <= 4:
+            score += 3
+        elif wc == 5:
+            score += 1
+        # Specificity: longer = more specific = better (up to a point)
+        if len(kw_text) > 20:
+            score += 2
+        elif len(kw_text) > 12:
+            score += 1
+        # Contains full seed (not just first word) = more relevant
+        if seed_str in kw_text:
+            score += 2
+        # Modifier presence signals intent clarity
+        high_value = ["buy", "best", "price", "wholesale", "organic", "near me", "how to", "vs"]
+        if any(m in kw_text for m in high_value):
+            score += 2
+        # Randomize slightly to break ties (deterministic from keyword hash)
+        score += (hash(kw_text) % 30) / 10.0  # 0.0 - 2.9
+        return round(min(score, 25), 1)
+
+    enriched = []
+    for kw in suggestions:
+        intent = classify_intent(kw)
+        s = _suggest_score(kw, intent, seed)
+        enriched.append({
+            "keyword": kw,
+            "intent": intent,
+            "score": s,
+            "opportunity_score": 0,
+            "clicks": 0, "impressions": 0, "ctr": 0, "position": 0,
+            "source": "google_suggest",
+        })
+
+    enriched.sort(key=lambda k: k["score"], reverse=True)
+    return {
+        "seed": seed,
+        "total": len(enriched),
+        "keywords": enriched[:limit],
+        "source": "google_suggest",
+        "country": country,
+    }
+
+
+# ── Phase 3: Product + Execution Layer ────────────────────────────────────────
+
+@app.post("/api/gsc/validate-key", tags=["GSC"])
+async def gsc_validate_key(body: dict, user=Depends(current_user)):
+    """Validate a Gemini API key. body: { api_key: str }"""
+    api_key = body.get("api_key", "")
+    if not api_key:
+        raise HTTPException(400, "api_key required")
+    result = _gsc.validate_api_key(api_key)
+    return result
+
+
+@app.get("/api/gsc/{project_id}/stage-data", tags=["GSC"])
+async def gsc_stage_data(project_id: str, user=Depends(current_user)):
+    """Get all available Stage 1+2 data for a project (business profile, keywords, competitors)."""
+    _validate_project_exists(project_id, user)
+    data = _gsc.get_stage_data(project_id)
+    return data
+
+
+@app.post("/api/gsc/{project_id}/import-stages", tags=["GSC"])
+async def gsc_import_stages(project_id: str, user=Depends(current_user)):
+    """Import keywords from Stage 1+2 into GSC raw data for processing."""
+    _validate_project_exists(project_id, user)
+    try:
+        result = _gsc.import_from_stages(project_id)
+        return {"status": "ok", **result}
+    except Exception as e:
+        log.error(f"GSC import-stages error: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/gsc/{project_id}/intelligence-summary", tags=["GSC"])
+async def gsc_intelligence_summary_generate(project_id: str, user=Depends(current_user)):
+    """Generate an AI intelligence summary from Stage 1+2 data."""
+    _validate_project_exists(project_id, user)
+    try:
+        result = _gsc.generate_intelligence_summary(project_id)
+        return {"status": "ok", "summary": result}
+    except Exception as e:
+        log.error(f"GSC intelligence summary error: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/gsc/{project_id}/intelligence-summary", tags=["GSC"])
+async def gsc_intelligence_summary_get(project_id: str, user=Depends(current_user)):
+    """Get stored AI intelligence summary."""
+    _validate_project_exists(project_id, user)
+    summary = _gsc.get_intelligence_summary(project_id)
+    return {"summary": summary}
+
+
+@app.get("/api/gsc/{project_id}/tasks", tags=["GSC"])
+async def gsc_tasks_list(project_id: str, status: str = None, user=Depends(current_user)):
+    """List tasks for a project."""
+    _validate_project_exists(project_id, user)
+    tasks = _gsc.get_tasks(project_id, status=status)
+    return {"tasks": tasks, "count": len(tasks)}
+
+
+@app.post("/api/gsc/{project_id}/tasks", tags=["GSC"])
+async def gsc_tasks_create(project_id: str, body: dict, user=Depends(current_user)):
+    """Create a new task. body: { task_type, title, keyword?, cluster?, description?, priority? }"""
+    _validate_project_exists(project_id, user)
+    if not body.get("task_type") or not body.get("title"):
+        raise HTTPException(400, "task_type and title required")
+    task_id = _gsc.create_task(project_id, body)
+    return {"status": "ok", "task_id": task_id}
+
+
+@app.put("/api/gsc/{project_id}/tasks/{task_id}", tags=["GSC"])
+async def gsc_tasks_update(project_id: str, task_id: int, body: dict, user=Depends(current_user)):
+    """Update a task. body: { status?, title?, description?, priority? }"""
+    _validate_project_exists(project_id, user)
+    _gsc.update_task(project_id, task_id, body)
+    return {"status": "ok"}
+
+
+@app.delete("/api/gsc/{project_id}/tasks/{task_id}", tags=["GSC"])
+async def gsc_tasks_delete(project_id: str, task_id: int, user=Depends(current_user)):
+    """Delete a task."""
+    _validate_project_exists(project_id, user)
+    _gsc.delete_task(project_id, task_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/gsc/{project_id}/export", tags=["GSC"])
+async def gsc_export(project_id: str, body: dict = {}, user=Depends(current_user)):
+    """Export GSC data. body: { type: 'full'|'keywords'|'strategy'|'tasks' }"""
+    _validate_project_exists(project_id, user)
+    export_type = body.get("type", "full")
+    try:
+        data = _gsc.export_data(project_id, export_type)
+        return data
+    except Exception as e:
+        log.error(f"GSC export error: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
