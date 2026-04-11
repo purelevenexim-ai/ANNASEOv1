@@ -3848,6 +3848,260 @@ async def save_pages_audit_report(body: dict, user=Depends(current_user)):
     report_path.write_text(_json.dumps(body, indent=2))
     return {"saved_to": str(report_path)}
 
+# ── Code Audit Pipeline ───────────────────────────────────────────────────────
+# Rate limiter: only 1 audit runs at a time (Ollama/AI protection)
+_audit_semaphore = asyncio.Semaphore(1)
+
+# Target → code files to read (relative to project root, capped at 300 lines each)
+AUDIT_TARGETS = {
+    "kw2": {
+        "label": "Keywords v2 Pipeline",
+        "files": [
+            "engines/kw2/business_analyzer.py",
+            "engines/kw2/pillar_extractor.py",
+            "engines/kw2/modifier_extractor.py",
+            "engines/kw2/keyword_generator.py",
+            "engines/kw2/strategy_engine.py",
+        ],
+    },
+    "content": {
+        "label": "Content Engine",
+        "files": [
+            "engines/ruflo_content_engine.py",
+            "engines/content_generation_engine.py",
+        ],
+    },
+    "strategy": {
+        "label": "Strategy Engine",
+        "files": [
+            "engines/ruflo_strategy_dev_engine.py",
+            "engines/ruflo_final_strategy_engine.py",
+        ],
+    },
+    "quality": {
+        "label": "Quality / QI Engine",
+        "files": [
+            "quality/annaseo_qi_engine.py",
+            "quality/annaseo_quality_engine.py",
+            "quality/annaseo_domain_context.py",
+        ],
+    },
+    "rsd": {
+        "label": "RSD / Self-Dev Engine",
+        "files": [
+            "rsd/annaseo_rsd_engine.py",
+            "rsd/annaseo_self_dev.py",
+        ],
+    },
+    "phase1": {
+        "label": "Phase 1 — Business Analyzer",
+        "files": [
+            "engines/kw2/business_analyzer.py",
+            "engines/kw2/pillar_extractor.py",
+        ],
+    },
+    "phase2": {
+        "label": "Phase 2 — Keyword Generator",
+        "files": [
+            "engines/kw2/keyword_generator.py",
+            "engines/kw2/modifier_extractor.py",
+        ],
+    },
+}
+
+AUDIT_STEPS = [
+    (0, "Context Builder",   "Summarize purpose, modules, data flow, key entities"),
+    (1, "Code Understanding","Trace execution paths, inputs/outputs, assumptions"),
+    (2, "Bug Analysis",      "Find functional bugs, edge cases, broken flows"),
+    (3, "Data Flow",         "Trace data transformations, identify leaks/redundancy"),
+    (4, "Performance",       "Time complexity, blocking ops, bottlenecks"),
+    (5, "AI Usage",          "Audit AI calls — replace rules where possible"),
+    (6, "Test Generator",    "Generate unit, integration, regression, edge-case tests"),
+    (7, "Fix Engine",        "Rewrite problematic sections with improvements"),
+    (8, "Final Report",      "Synthesize all findings into P0/P1/P2/P3 roadmap"),
+]
+
+def _read_target_code(target: str, max_lines_per_file: int = 300) -> str:
+    """Read and concatenate code files for an audit target."""
+    info = AUDIT_TARGETS.get(target, {})
+    files = info.get("files", [])
+    parts = []
+    for fp in files:
+        full = Path(fp)
+        if not full.exists():
+            parts.append(f"# FILE: {fp}\n# (not found)\n")
+            continue
+        lines = full.read_text(encoding="utf-8", errors="replace").splitlines()
+        snippet = "\n".join(lines[:max_lines_per_file])
+        if len(lines) > max_lines_per_file:
+            snippet += f"\n# ... ({len(lines) - max_lines_per_file} more lines truncated)"
+        parts.append(f"# ═══ FILE: {fp} ════\n{snippet}\n")
+    return "\n\n".join(parts)
+
+async def _call_ai(model_id: str, prompt: str) -> str:
+    """Call the selected AI model. Supports ollama / gemini / claude."""
+    if model_id.startswith("ollama/") or model_id.startswith("ollama:") or "/" not in model_id:
+        # Ollama — strip prefix
+        model = model_id.replace("ollama/", "").replace("ollama:", "")
+        ollama_url = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
+        async with httpx.AsyncClient(timeout=180) as c:
+            r = await c.post(
+                f"{ollama_url}/api/generate",
+                json={"model": model, "prompt": prompt, "stream": False,
+                      "options": {"temperature": 0.2, "num_predict": 2000}},
+            )
+            r.raise_for_status()
+            return r.json().get("response", "").strip()
+
+    if model_id.startswith("gemini"):
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        if not gemini_key:
+            return "Gemini API key not configured."
+        model_name = "gemini-1.5-flash-latest" if "flash" in model_id else "gemini-1.5-pro-latest"
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}",
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000}},
+            )
+            r.raise_for_status()
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    return "Unsupported model."
+
+def _build_step_prompt(step_id: int, step_name: str, code: str, context: str = "") -> str:
+    base_rules = (
+        "RULES: Be specific — reference exact functions/lines. "
+        "Never give generic advice. Output clean Markdown. "
+        "Simulate real execution before answering.\n\n"
+    )
+    ctx_block = f"CONTEXT FROM PREVIOUS STEPS:\n{context[:2000]}\n\n" if context else ""
+    code_block = f"CODE TO ANALYZE:\n```python\n{code[:6000]}\n```\n\n"
+
+    prompts = {
+        0: ("You are a system analyst.\n\nSummarize the provided code into structured context.\n"
+            "Extract: system purpose, core modules, data flow (step-by-step), key entities, critical paths.\n"
+            "Output clean Markdown with headers."),
+        1: ("You are a senior backend engineer.\n\nTrace the exact execution flow of this code.\n"
+            "Explain: what it does step-by-step, inputs→outputs, hidden assumptions, external dependencies.\n"
+            "Do NOT suggest fixes yet."),
+        2: ("You are a QA engineer. Your job: BREAK the system.\n\n"
+            "Find ALL functional bugs: incorrect logic, null/empty handling, edge cases, data mismatch.\n"
+            "For each bug: exact file/function, what breaks, real-world scenario, code-level fix."),
+        3: ("You are a system architect.\n\nTrace the FULL data flow: input → processing → storage → output.\n"
+            "Identify: redundant steps, incorrect transformations, data loss, tight coupling.\n"
+            "Output a text data-flow diagram + issues + improvements."),
+        4: ("You are a performance engineer.\n\n"
+            "For each critical function: estimate time complexity, spot blocking calls, find bottlenecks.\n"
+            "Suggest: async improvements, batching, caching, parallelization."),
+        5: ("You are an AI systems engineer.\n\n"
+            "Audit every AI call in this code.\n"
+            "Identify: unnecessary AI usage, expensive calls, where deterministic rules would be better.\n"
+            "Output: a reduce-AI-cost plan with specific replacements."),
+        6: ("You are a QA automation engineer.\n\n"
+            "Generate complete test cases:\n"
+            "1. Unit tests (pytest format)\n"
+            "2. Integration tests\n"
+            "3. Regression tests (known failure scenarios)\n"
+            "4. Edge case tests (empty, null, huge input)\n"
+            "Output runnable Python test code."),
+        7: ("You are a senior engineer doing a code review + rewrite.\n\n"
+            "Rewrite the top 3 most problematic sections of this code.\n"
+            "Rules: fix bugs, improve performance, simplify logic, keep readability.\n"
+            "Show: original code → improved code + explanation."),
+        8: ("You are a tech lead writing an executive report.\n\n"
+            "Synthesize ALL findings into a final audit report.\n"
+            "Sections: Executive Summary, P0 Critical Bugs, P1 High-Impact Fixes, "
+            "P2 Optimizations, P3 Nice-to-Have, Estimated Fix Time.\n"
+            "Be actionable and specific."),
+    }
+    return base_rules + ctx_block + code_block + prompts.get(step_id, "Analyze the code.")
+
+
+@app.get("/api/audit/code/stream", tags=["Code Audit"])
+async def audit_code_stream(
+    target: str,
+    model: str = "ollama/mistral:7b-instruct-q4_K_M",
+    steps: str = "0,1,2,3,4,5,6,7,8",
+    user=Depends(current_user),
+):
+    """
+    SSE stream for the multi-step code audit pipeline.
+    Runs sequentially with rate limiting (one audit at a time).
+    Writes per-step markdown files to audits/{target}_{date}/.
+    """
+    if target not in AUDIT_TARGETS:
+        raise HTTPException(400, f"Unknown target '{target}'. Valid: {list(AUDIT_TARGETS)}")
+
+    requested_steps = [int(s.strip()) for s in steps.split(",") if s.strip().isdigit()]
+
+    async def generate():
+        if _audit_semaphore.locked():
+            yield f"data: {json.dumps({'type': 'queued', 'msg': 'Another audit is running — queued, will start shortly'})}\n\n"
+
+        async with _audit_semaphore:
+            dt = datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+            folder = Path(f"audits/{target}_{dt}")
+            folder.mkdir(parents=True, exist_ok=True)
+
+            yield f"data: {json.dumps({'type': 'start', 'target': target, 'model': model, 'folder': str(folder)})}\n\n"
+
+            code = _read_target_code(target)
+            accumulated_context = ""
+            results: dict = {}
+
+            for step_id, step_name, step_desc in AUDIT_STEPS:
+                if step_id not in requested_steps:
+                    continue
+
+                yield f"data: {json.dumps({'type': 'step_start', 'step': step_id, 'name': step_name, 'desc': step_desc})}\n\n"
+
+                try:
+                    prompt = _build_step_prompt(step_id, step_name, code, accumulated_context)
+                    result = await _call_ai(model, prompt)
+                    results[step_id] = result
+
+                    # Accumulate key context for later steps
+                    if step_id in (0, 1, 2):
+                        accumulated_context += f"\n\n## {step_name}\n{result[:800]}"
+
+                    # Write step file
+                    fname = f"{step_id:02d}_{step_name.lower().replace(' ', '_')}.md"
+                    (folder / fname).write_text(f"# {step_name}\n\n{result}", encoding="utf-8")
+
+                    yield f"data: {json.dumps({'type': 'step_done', 'step': step_id, 'name': step_name, 'content': result, 'file': fname})}\n\n"
+
+                except Exception as e:
+                    err_msg = f"Step {step_id} ({step_name}) failed: {e}"
+                    log.warning(err_msg)
+                    yield f"data: {json.dumps({'type': 'step_error', 'step': step_id, 'name': step_name, 'error': str(e)})}\n\n"
+
+                # Rate-limit: brief pause between AI calls
+                await asyncio.sleep(1.5)
+
+            # Write index
+            index_lines = [f"# Code Audit — {target} — {dt}\n", f"Model: {model}\n\n"]
+            for step_id, step_name, _ in AUDIT_STEPS:
+                if step_id in results:
+                    fname = f"{step_id:02d}_{step_name.lower().replace(' ', '_')}.md"
+                    index_lines.append(f"- [{step_name}](./{fname})\n")
+            (folder / "INDEX.md").write_text("".join(index_lines), encoding="utf-8")
+
+            yield f"data: {json.dumps({'type': 'done', 'folder': str(folder), 'steps_completed': len(results)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/audit/code/targets", tags=["Code Audit"])
+def audit_targets():
+    """List available audit targets."""
+    return [{"id": k, "label": v["label"], "files": v["files"]} for k, v in AUDIT_TARGETS.items()]
+
+
 # ── Rankings ──────────────────────────────────────────────────────────────────
 @app.post("/api/rankings/import",tags=["Rankings"])
 def import_rankings(project_id: str,keywords: List[dict]):
