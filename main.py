@@ -3940,11 +3940,12 @@ def _read_target_code(target: str, max_lines_per_file: int = 300) -> str:
 
 async def _call_ai(model_id: str, prompt: str) -> str:
     """Call the selected AI model. Supports ollama / gemini / claude."""
+    import httpx as _httpx
     if model_id.startswith("ollama/") or model_id.startswith("ollama:") or "/" not in model_id:
         # Ollama — strip prefix
         model = model_id.replace("ollama/", "").replace("ollama:", "")
         ollama_url = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
-        async with httpx.AsyncClient(timeout=180) as c:
+        async with _httpx.AsyncClient(timeout=180) as c:
             r = await c.post(
                 f"{ollama_url}/api/generate",
                 json={"model": model, "prompt": prompt, "stream": False,
@@ -3958,7 +3959,7 @@ async def _call_ai(model_id: str, prompt: str) -> str:
         if not gemini_key:
             return "Gemini API key not configured."
         model_name = "gemini-1.5-flash-latest" if "flash" in model_id else "gemini-1.5-pro-latest"
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with _httpx.AsyncClient(timeout=120) as c:
             r = await c.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}",
                 json={"contents": [{"parts": [{"text": prompt}]}],
