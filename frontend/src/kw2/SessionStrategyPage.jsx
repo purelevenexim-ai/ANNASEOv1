@@ -2227,36 +2227,52 @@ function BatchBriefPanel({ projectId, sessionId, items, onBriefsLoaded }) {
   const [selectedIdx, setSelectedIdx] = useState(null)
   const [aiConfig, setAiConfig] = useState(BRIEF_AI_DEFAULTS)
 
+  const BRIEF_CHUNK = 20
+
   const runBatch = async () => {
     if (!items.length) return
     setRunning(true); setError(""); setPhase("Preparing briefs…"); setOpen(true)
+    const API = import.meta.env.VITE_API_URL || ""
+    const t = localStorage.getItem("annaseo_token")
+    const allBriefs = []
+
     try {
-      const API = import.meta.env.VITE_API_URL || ""
-      const t = localStorage.getItem("annaseo_token")
+      for (let i = 0; i < items.length; i += BRIEF_CHUNK) {
+        const chunk = items.slice(i, i + BRIEF_CHUNK)
+        const end = Math.min(i + BRIEF_CHUNK, items.length)
+        setPhase(`Generating briefs ${i + 1}–${end} of ${items.length}…`)
 
-      // Take up to 20 items for batch
-      const keywords = items.slice(0, 20).map(i => ({
-        keyword: i.keyword || i.title || "",
-        title:   i.title || i.keyword || "",
-        pillar:  i.pillar || "",
-      }))
+        const keywords = chunk.map(item => ({
+          keyword: item.keyword || item.title || "",
+          title:   item.title || item.keyword || "",
+          pillar:  item.pillar || "",
+        }))
 
-      setPhase(`Generating briefs for ${keywords.length} articles…`)
-      const r = await fetch(`${API}/api/ki/${projectId}/blog-briefs-batch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...(t ? { Authorization: `Bearer ${t}` } : {}) },
-        body: JSON.stringify({
-          keywords,
-          session_id: sessionId || "",
-          ai_provider: aiConfig.ai_provider,
-          custom_prompt: aiConfig.custom_prompt,
-        }),
-      })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const data = await r.json()
-      setBriefs(data.briefs || [])
-      setPhase(`${data.count || 0} briefs ready`)
-      if (onBriefsLoaded) onBriefsLoaded(data.briefs || [])
+        try {
+          const r = await fetch(`${API}/api/ki/${projectId}/blog-briefs-batch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(t ? { Authorization: `Bearer ${t}` } : {}) },
+            body: JSON.stringify({
+              keywords,
+              session_id: sessionId || "",
+              ai_provider: aiConfig.ai_provider,
+              custom_prompt: aiConfig.custom_prompt,
+            }),
+          })
+          if (!r.ok) {
+            console.warn(`[BatchBriefs] chunk ${i}–${end} failed: HTTP ${r.status}`)
+            continue
+          }
+          const data = await r.json()
+          allBriefs.push(...(data.briefs || []))
+        } catch (chunkErr) {
+          console.warn(`[BatchBriefs] chunk ${i}–${end} error:`, chunkErr)
+        }
+      }
+
+      setBriefs(allBriefs)
+      setPhase(`${allBriefs.length} of ${items.length} briefs ready`)
+      if (onBriefsLoaded) onBriefsLoaded(allBriefs)
     } catch (e) {
       setError(String(e))
       setPhase("")
@@ -2615,7 +2631,7 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
       <BatchBriefPanel
         projectId={projectId}
         sessionId={sessionId}
-        items={primaryItems.slice(0, 20)}
+        items={primaryItems}
         onBriefsLoaded={loaded => {
           const map = {}
           loaded.forEach(b => { if (b.keyword) map[b.keyword] = b })
