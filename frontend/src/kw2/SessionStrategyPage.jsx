@@ -2398,6 +2398,8 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
   const [openBrief, setOpenBrief] = useState({})    // keyword → bool (panel open)
   const [rebuilding, setRebuilding] = useState(false)
   const [rebuildResult, setRebuildResult] = useState(null)
+  const [bulkRunning, setBulkRunning] = useState(false)
+  const [bulkDone, setBulkDone]       = useState(0)
   const PAGE_SIZE = 50
   const [page, setPage] = useState(0)
 
@@ -2580,6 +2582,22 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
     }
   }
 
+  const handleGenerateAll = async () => {
+    setBulkRunning(true)
+    setBulkDone(0)
+    const pending = primaryItems.filter(item => {
+      const kw = (item.keyword || item.title || "").toLowerCase()
+      return !articleMap[kw] && genStatus[kw] !== "pending" && genStatus[kw] !== "done"
+    })
+    for (let i = 0; i < pending.length; i++) {
+      await handleGenerate(pending[i])
+      setBulkDone(i + 1)
+      await new Promise(r => setTimeout(r, 400))
+    }
+    setBulkRunning(false)
+    setBulkDone(0)
+  }
+
   if (primaryItems.length === 0) {
     return (
       <Card style={{ textAlign: "center", padding: 48 }}>
@@ -2678,6 +2696,24 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
           <option value="openai">🧠 GPT-4o</option>
           <option value="claude">🎭 Claude</option>
         </select>
+
+        {/* Bulk Generate All Pending */}
+        {pendingCount > 0 && (
+          <button
+            onClick={handleGenerateAll}
+            disabled={bulkRunning}
+            style={{
+              padding: "5px 14px", borderRadius: 7, border: "none", fontSize: 11, fontWeight: 700,
+              background: bulkRunning ? T.grayLight : T.purple,
+              color: bulkRunning ? T.textSoft : "#fff",
+              cursor: bulkRunning ? "not-allowed" : "pointer",
+            }}
+          >
+            {bulkRunning
+              ? `⏳ Queueing ${bulkDone}/${primaryItems.filter(i => !articleMap[(i.keyword || i.title || "").toLowerCase()]).length}…`
+              : `⚡ Generate All Pending (${pendingCount})`}
+          </button>
+        )}
       </div>
 
       {/* Progress bar */}
@@ -2749,6 +2785,9 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
                 {item.week && <span style={{ fontSize: 10, color: T.textSoft }}>Week {item.week}</span>}
                 {item.scheduled_date && <span style={{ fontSize: 10, color: T.textSoft }}>{item.scheduled_date}</span>}
                 {item.word_count && <span style={{ fontSize: 10, color: T.textSoft }}>{item.word_count}w</span>}
+                {brief && !brief.error && (
+                  <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 99, background: T.teal + "18", color: T.teal, fontWeight: 600 }}>✓ Brief</span>
+                )}
               </div>
 
               {/* Action row */}
