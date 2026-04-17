@@ -25,7 +25,7 @@ def auth_header():
 def project_and_session(auth_header):
     """Create a minimal project + kw2 session to test rebuild against."""
     r = requests.post(f"{BASE_URL}/api/projects",
-        json={"name": "Rebuild Cal Test Project", "domain": "test.com"},
+        json={"name": "Rebuild Cal Test Project", "industry": "general", "description": "test"},
         headers=auth_header)
     assert r.status_code == 200
     project_id = r.json()["id"]
