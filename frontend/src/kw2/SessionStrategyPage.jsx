@@ -2539,6 +2539,9 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
     return true
   })
 
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
+  const safePage = totalPages === 0 ? 0 : Math.min(page, totalPages - 1)
+
   const pendingCount = primaryItems.filter(i => !articleMap[(i.keyword || i.title || "").toLowerCase()]).length
   const doneCount = primaryItems.length - pendingCount
 
@@ -2682,27 +2685,27 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
       </div>
 
       {/* Pagination controls */}
-      {Math.ceil(filtered.length / PAGE_SIZE) > 1 && (
+      {totalPages > 1 && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
           <button
             onClick={() => setPage(p => Math.max(0, p - 1))}
-            disabled={page === 0}
-            style={{ padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`, background: page === 0 ? T.grayLight : "#fff", cursor: page === 0 ? "not-allowed" : "pointer", fontSize: 12, color: page === 0 ? T.textSoft : T.text }}
+            disabled={safePage === 0}
+            style={{ padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`, background: safePage === 0 ? T.grayLight : "#fff", cursor: safePage === 0 ? "not-allowed" : "pointer", fontSize: 12, color: safePage === 0 ? T.textSoft : T.text }}
           >← Prev</button>
           <span style={{ color: T.textSoft }}>
-            Page {page + 1} of {Math.ceil(filtered.length / PAGE_SIZE)}
+            Page {safePage + 1} of {totalPages}
           </span>
           <button
-            onClick={() => setPage(p => Math.min(Math.ceil(filtered.length / PAGE_SIZE) - 1, p + 1))}
-            disabled={page >= Math.ceil(filtered.length / PAGE_SIZE) - 1}
-            style={{ padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`, background: page >= Math.ceil(filtered.length / PAGE_SIZE) - 1 ? T.grayLight : "#fff", cursor: page >= Math.ceil(filtered.length / PAGE_SIZE) - 1 ? "not-allowed" : "pointer", fontSize: 12, color: page >= Math.ceil(filtered.length / PAGE_SIZE) - 1 ? T.textSoft : T.text }}
+            onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+            disabled={safePage >= totalPages - 1}
+            style={{ padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`, background: safePage >= totalPages - 1 ? T.grayLight : "#fff", cursor: safePage >= totalPages - 1 ? "not-allowed" : "pointer", fontSize: 12, color: safePage >= totalPages - 1 ? T.textSoft : T.text }}
           >Next →</button>
         </div>
       )}
 
       {/* Article grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gap: 10 }}>
-        {filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((item, i) => {
+        {filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE).map((item, i) => {
           const kw = item.keyword || item.title || ""
           const art = articleMap[kw.toLowerCase()]
           const gs = genStatus[kw]
