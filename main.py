@@ -313,11 +313,12 @@ def get_db() -> sqlite3.Connection:
     CREATE TABLE IF NOT EXISTS projects(project_id TEXT PRIMARY KEY,name TEXT NOT NULL,industry TEXT NOT NULL,description TEXT DEFAULT '',seed_keywords TEXT DEFAULT '[]',wp_url TEXT DEFAULT '',wp_user TEXT DEFAULT '',wp_pass_enc TEXT DEFAULT '',shopify_store TEXT DEFAULT '',shopify_token_enc TEXT DEFAULT '',language TEXT DEFAULT 'english',region TEXT DEFAULT 'india',religion TEXT DEFAULT 'general',status TEXT DEFAULT 'active',owner_id TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS runs(run_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,seed TEXT NOT NULL,status TEXT DEFAULT 'queued',current_phase TEXT DEFAULT '',result TEXT DEFAULT '{}',error TEXT DEFAULT '',cost_usd REAL DEFAULT 0,started_at TEXT DEFAULT CURRENT_TIMESTAMP,completed_at TEXT DEFAULT '');
     CREATE TABLE IF NOT EXISTS run_events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT DEFAULT '{}',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    CREATE TABLE IF NOT EXISTS content_articles(article_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,run_id TEXT DEFAULT '',keyword TEXT NOT NULL,title TEXT DEFAULT '',body TEXT DEFAULT '',meta_title TEXT DEFAULT '',meta_desc TEXT DEFAULT '',seo_score REAL DEFAULT 0,eeat_score REAL DEFAULT 0,geo_score REAL DEFAULT 0,readability REAL DEFAULT 0,word_count INTEGER DEFAULT 0,status TEXT DEFAULT 'draft',published_url TEXT DEFAULT '',published_at TEXT DEFAULT '',schema_json TEXT DEFAULT '',frozen INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS content_articles(article_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,run_id TEXT DEFAULT '',keyword TEXT NOT NULL,title TEXT DEFAULT '',body TEXT DEFAULT '',meta_title TEXT DEFAULT '',meta_desc TEXT DEFAULT '',seo_score REAL DEFAULT 0,eeat_score REAL DEFAULT 0,geo_score REAL DEFAULT 0,readability REAL DEFAULT 0,word_count INTEGER DEFAULT 0,status TEXT DEFAULT 'draft',published_url TEXT DEFAULT '',published_at TEXT DEFAULT '',schema_json TEXT DEFAULT '',frozen INTEGER DEFAULT 0,error_message TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS rankings(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,keyword TEXT NOT NULL,position REAL DEFAULT 0,ctr REAL DEFAULT 0,impressions INTEGER DEFAULT 0,clicks INTEGER DEFAULT 0,recorded_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS ai_usage(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,run_id TEXT DEFAULT '',model TEXT NOT NULL,input_tokens INTEGER DEFAULT 0,output_tokens INTEGER DEFAULT 0,cost_usd REAL DEFAULT 0,purpose TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS llm_audit_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT,step TEXT,prompt TEXT,raw_output TEXT,validated_output TEXT,error TEXT,attempt INTEGER,model TEXT,tokens_used INTEGER,cost_usd REAL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS seo_audits(audit_id TEXT PRIMARY KEY,url TEXT,score REAL,grade TEXT,findings TEXT DEFAULT '[]',cwv_lcp REAL DEFAULT 0,cwv_inp REAL DEFAULT 0,cwv_cls REAL DEFAULT 0,ai_score REAL DEFAULT 0,status TEXT DEFAULT 'running',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS code_audits(audit_id TEXT PRIMARY KEY,target TEXT NOT NULL,model TEXT NOT NULL,steps TEXT NOT NULL,status TEXT DEFAULT 'running',current_step INTEGER DEFAULT -1,completed_steps TEXT DEFAULT '{}',folder TEXT DEFAULT '',error TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS ranking_history(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,keyword TEXT NOT NULL,position REAL DEFAULT 0,ctr REAL DEFAULT 0,impressions INTEGER DEFAULT 0,clicks INTEGER DEFAULT 0,recorded_date TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS ranking_alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,keyword TEXT NOT NULL,old_position REAL DEFAULT 0,new_position REAL DEFAULT 0,change REAL DEFAULT 0,severity TEXT DEFAULT 'warning',status TEXT DEFAULT 'new',diagnosis_json TEXT DEFAULT '{}',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS strategy_sessions(session_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,engine_type TEXT DEFAULT 'audience',status TEXT DEFAULT 'pending',input_json TEXT DEFAULT '{}',result_json TEXT DEFAULT '{}',confidence REAL DEFAULT 0,tokens_used INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -455,6 +456,14 @@ def get_db() -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS ix_ai_usage_project ON ai_usage(project_id)",
         "CREATE INDEX IF NOT EXISTS ix_ai_usage_article ON ai_usage(article_id)",
         "CREATE INDEX IF NOT EXISTS ix_ai_usage_provider ON ai_usage(provider)",
+        # ── Humanization Engine ──────────────────────────────────────────────
+        "ALTER TABLE content_articles ADD COLUMN humanize_score REAL DEFAULT 0",
+        "ALTER TABLE content_articles ADD COLUMN humanize_status TEXT DEFAULT 'pending'",
+        "ALTER TABLE content_articles ADD COLUMN humanize_feedback TEXT DEFAULT '{}'",
+        "ALTER TABLE blog_versions ADD COLUMN version_type TEXT DEFAULT 'edit'",
+        "ALTER TABLE blog_versions ADD COLUMN humanize_score REAL DEFAULT 0",
+        "CREATE TABLE IF NOT EXISTS humanize_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,article_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT DEFAULT 'pending',tone TEXT DEFAULT 'natural',style TEXT DEFAULT 'conversational',persona TEXT DEFAULT '',original_body TEXT DEFAULT '',humanized_body TEXT DEFAULT '',original_score REAL DEFAULT 0,final_score REAL DEFAULT 0,sections_processed INTEGER DEFAULT 0,sections_total INTEGER DEFAULT 0,ai_provider TEXT DEFAULT '',tokens_used INTEGER DEFAULT 0,error TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,completed_at TEXT DEFAULT '')",
+        "CREATE INDEX IF NOT EXISTS ix_humanize_article ON humanize_sessions(article_id)",
     ]
     for _m in _migrations:
         try:
@@ -588,13 +597,20 @@ async def startup():
         # Recover articles stuck in 'generating' from a previous crash/kill
         try:
             with db_session() as _cdb:
+                # Ensure error_message column exists (migration for existing DBs)
+                try:
+                    _cdb.execute("ALTER TABLE content_articles ADD COLUMN error_message TEXT DEFAULT ''")
+                    _cdb.commit()
+                except Exception:
+                    pass  # column already exists
                 cur = _cdb.execute(
                     "SELECT article_id FROM content_articles WHERE status='generating'"
                 )
                 stuck = [r[0] for r in cur.fetchall()]
                 if stuck:
                     _cdb.execute(
-                        "UPDATE content_articles SET status='failed' "
+                        "UPDATE content_articles SET status='failed', "
+                        "error_message='Service restarted while article was generating — click Retry to resume' "
                         "WHERE status='generating'"
                     )
                     _cdb.commit()
@@ -1470,33 +1486,108 @@ def knowledge_graph(project_id: str):
 
 @app.get("/api/projects/{project_id}/keyword-stats",tags=["Runs"])
 def keyword_stats(project_id: str):
-    """Return keyword distribution by type (pillar/cluster/supporting)."""
-    db=get_db()
-    row=db.execute("SELECT result FROM runs WHERE project_id=? AND status='complete' ORDER BY completed_at DESC LIMIT 1",(project_id,)).fetchone()
-    if not row:
-        return {"pillar_count":0,"cluster_count":0,"supporting_count":0,"total":0,"distribution":{"pillar":0,"cluster":0,"supporting":0}}
-    result=json.loads(dict(row)["result"] or "{}")
-    pillars=result.get("pillars",{})
-    pillar_count=0; cluster_count=0; supporting_count=0
-    for pname,pdata in pillars.items():
-        if isinstance(pdata,dict):
-            pillar_count+=1
-            for cname,cdata in pdata.get("clusters",{}).items():
-                if isinstance(cdata,dict):
-                    cluster_count+=1
-                    supporting=cdata.get("keywords",[]) if isinstance(cdata.get("keywords"),[])else[]
-                    supporting_count+=len(supporting)
-    total=pillar_count+cluster_count+supporting_count or 1
-    return {
-        "pillar_count":pillar_count,
-        "cluster_count":cluster_count,
-        "supporting_count":supporting_count,
-        "total":total,
-        "distribution":{
-            "pillar":round(pillar_count*100/total,1),
-            "cluster":round(cluster_count*100/total,1),
-            "supporting":round(supporting_count*100/total,1)
+    """Return keyword distribution and kw2 session summary for a project."""
+    db = get_db()
+
+    # ── Try kw2 pipeline data first (newest source) ────────────────────────
+    kw2_row = db.execute(
+        "SELECT session_id, phase, created_at FROM kw2_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
+        (project_id,)
+    ).fetchone()
+
+    if kw2_row:
+        session_id = kw2_row["session_id"]
+        # Count validated keywords grouped by keyword_type
+        counts = db.execute(
+            "SELECT keyword_type, COUNT(*) as cnt FROM kw2_keywords WHERE session_id=? GROUP BY keyword_type",
+            (session_id,)
+        ).fetchall()
+        type_map = {r["keyword_type"]: r["cnt"] for r in counts}
+        pillar_count   = type_map.get("pillar", 0)
+        cluster_count  = type_map.get("cluster", 0)
+        supporting_count = type_map.get("supporting", type_map.get("long_tail", 0))
+        # Also count universe items if keyword table empty
+        if pillar_count + cluster_count + supporting_count == 0:
+            raw = db.execute(
+                "SELECT COUNT(*) as cnt FROM kw2_universe_items WHERE session_id=?", (session_id,)
+            ).fetchone()
+            supporting_count = raw["cnt"] if raw else 0
+        # Session count for this project
+        session_count = db.execute(
+            "SELECT COUNT(*) as cnt FROM kw2_sessions WHERE project_id=?", (project_id,)
+        ).fetchone()["cnt"]
+        # BI phase data
+        bi_row = db.execute(
+            "SELECT goals, pricing_model FROM kw2_biz_intel WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
+            (session_id,)
+        ).fetchone()
+        goals = json.loads(bi_row["goals"] or "[]") if bi_row and bi_row["goals"] else []
+        pricing_model = bi_row["pricing_model"] if bi_row else ""
+        # Profile confidence
+        profile_row = db.execute(
+            "SELECT confidence_score, business_type, pillars, target_locations FROM kw2_business_profile WHERE session_id=? LIMIT 1",
+            (session_id,)
+        ).fetchone()
+        confidence = round((profile_row["confidence_score"] or 0) * 100, 0) if profile_row else 0
+        biz_type = profile_row["business_type"] if profile_row else ""
+        pillar_names = json.loads(profile_row["pillars"] or "[]") if profile_row else []
+        locations = json.loads(profile_row["target_locations"] or "[]") if profile_row else []
+
+        total = pillar_count + cluster_count + supporting_count or 1
+        return {
+            "pillar_count": pillar_count,
+            "cluster_count": cluster_count,
+            "supporting_count": supporting_count,
+            "total": total,
+            "distribution": {
+                "pillar": round(pillar_count * 100 / total, 1),
+                "cluster": round(cluster_count * 100 / total, 1),
+                "supporting": round(supporting_count * 100 / total, 1),
+            },
+            "kw2": {
+                "session_count": session_count,
+                "latest_session_id": session_id,
+                "latest_phase": kw2_row["phase"],
+                "confidence_score": confidence,
+                "business_type": biz_type,
+                "pillar_names": pillar_names[:6],
+                "target_locations": locations[:4],
+                "goals": goals[:3],
+                "pricing_model": pricing_model,
+            },
         }
+
+    # ── Fallback: legacy ruflo runs table ──────────────────────────────────
+    row = db.execute(
+        "SELECT result FROM runs WHERE project_id=? AND status='complete' ORDER BY completed_at DESC LIMIT 1",
+        (project_id,)
+    ).fetchone()
+    if not row:
+        return {"pillar_count":0,"cluster_count":0,"supporting_count":0,"total":0,
+                "distribution":{"pillar":0,"cluster":0,"supporting":0},"kw2":None}
+    result = json.loads(dict(row)["result"] or "{}")
+    pillars = result.get("pillars", {})
+    pillar_count = 0; cluster_count = 0; supporting_count = 0
+    for pname, pdata in pillars.items():
+        if isinstance(pdata, dict):
+            pillar_count += 1
+            for cname, cdata in pdata.get("clusters", {}).items():
+                if isinstance(cdata, dict):
+                    cluster_count += 1
+                    supporting = cdata.get("keywords", []) if isinstance(cdata.get("keywords"), list) else []
+                    supporting_count += len(supporting)
+    total = pillar_count + cluster_count + supporting_count or 1
+    return {
+        "pillar_count": pillar_count,
+        "cluster_count": cluster_count,
+        "supporting_count": supporting_count,
+        "total": total,
+        "distribution": {
+            "pillar": round(pillar_count * 100 / total, 1),
+            "cluster": round(cluster_count * 100 / total, 1),
+            "supporting": round(supporting_count * 100 / total, 1),
+        },
+        "kw2": None,
     }
 
 async def _execute_run(run_id,project_id,body):
@@ -2374,9 +2465,10 @@ async def _gen_article(article_id, body, step_mode: str = "auto", start_step: in
         finally:
             _active_pipelines.pop(article_id, None)
     except Exception as e:
+        _err_msg = str(e)[:1000]  # cap at 1000 chars
         db.execute(
-            "UPDATE content_articles SET status='failed' WHERE article_id=?",
-            (article_id,)
+            "UPDATE content_articles SET status='failed', error_message=? WHERE article_id=?",
+            (_err_msg, article_id)
         )
         db.commit()
         log.error(f"_gen_article pipeline failed for {article_id}: {e}", exc_info=True)
@@ -3938,21 +4030,35 @@ def _read_target_code(target: str, max_lines_per_file: int = 300) -> str:
         parts.append(f"# ═══ FILE: {fp} ════\n{snippet}\n")
     return "\n\n".join(parts)
 
-async def _call_ai(model_id: str, prompt: str) -> str:
+async def _call_ai(model_id: str, prompt: str, num_predict: int = 600) -> str:
     """Call the selected AI model. Supports ollama / gemini / claude."""
     import httpx as _httpx
     if model_id.startswith("ollama/") or model_id.startswith("ollama:") or "/" not in model_id:
-        # Ollama — strip prefix
+        # Ollama — strip prefix, use streaming to avoid read timeout on long generations
         model = model_id.replace("ollama/", "").replace("ollama:", "")
         ollama_url = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
-        async with _httpx.AsyncClient(timeout=180) as c:
-            r = await c.post(
+        chunks = []
+        # stream=True: each token resets the read timeout, so we never time out mid-generation
+        # read=600: 10 min per-token patience for very slow remote Ollama
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(60, read=600)) as c:
+            async with c.stream(
+                "POST",
                 f"{ollama_url}/api/generate",
-                json={"model": model, "prompt": prompt, "stream": False,
-                      "options": {"temperature": 0.2, "num_predict": 2000}},
-            )
-            r.raise_for_status()
-            return r.json().get("response", "").strip()
+                json={"model": model, "prompt": prompt, "stream": True,
+                      "options": {"temperature": 0.2, "num_predict": num_predict}},
+            ) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        chunks.append(obj.get("response", ""))
+                        if obj.get("done"):
+                            break
+                    except Exception:
+                        pass
+        return "".join(chunks).strip()
 
     if model_id.startswith("gemini"):
         gemini_key = os.getenv("GEMINI_API_KEY", "")
@@ -3963,7 +4069,7 @@ async def _call_ai(model_id: str, prompt: str) -> str:
             r = await c.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}",
                 json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2000}},
+                      "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600}},
             )
             r.raise_for_status()
             return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -3976,47 +4082,61 @@ def _build_step_prompt(step_id: int, step_name: str, code: str, context: str = "
         "Never give generic advice. Output clean Markdown. "
         "Simulate real execution before answering.\n\n"
     )
-    ctx_block = f"CONTEXT FROM PREVIOUS STEPS:\n{context[:2000]}\n\n" if context else ""
-    code_block = f"CODE TO ANALYZE:\n```python\n{code[:6000]}\n```\n\n"
+    ctx_block = f"CONTEXT FROM PREVIOUS STEPS:\n{context[:600]}\n\n" if context else ""
+    code_block = f"CODE TO ANALYZE:\n```python\n{code[:2500]}\n```\n\n"
 
-    prompts = {
-        0: ("You are a system analyst.\n\nSummarize the provided code into structured context.\n"
+    # Step name is injected as a hard directive so Mistral stays on-task
+    step_directives = {
+        0: ("=== AUDIT STEP 0: CONTEXT BUILDER ===\n"
+            "Your ONLY task for this step: summarize the system structure.\n\n"
+            "You are a system analyst. Summarize the provided code into structured context.\n"
             "Extract: system purpose, core modules, data flow (step-by-step), key entities, critical paths.\n"
             "Output clean Markdown with headers."),
-        1: ("You are a senior backend engineer.\n\nTrace the exact execution flow of this code.\n"
+        1: ("=== AUDIT STEP 1: CODE UNDERSTANDING ===\n"
+            "Your ONLY task for this step: trace the execution flow.\n\n"
+            "You are a senior backend engineer. Trace the exact execution flow of this code.\n"
             "Explain: what it does step-by-step, inputs→outputs, hidden assumptions, external dependencies.\n"
             "Do NOT suggest fixes yet."),
-        2: ("You are a QA engineer. Your job: BREAK the system.\n\n"
-            "Find ALL functional bugs: incorrect logic, null/empty handling, edge cases, data mismatch.\n"
+        2: ("=== AUDIT STEP 2: BUG ANALYSIS ===\n"
+            "Your ONLY task for this step: find functional bugs.\n\n"
+            "You are a QA engineer. Find ALL functional bugs: incorrect logic, null/empty handling, "
+            "edge cases, data mismatch.\n"
             "For each bug: exact file/function, what breaks, real-world scenario, code-level fix."),
-        3: ("You are a system architect.\n\nTrace the FULL data flow: input → processing → storage → output.\n"
+        3: ("=== AUDIT STEP 3: DATA FLOW ===\n"
+            "Your ONLY task for this step: trace data transformations.\n\n"
+            "You are a system architect. Trace the FULL data flow: input → processing → storage → output.\n"
             "Identify: redundant steps, incorrect transformations, data loss, tight coupling.\n"
             "Output a text data-flow diagram + issues + improvements."),
-        4: ("You are a performance engineer.\n\n"
-            "For each critical function: estimate time complexity, spot blocking calls, find bottlenecks.\n"
+        4: ("=== AUDIT STEP 4: PERFORMANCE ===\n"
+            "Your ONLY task for this step: identify performance bottlenecks.\n\n"
+            "You are a performance engineer. For each critical function: estimate time complexity, "
+            "spot blocking calls, find bottlenecks.\n"
             "Suggest: async improvements, batching, caching, parallelization."),
-        5: ("You are an AI systems engineer.\n\n"
-            "Audit every AI call in this code.\n"
+        5: ("=== AUDIT STEP 5: AI USAGE ===\n"
+            "Your ONLY task for this step: audit AI calls and reduce AI cost.\n\n"
+            "You are an AI systems engineer. Audit every AI call in this code.\n"
             "Identify: unnecessary AI usage, expensive calls, where deterministic rules would be better.\n"
             "Output: a reduce-AI-cost plan with specific replacements."),
-        6: ("You are a QA automation engineer.\n\n"
-            "Generate complete test cases:\n"
+        6: ("=== AUDIT STEP 6: TEST GENERATOR ===\n"
+            "Your ONLY task for this step: generate test cases.\n\n"
+            "You are a QA automation engineer. Generate complete test cases:\n"
             "1. Unit tests (pytest format)\n"
             "2. Integration tests\n"
-            "3. Regression tests (known failure scenarios)\n"
-            "4. Edge case tests (empty, null, huge input)\n"
+            "3. Edge case tests (empty, null, huge input)\n"
             "Output runnable Python test code."),
-        7: ("You are a senior engineer doing a code review + rewrite.\n\n"
+        7: ("=== AUDIT STEP 7: FIX ENGINE ===\n"
+            "Your ONLY task for this step: rewrite the most problematic sections.\n\n"
+            "You are a senior engineer doing a code review + rewrite.\n"
             "Rewrite the top 3 most problematic sections of this code.\n"
-            "Rules: fix bugs, improve performance, simplify logic, keep readability.\n"
             "Show: original code → improved code + explanation."),
-        8: ("You are a tech lead writing an executive report.\n\n"
-            "Synthesize ALL findings into a final audit report.\n"
+        8: ("=== AUDIT STEP 8: FINAL REPORT ===\n"
+            "Your ONLY task for this step: write a concise executive audit report.\n\n"
+            "You are a tech lead. Synthesize ALL findings into a final audit report.\n"
             "Sections: Executive Summary, P0 Critical Bugs, P1 High-Impact Fixes, "
-            "P2 Optimizations, P3 Nice-to-Have, Estimated Fix Time.\n"
-            "Be actionable and specific."),
+            "P2 Optimizations, P3 Nice-to-Have.\n"
+            "Be concise and actionable. Output clean Markdown."),
     }
-    return base_rules + ctx_block + code_block + prompts.get(step_id, "Analyze the code.")
+    return base_rules + ctx_block + code_block + step_directives.get(step_id, f"=== STEP {step_id} ===\nAnalyze the code.")
 
 
 @app.get("/api/audit/code/stream", tags=["Code Audit"])
@@ -4059,12 +4179,14 @@ async def audit_code_stream(
 
                 try:
                     prompt = _build_step_prompt(step_id, step_name, code, accumulated_context)
-                    result = await _call_ai(model, prompt)
+                    # Step 8 (Final Report) needs more tokens to avoid mid-sentence truncation
+                    tokens = 1000 if step_id == 8 else 600
+                    result = await _call_ai(model, prompt, num_predict=tokens)
                     results[step_id] = result
 
-                    # Accumulate key context for later steps
+                    # Accumulate short context for later steps only
                     if step_id in (0, 1, 2):
-                        accumulated_context += f"\n\n## {step_name}\n{result[:800]}"
+                        accumulated_context += f"\n\n## {step_name}\n{result[:250]}"
 
                     # Write step file
                     fname = f"{step_id:02d}_{step_name.lower().replace(' ', '_')}.md"
@@ -4072,13 +4194,15 @@ async def audit_code_stream(
 
                     yield f"data: {json.dumps({'type': 'step_done', 'step': step_id, 'name': step_name, 'content': result, 'file': fname})}\n\n"
 
-                except Exception as e:
-                    err_msg = f"Step {step_id} ({step_name}) failed: {e}"
+                except BaseException as e:
+                    err_msg = f"Step {step_id} ({step_name}) failed [{type(e).__name__}]: {e}"
                     log.warning(err_msg)
-                    yield f"data: {json.dumps({'type': 'step_error', 'step': step_id, 'name': step_name, 'error': str(e)})}\n\n"
+                    yield f"data: {json.dumps({'type': 'step_error', 'step': step_id, 'name': step_name, 'error': err_msg})}\n\n"
+                    if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                        raise  # let fatal signals propagate
 
-                # Rate-limit: brief pause between AI calls
-                await asyncio.sleep(1.5)
+                # Polite pause — remote Ollama is slow, avoid back-to-back hammering
+                await asyncio.sleep(5)
 
             # Write index
             index_lines = [f"# Code Audit — {target} — {dt}\n", f"Model: {model}\n\n"]
@@ -4103,7 +4227,290 @@ def audit_targets():
     return [{"id": k, "label": v["label"], "files": v["files"]} for k, v in AUDIT_TARGETS.items()]
 
 
-# ── Rankings ──────────────────────────────────────────────────────────────────
+# ── Code Audit: Persistent background-task endpoints ─────────────────────────
+
+# In-memory cancel/pause signals keyed by audit_id
+_audit_control: dict[str, str] = {}  # audit_id → "running"|"paused"|"stopped"
+
+
+async def _run_audit_task(audit_id: str, target: str, model: str, steps: list[int]):
+    """Background task: runs audit steps, persists each result to DB."""
+    db = get_db()
+    folder = None
+    try:
+        dt = datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+        folder = f"audits/{target}_{dt}_{audit_id[:6]}"
+        Path(folder).mkdir(parents=True, exist_ok=True)
+
+        db.execute(
+            "UPDATE code_audits SET status='running', folder=?, updated_at=? WHERE audit_id=?",
+            (folder, datetime.utcnow().isoformat(), audit_id)
+        )
+        db.commit()
+
+        code = _read_target_code(target)
+        accumulated_context = ""
+
+        # Load already-completed steps (in case of resume)
+        row = db.execute("SELECT completed_steps FROM code_audits WHERE audit_id=?", (audit_id,)).fetchone()
+        completed = json.loads(row[0]) if row else {}
+
+        for step_id, step_name, step_desc in AUDIT_STEPS:
+            if step_id not in steps:
+                continue
+
+            # Skip already completed steps on resume
+            if str(step_id) in completed:
+                if str(step_id) in ("0", "1", "2"):
+                    accumulated_context += f"\n\n## {step_name}\n{completed[str(step_id)][:800]}"
+                continue
+
+            # Check control signal
+            ctrl = _audit_control.get(audit_id, "running")
+            while ctrl == "paused":
+                await asyncio.sleep(2)
+                ctrl = _audit_control.get(audit_id, "running")
+            if ctrl == "stopped":
+                db.execute(
+                    "UPDATE code_audits SET status='stopped', current_step=?, updated_at=? WHERE audit_id=?",
+                    (step_id, datetime.utcnow().isoformat(), audit_id)
+                )
+                db.commit()
+                return
+
+            # Mark current step
+            db.execute(
+                "UPDATE code_audits SET current_step=?, status='running', updated_at=? WHERE audit_id=?",
+                (step_id, datetime.utcnow().isoformat(), audit_id)
+            )
+            db.commit()
+
+            try:
+                prompt = _build_step_prompt(step_id, step_name, code, accumulated_context)
+                tokens = 1000 if step_id == 8 else 600
+                result = await _call_ai(model, prompt, num_predict=tokens)
+
+                if step_id in (0, 1, 2):
+                    accumulated_context += f"\n\n## {step_name}\n{result[:250]}"
+
+                # Write step file
+                fname = f"{step_id:02d}_{step_name.lower().replace(' ', '_')}.md"
+                (Path(folder) / fname).write_text(f"# {step_name}\n\n{result}", encoding="utf-8")
+
+                # Persist result (store up to 8KB per step)
+                completed[str(step_id)] = result[:8000]
+                db.execute(
+                    "UPDATE code_audits SET completed_steps=?, updated_at=? WHERE audit_id=?",
+                    (json.dumps(completed), datetime.utcnow().isoformat(), audit_id)
+                )
+                db.commit()
+
+            except BaseException as e:
+                err_detail = f"[{type(e).__name__}] {e}"
+                log.warning(f"[CodeAudit] Step {step_id} ({step_name}) failed: {err_detail}")
+                completed[str(step_id)] = f"__error__: {err_detail}"
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    raise  # let fatal signals propagate
+                db.execute(
+                    "UPDATE code_audits SET completed_steps=?, updated_at=? WHERE audit_id=?",
+                    (json.dumps(completed), datetime.utcnow().isoformat(), audit_id)
+                )
+                db.commit()
+
+            # Polite pause — remote Ollama is slow, avoid back-to-back hammering
+            await asyncio.sleep(5)
+
+        # Write index
+        index_lines = [f"# Code Audit — {target} — {dt}\nModel: {model}\n\n"]
+        for sid, sname, _ in AUDIT_STEPS:
+            if sid in steps and str(sid) in completed:
+                fname = f"{sid:02d}_{sname.lower().replace(' ', '_')}.md"
+                index_lines.append(f"- [{sname}](./{fname})\n")
+        (Path(folder) / "INDEX.md").write_text("".join(index_lines), encoding="utf-8")
+
+        db.execute(
+            "UPDATE code_audits SET status='done', current_step=-1, updated_at=? WHERE audit_id=?",
+            (datetime.utcnow().isoformat(), audit_id)
+        )
+        db.commit()
+        _audit_control.pop(audit_id, None)
+
+    except Exception as e:
+        log.error(f"[CodeAudit] Fatal error for {audit_id}: {e}")
+        db.execute(
+            "UPDATE code_audits SET status='error', error=?, updated_at=? WHERE audit_id=?",
+            (str(e), datetime.utcnow().isoformat(), audit_id)
+        )
+        db.commit()
+        _audit_control.pop(audit_id, None)
+
+
+class CodeAuditStartBody(BaseModel):
+    target: str
+    model: str = "ollama/mistral:7b-instruct-q4_K_M"
+    steps: list[int] = list(range(9))
+
+
+@app.post("/api/audit/code/start", tags=["Code Audit"])
+async def audit_code_start(body: CodeAuditStartBody, bg: BackgroundTasks, user=Depends(current_user)):
+    """Create and start a persistent code audit. Returns audit_id immediately."""
+    if body.target not in AUDIT_TARGETS:
+        raise HTTPException(400, f"Unknown target '{body.target}'. Valid: {list(AUDIT_TARGETS)}")
+
+    audit_id = "ca_" + uuid.uuid4().hex[:12]
+    db = get_db()
+    db.execute(
+        "INSERT INTO code_audits(audit_id,target,model,steps,status,completed_steps,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (audit_id, body.target, body.model, json.dumps(sorted(body.steps)),
+         "running", "{}", datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
+    )
+    db.commit()
+    _audit_control[audit_id] = "running"
+    bg.add_task(_run_audit_task, audit_id, body.target, body.model, sorted(body.steps))
+    return {"audit_id": audit_id, "status": "running"}
+
+
+@app.get("/api/audit/code/{audit_id}", tags=["Code Audit"])
+def audit_code_status(audit_id: str, user=Depends(current_user)):
+    """Get current state of a code audit (completed steps + content)."""
+    db = get_db()
+    row = db.execute(
+        "SELECT audit_id,target,model,steps,status,current_step,completed_steps,folder,error,created_at,updated_at FROM code_audits WHERE audit_id=?",
+        (audit_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Audit not found")
+    r = dict(row)
+    r["completed_steps"] = json.loads(r["completed_steps"] or "{}")
+    r["steps"] = json.loads(r["steps"] or "[]")
+    r["control"] = _audit_control.get(audit_id, r["status"])
+    return r
+
+
+@app.get("/api/audit/code", tags=["Code Audit"])
+def audit_code_list(limit: int = 20, user=Depends(current_user)):
+    """List recent code audits (newest first)."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT audit_id,target,model,status,current_step,folder,created_at,updated_at FROM code_audits ORDER BY created_at DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/audit/code/{audit_id}/stop", tags=["Code Audit"])
+def audit_code_stop(audit_id: str, user=Depends(current_user)):
+    """Stop a running audit after the current step finishes."""
+    _audit_control[audit_id] = "stopped"
+    db = get_db()
+    db.execute("UPDATE code_audits SET status='stopped', updated_at=? WHERE audit_id=?",
+               (datetime.utcnow().isoformat(), audit_id))
+    db.commit()
+    return {"audit_id": audit_id, "status": "stopped"}
+
+
+@app.post("/api/audit/code/{audit_id}/pause", tags=["Code Audit"])
+def audit_code_pause(audit_id: str, user=Depends(current_user)):
+    """Pause a running audit between steps."""
+    _audit_control[audit_id] = "paused"
+    db = get_db()
+    db.execute("UPDATE code_audits SET status='paused', updated_at=? WHERE audit_id=?",
+               (datetime.utcnow().isoformat(), audit_id))
+    db.commit()
+    return {"audit_id": audit_id, "status": "paused"}
+
+
+@app.post("/api/audit/code/{audit_id}/resume", tags=["Code Audit"])
+async def audit_code_resume(audit_id: str, bg: BackgroundTasks, user=Depends(current_user)):
+    """Resume a paused or stopped audit from where it left off."""
+    db = get_db()
+    row = db.execute("SELECT target,model,steps,status FROM code_audits WHERE audit_id=?", (audit_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Audit not found")
+    if row["status"] == "done":
+        raise HTTPException(400, "Audit already completed")
+
+    target, model = row["target"], row["model"]
+    steps = json.loads(row["steps"] or "[]")
+    _audit_control[audit_id] = "running"
+    db.execute("UPDATE code_audits SET status='running', updated_at=? WHERE audit_id=?",
+               (datetime.utcnow().isoformat(), audit_id))
+    db.commit()
+    bg.add_task(_run_audit_task, audit_id, target, model, steps)
+    return {"audit_id": audit_id, "status": "running"}
+
+
+@app.get("/api/audit/code/{audit_id}/stream", tags=["Code Audit"])
+async def audit_code_stream_live(audit_id: str, user=Depends(current_user)):
+    """SSE stream for live progress polling (polls DB every 2s, replays done steps once)."""
+    db = get_db()
+    row = db.execute("SELECT * FROM code_audits WHERE audit_id=?", (audit_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Audit not found")
+
+    async def generate():
+        sent_steps: set[str] = set()
+        # Replay already-completed steps immediately
+        initial = db.execute("SELECT completed_steps,status,current_step FROM code_audits WHERE audit_id=?", (audit_id,)).fetchone()
+        if initial:
+            done_map = json.loads(initial["completed_steps"] or "{}")
+            for sid_str, content in done_map.items():
+                step_id = int(sid_str)
+                step_info = next((s for s in AUDIT_STEPS if s[0] == step_id), None)
+                if step_info:
+                    _, sname, _ = step_info
+                    yield f"data: {json.dumps({'type': 'step_done', 'step': step_id, 'name': sname, 'content': content, 'replayed': True})}\n\n"
+                    sent_steps.add(sid_str)
+            if initial["status"] in ("done", "stopped", "error"):
+                yield f"data: {json.dumps({'type': initial['status'], 'audit_id': audit_id})}\n\n"
+                return
+
+        # Poll for new steps
+        last_announced_cur = -99  # track current_step to avoid repeated step_start spam
+        while True:
+            await asyncio.sleep(2)
+            row2 = db.execute("SELECT completed_steps,status,current_step FROM code_audits WHERE audit_id=?", (audit_id,)).fetchone()
+            if not row2:
+                break
+            done_map = json.loads(row2["completed_steps"] or "{}")
+            for sid_str, content in done_map.items():
+                if sid_str in sent_steps:
+                    continue
+                step_id = int(sid_str)
+                step_info = next((s for s in AUDIT_STEPS if s[0] == step_id), None)
+                if step_info:
+                    _, sname, _ = step_info
+                    is_err = isinstance(content, str) and content.startswith("__error__:")
+                    evt_type = "step_error" if is_err else "step_done"
+                    yield f"data: {json.dumps({'type': evt_type, 'step': step_id, 'name': sname, 'content': content, 'replayed': False})}\n\n"
+                    sent_steps.add(sid_str)
+
+            cur = row2["current_step"]
+            # Only announce step_start when the current step changes AND it hasn't been marked done yet
+            if (cur is not None and cur >= 0
+                    and str(cur) not in sent_steps
+                    and cur != last_announced_cur):
+                step_info = next((s for s in AUDIT_STEPS if s[0] == cur), None)
+                if step_info:
+                    _, sname, _ = step_info
+                    yield f"data: {json.dumps({'type': 'step_start', 'step': cur, 'name': sname})}\n\n"
+                last_announced_cur = cur
+
+            ctrl = _audit_control.get(audit_id, row2["status"])
+            if ctrl == "paused":
+                yield f"data: {json.dumps({'type': 'paused', 'audit_id': audit_id})}\n\n"
+
+            if row2["status"] in ("done", "stopped", "error"):
+                yield f"data: {json.dumps({'type': row2['status'], 'audit_id': audit_id})}\n\n"
+                break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/rankings/import",tags=["Rankings"])
 def import_rankings(project_id: str,keywords: List[dict]):
     db=get_db()
@@ -6038,6 +6445,274 @@ class RewriteBody(BaseModel):
     instruction: str = ""
     issues: List[Dict] = []       # for fix_issues mode — list of issue dicts
     preferred_provider: str = ""  # optional: force a specific AI provider for fixing
+
+
+class HumanizeBody(BaseModel):
+    tone: str = "natural"        # natural|conversational|expert|narrative|direct
+    style: str = "conversational" # conversational|academic|journalistic|casual
+    persona: str = ""            # optional writer persona
+    section_index: int = -1      # -1 = all sections, 0+ = specific section
+
+
+@app.post("/api/content/{article_id}/humanize", tags=["Content"])
+def humanize_article(article_id: str, body: HumanizeBody, user=Depends(current_user)):
+    """Run humanization pipeline on an article to remove AI signals."""
+    db = get_db()
+    row = db.execute("SELECT * FROM content_articles WHERE article_id=?", (article_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+    article = dict(row)
+    html = article.get("body") or ""
+    if not html.strip():
+        raise HTTPException(400, "Article has no content to humanize")
+    keyword = article.get("keyword") or ""
+    project_id = article.get("project_id") or ""
+
+    from engines.humanize.pipeline import run_humanize_pipeline
+    from engines.humanize.auditor import analyze_ai_signals
+
+    # Create session
+    db.execute(
+        "INSERT INTO humanize_sessions(article_id,project_id,status,tone,style,persona,original_body) VALUES(?,?,?,?,?,?,?)",
+        (article_id, project_id, "running", body.tone, body.style, body.persona, html)
+    )
+    db.commit()
+    session_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    try:
+        # Update article status
+        db.execute("UPDATE content_articles SET humanize_status='humanizing' WHERE article_id=?", (article_id,))
+        db.commit()
+
+        section_idx = body.section_index if body.section_index >= 0 else None
+        result = run_humanize_pipeline(
+            html=html,
+            keyword=keyword,
+            tone=body.tone,
+            style=body.style,
+            persona=body.persona,
+            section_index=section_idx,
+        )
+
+        if result["success"]:
+            # Save humanized content
+            db.execute(
+                "UPDATE content_articles SET body=?, humanize_score=?, humanize_status='humanized', humanize_feedback=?, updated_at=CURRENT_TIMESTAMP WHERE article_id=?",
+                (result["humanized_html"], result["final_score"], json.dumps(result.get("details", {})), article_id)
+            )
+            # Save version
+            version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM blog_versions WHERE blog_id=?", (article_id,)).fetchone()[0]
+            db.execute(
+                "INSERT INTO blog_versions(blog_id,version,title,body,meta_desc,version_type,humanize_score) VALUES(?,?,?,?,?,?,?)",
+                (article_id, version, article.get("title",""), result["humanized_html"], article.get("meta_desc",""), "humanize", result["final_score"])
+            )
+            # Update session
+            db.execute(
+                "UPDATE humanize_sessions SET status='completed',humanized_body=?,original_score=?,final_score=?,sections_processed=?,sections_total=?,tokens_used=?,completed_at=CURRENT_TIMESTAMP WHERE id=?",
+                (result["humanized_html"], result["original_score"], result["final_score"], result["sections_processed"], result["sections_total"], result.get("tokens_used",0), session_id)
+            )
+            db.commit()
+        else:
+            db.execute("UPDATE content_articles SET humanize_status='failed' WHERE article_id=?", (article_id,))
+            db.execute("UPDATE humanize_sessions SET status='failed',error=? WHERE id=?", (result.get("error","Unknown error"), session_id))
+            db.commit()
+
+        return result
+
+    except Exception as e:
+        log.error(f"Humanize failed for {article_id}: {e}")
+        db.execute("UPDATE content_articles SET humanize_status='failed' WHERE article_id=?", (article_id,))
+        db.execute("UPDATE humanize_sessions SET status='failed',error=? WHERE id=?", (str(e), session_id))
+        db.commit()
+        raise HTTPException(500, f"Humanization failed: {e}")
+
+
+@app.get("/api/content/{article_id}/humanize/score", tags=["Content"])
+def get_humanize_score(article_id: str, user=Depends(current_user)):
+    """Quick AI-detection score without running full humanization."""
+    db = get_db()
+    row = db.execute("SELECT body FROM content_articles WHERE article_id=?", (article_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+    html = row[0] or ""
+    if not html.strip():
+        raise HTTPException(400, "Article has no content")
+
+    from engines.humanize.auditor import analyze_ai_signals
+    result = analyze_ai_signals(html)
+    return result
+
+
+@app.get("/api/content/{article_id}/humanize/sessions", tags=["Content"])
+def get_humanize_sessions(article_id: str, user=Depends(current_user)):
+    """Get humanization session history for an article."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT id,status,tone,style,original_score,final_score,sections_processed,sections_total,tokens_used,created_at,completed_at FROM humanize_sessions WHERE article_id=? ORDER BY created_at DESC LIMIT 20",
+        (article_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Humanize SSE streaming + control ──────────────────────────────────────────
+_HUMANIZE_CONTROLS: Dict[int, Dict] = {}  # session_id → {"paused": bool, "stopped": bool}
+
+
+@app.post("/api/content/{article_id}/humanize/start", tags=["Content"])
+def humanize_start(article_id: str, body: HumanizeBody, user=Depends(current_user)):
+    """Start humanization job. Returns session_id; connect to /stream to receive progress."""
+    db = get_db()
+    row = db.execute("SELECT * FROM content_articles WHERE article_id=?", (article_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+    article = dict(row)
+    html = article.get("body") or ""
+    if not html.strip():
+        raise HTTPException(400, "Article has no content to humanize")
+
+    db.execute(
+        "INSERT INTO humanize_sessions(article_id,project_id,status,tone,style,persona,original_body) VALUES(?,?,?,?,?,?,?)",
+        (article_id, article.get("project_id", ""), "pending", body.tone, body.style, body.persona, html)
+    )
+    db.commit()
+    session_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    _HUMANIZE_CONTROLS[session_id] = {"paused": False, "stopped": False}
+    return {"session_id": session_id}
+
+
+@app.get("/api/content/{article_id}/humanize/stream", tags=["Content"])
+async def humanize_stream(
+    article_id: str,
+    session_id: int = 0,
+    token: str = None,
+    user=Depends(current_user_or_qs),
+):
+    """SSE stream for humanization progress. Connect after /humanize/start."""
+    import queue as _queue
+
+    db = get_db()
+    row = db.execute("SELECT * FROM content_articles WHERE article_id=?", (article_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+    article = dict(row)
+    html = article.get("body") or ""
+    keyword = article.get("keyword") or ""
+
+    sess = db.execute("SELECT * FROM humanize_sessions WHERE id=? AND article_id=?", (session_id, article_id)).fetchone()
+    if not sess:
+        raise HTTPException(404, "Session not found")
+    sess = dict(sess)
+
+    control = _HUMANIZE_CONTROLS.get(session_id, {"paused": False, "stopped": False})
+    _HUMANIZE_CONTROLS[session_id] = control
+
+    q: _queue.Queue = _queue.Queue()
+
+    def _on_progress(step, current, total, detail, extra=None):
+        event = {
+            "type": step,
+            "current": current,
+            "total": total,
+            "detail": detail,
+            "pct": round((current / total) * 100) if total > 0 else 0,
+        }
+        if extra:
+            event.update(extra)
+        q.put(f"data: {json.dumps(event)}\n\n")
+
+    def _run_sync():
+        from engines.humanize.pipeline import run_humanize_pipeline
+        try:
+            db2 = get_db()
+            db2.execute("UPDATE content_articles SET humanize_status='humanizing' WHERE article_id=?", (article_id,))
+            db2.execute("UPDATE humanize_sessions SET status='running' WHERE id=?", (session_id,))
+            db2.commit()
+
+            section_idx = int(sess.get("persona") and -1) if False else None
+            # Parse section_index from session persona field is wrong; use tone/style from session
+            tone = sess.get("tone", "natural")
+            style = sess.get("style", "conversational")
+            persona = sess.get("persona", "")
+
+            result = run_humanize_pipeline(
+                html=html,
+                keyword=keyword,
+                tone=tone,
+                style=style,
+                persona=persona,
+                on_progress=_on_progress,
+                control=control,
+            )
+
+            if result["success"]:
+                db2.execute(
+                    "UPDATE content_articles SET body=?, humanize_score=?, humanize_status='humanized', humanize_feedback=?, updated_at=CURRENT_TIMESTAMP WHERE article_id=?",
+                    (result["humanized_html"], result["final_score"], json.dumps(result.get("details", {})), article_id)
+                )
+                version = db2.execute("SELECT COALESCE(MAX(version),0)+1 FROM blog_versions WHERE blog_id=?", (article_id,)).fetchone()[0]
+                db2.execute(
+                    "INSERT INTO blog_versions(blog_id,version,title,body,meta_desc,version_type,humanize_score) VALUES(?,?,?,?,?,?,?)",
+                    (article_id, version, article.get("title", ""), result["humanized_html"], article.get("meta_desc", ""), "humanize", result["final_score"])
+                )
+                db2.execute(
+                    "UPDATE humanize_sessions SET status='completed',humanized_body=?,original_score=?,final_score=?,sections_processed=?,sections_total=?,tokens_used=?,completed_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (result["humanized_html"], result["original_score"], result["final_score"], result["sections_processed"], result["sections_total"], result.get("tokens_used", 0), session_id)
+                )
+                db2.commit()
+                q.put(f"data: {json.dumps({'type': 'complete', 'result': {k: v for k, v in result.items() if k != 'humanized_html'}})}\n\n")
+            else:
+                db2.execute("UPDATE content_articles SET humanize_status='failed' WHERE article_id=?", (article_id,))
+                db2.execute("UPDATE humanize_sessions SET status='failed',error=? WHERE id=?", (json.dumps(result.get("details", {})), session_id))
+                db2.commit()
+                q.put(f"data: {json.dumps({'type': 'failed', 'error': result.get('details', {}).get('stopped', False) and 'Stopped by user' or 'Humanization failed'})}\n\n")
+        except Exception as exc:
+            log.error(f"Humanize stream error: {exc}")
+            try:
+                db3 = get_db()
+                db3.execute("UPDATE content_articles SET humanize_status='failed' WHERE article_id=?", (article_id,))
+                db3.execute("UPDATE humanize_sessions SET status='failed',error=? WHERE id=?", (str(exc), session_id))
+                db3.commit()
+            except Exception:
+                pass
+            q.put(f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n")
+        finally:
+            q.put(None)
+
+    async def event_stream():
+        loop = asyncio.get_event_loop()
+        task = loop.run_in_executor(None, _run_sync)
+        while True:
+            item = await loop.run_in_executor(None, q.get)
+            if item is None:
+                break
+            yield item
+        await task
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+class HumanizeControlBody(BaseModel):
+    action: str  # pause | resume | stop
+
+
+@app.post("/api/content/{article_id}/humanize/{session_id}/control", tags=["Content"])
+def humanize_control(article_id: str, session_id: int, body: HumanizeControlBody, user=Depends(current_user)):
+    """Control a running humanization job: pause, resume, or stop."""
+    control = _HUMANIZE_CONTROLS.get(session_id)
+    if not control:
+        raise HTTPException(404, "No active session")
+    if body.action == "pause":
+        control["paused"] = True
+    elif body.action == "resume":
+        control["paused"] = False
+    elif body.action == "stop":
+        control["stopped"] = True
+    else:
+        raise HTTPException(400, f"Unknown action: {body.action}")
+    return {"ok": True, "action": body.action}
+
 
 def _ollama_rewrite(prompt: str, num_predict: int = 2000, num_ctx: int = 4096) -> str:
     """Call Ollama for content rewriting. Returns empty string on failure."""
@@ -8125,6 +8800,39 @@ Return ONLY a valid JSON array of {len(validated)} score objects (same order).""
                     "languages":       _j(sess["languages_supported"] if "languages_supported" in sess.keys() else None, []),
                     "seed_keyword":    sess["seed_keyword"] if "seed_keyword" in sess.keys() else "",
                 }
+
+            # ── Enrich ctx_data from kw2 business profile (fills gaps from KI path) ──
+            kw2_biz_profile = kw2_db.load_business_profile(project_id)
+            if kw2_biz_profile:
+                _mi = kw2_biz_profile.get("manual_input") or {}
+                if not ctx_data.get("usp"):
+                    ctx_data["usp"] = kw2_biz_profile.get("usp") or _mi.get("usp") or ""
+                if not ctx_data.get("target_locations"):
+                    ctx_data["target_locations"] = kw2_biz_profile.get("target_locations") or _mi.get("target_locations") or []
+                if not ctx_data.get("business_type"):
+                    ctx_data["business_type"] = kw2_biz_profile.get("business_type") or "B2C"
+                # Always add these extended fields (not present in KI path)
+                ctx_data["business_locations"] = kw2_biz_profile.get("business_locations") or _mi.get("business_locations") or []
+                ctx_data["audience"] = kw2_biz_profile.get("audience") or []
+                ctx_data["modifiers"] = kw2_biz_profile.get("modifiers") or []
+                ctx_data["negative_scope"] = kw2_biz_profile.get("negative_scope") or []
+                ctx_data["cultural_context"] = _mi.get("cultural_context") or []
+                ctx_data["customer_reviews"] = _mi.get("customer_reviews") or ""
+                ctx_data["confidence_score"] = kw2_biz_profile.get("confidence_score") or 0
+                ctx_data["kw2_languages"] = _mi.get("languages") or kw2_biz_profile.get("languages") or []
+                # From PhaseBI
+                try:
+                    _bi_latest = db.execute(
+                        "SELECT goals, pricing_model, usps, audience_segments FROM kw2_biz_intel "
+                        "WHERE project_id=? ORDER BY rowid DESC LIMIT 1", (project_id,)
+                    ).fetchone()
+                    if _bi_latest:
+                        ctx_data["goals"] = _j(_bi_latest["goals"] if "goals" in _bi_latest.keys() else None, [])
+                        ctx_data["pricing_model"] = _bi_latest["pricing_model"] if "pricing_model" in _bi_latest.keys() else ""
+                        ctx_data["usps"] = _j(_bi_latest["usps"] if "usps" in _bi_latest.keys() else None, [])
+                        ctx_data["audience_segments"] = _j(_bi_latest["audience_segments"] if "audience_segments" in _bi_latest.keys() else None, [])
+                except Exception:
+                    pass
 
             # Also load pillars from pillar_keywords table
             pillar_rows = db.execute(
@@ -20071,7 +20779,8 @@ def generate_batch(project_id: str, body: _BatchGenerateBody, bg: BackgroundTask
 
 class _PopulateCalendarBody(BaseModel):
     weeks: int = 12
-    blogs_per_week: int = 15
+    blogs_per_week: int = 3
+    pillar_quotas: dict = {}   # {pillar_name: blogs_per_week} — per-pillar control
 
 
 @app.post("/api/blogs/{project_id}/populate-calendar", tags=["Blogs"])
@@ -20084,14 +20793,13 @@ def populate_calendar(project_id: str, body: _PopulateCalendarBody, user=Depends
     from datetime import timedelta
     day = datetime.utcnow().date()
     created = 0
-    slot_index = 0
-    for item in queue[:body.weeks * body.blogs_per_week]:
-        kw = item.get("keyword","")
-        pillar = item.get("pillar","")
-        if not kw: continue
-        week_offset = slot_index // body.blogs_per_week
-        day_offset = slot_index % body.blogs_per_week
-        scheduled = (day + timedelta(days=week_offset * 7 + day_offset)).isoformat()
+
+    def _insert(item, scheduled: str):
+        nonlocal created
+        kw = item.get("keyword", "") or item.get("title", "")
+        if not kw:
+            return
+        pillar = item.get("pillar", "")
         bid = f"blog_{hashlib.md5(f'{project_id}{kw}{time.time()}'.encode()).hexdigest()[:12]}"
         try:
             db.execute(
@@ -20101,9 +20809,33 @@ def populate_calendar(project_id: str, body: _PopulateCalendarBody, user=Depends
                  datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat())
             )
             created += 1
-            slot_index += 1
         except Exception:
             pass
+
+    if body.pillar_quotas:
+        # Per-pillar scheduling: each pillar gets its own N blogs/week
+        by_pillar: dict[str, list] = {}
+        for item in queue:
+            p = item.get("pillar", "") or "General"
+            by_pillar.setdefault(p, []).append(item)
+        for week in range(body.weeks):
+            day_slot = 0
+            for pillar, quota in body.pillar_quotas.items():
+                items = by_pillar.get(pillar, [])
+                for _ in range(quota):
+                    if not items:
+                        break
+                    _insert(items.pop(0), (day + timedelta(days=week * 7 + day_slot)).isoformat())
+                    day_slot += 1
+    else:
+        # Total blogs/week distributed round-robin
+        slot_index = 0
+        for item in queue[:body.weeks * body.blogs_per_week]:
+            week_offset = slot_index // body.blogs_per_week
+            day_offset = slot_index % body.blogs_per_week
+            _insert(item, (day + timedelta(days=week_offset * 7 + day_offset)).isoformat())
+            slot_index += 1
+
     db.commit()
     return {"created": created}
 
@@ -20722,12 +21454,20 @@ class _KW2ManualInput(BaseModel):
     geo_scope: str = ""
     business_type: str = ""
     competitor_urls: list[str] = []
+    usp: str = ""
+    business_locations: list[str] = []
+    target_locations: list[str] = []
+    languages: list[str] = []
+    cultural_context: list[str] = []
+    customer_reviews: str = ""
 
 class _KW2CalendarConfig(BaseModel):
     blogs_per_week: int = 3
     duration_weeks: int = 52
     start_date: str | None = None
     seasonal_overrides: dict = {}
+    pillar_quotas: dict = {}        # {pillar_name: blogs_per_week} — per-pillar control
+    use_strategy_ideas: bool = False  # when True, pulls Phase 9 weekly_plan ideas first
 
 
 class _KW2Phase2Body(BaseModel):
@@ -20743,7 +21483,7 @@ class _KW2ReadmeBody(BaseModel):
 
 @app.post("/api/kw2/{project_id}/sessions", tags=["KW2"])
 async def kw2_create_session(project_id: str, body: _KW2SessionCreate, user=Depends(current_user)):
-    """Create a new kw2 session for a project."""
+    """Create a new kw2 session for a project. Pre-populates profile from project table if no profile exists."""
     _validate_project_exists(project_id, user)
     mode = (body.mode or "brand").strip().lower()
     if mode not in {"brand", "expand", "review", "v2"}:
@@ -20754,6 +21494,43 @@ async def kw2_create_session(project_id: str, body: _KW2SessionCreate, user=Depe
                                 name=body.name.strip() if body.name else "",
                                 seed_keywords=seeds)
     session = kw2_db.get_session(sid)
+
+    # ── Pre-seed profile from projects table (skip if profile already exists) ──
+    existing_profile = kw2_db.load_business_profile(project_id)
+    if not existing_profile:
+        db = get_db()
+        proj_row = db.execute(
+            "SELECT business_type, usp, target_locations, business_locations, "
+            "competitor_urls, customer_reviews, audience_personas, language "
+            "FROM projects WHERE project_id=?", (project_id,)
+        ).fetchone()
+        if proj_row:
+            def _p(v):
+                if not v: return []
+                try: return json.loads(v)
+                except: return [s.strip() for s in str(v).split(",") if s.strip()]
+            pre_profile = {
+                "business_type": proj_row["business_type"] or "",
+                "manual_input": {
+                    "usp": proj_row["usp"] or "",
+                    "target_locations": _p(proj_row["target_locations"]),
+                    "business_locations": _p(proj_row["business_locations"]),
+                    "competitor_urls": _p(proj_row["competitor_urls"]),
+                    "customer_reviews": proj_row["customer_reviews"] or "",
+                    "audience_segments": _p(proj_row["audience_personas"]),
+                    "languages": [proj_row["language"]] if proj_row.get("language") else [],
+                },
+            }
+            # Only save if there's meaningful data
+            has_data = any([
+                pre_profile["business_type"],
+                pre_profile["manual_input"]["usp"],
+                pre_profile["manual_input"]["target_locations"],
+                pre_profile["manual_input"]["business_locations"],
+            ])
+            if has_data:
+                kw2_db.save_business_profile(project_id, pre_profile)
+
     return {"session_id": sid, "project_id": project_id, "session": session}
 
 
@@ -20954,6 +21731,7 @@ async def kw2_phase1_analyze(
         competitor_urls=competitor_urls,
         ai_provider=provider,
         force=True,
+        session_id=session_id,
     )
     kw2_db.update_session(session_id, phase1_done=1, current_phase="BI")
 
@@ -20971,6 +21749,135 @@ async def kw2_phase1_analyze(
             log.warning(f"[kw2] Failed to seed BI competitors: {e}")
 
     return {"profile": result}
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/phase1/stream", tags=["KW2"])
+async def kw2_phase1_stream(
+    project_id: str, session_id: str,
+    body: _KW2ManualInput,
+    user=Depends(current_user),
+):
+    """
+    Phase 1 SSE streaming endpoint.
+    Emits real-time progress events: provider selection, rate limits, crawl progress, done/error.
+    Client consumes with EventSource or fetch+ReadableStream.
+    """
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    manual = body.model_dump()
+    provider = session.get("preferred_provider", "auto")
+    url = manual.get("domain") or None
+    competitor_urls = manual.get("competitor_urls") or None
+
+    import queue as _queue_mod
+
+    event_queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def _progress_cb(ev: dict):
+        """Called from the analyzer thread — puts event into asyncio queue thread-safely."""
+        try:
+            loop.call_soon_threadsafe(event_queue.put_nowait, ev)
+        except Exception:
+            pass
+
+    async def _stream():
+        # Warn user if Ollama is selected
+        if provider == "ollama":
+            yield f'data: {json.dumps({"type": "provider_warning", "provider": "ollama", "message": "⚠️ Ollama (local AI) is selected. Phase 1 may take 5–15 minutes on CPU. Switch to Groq in settings for fast results (3–8 seconds)."})}\n\n'
+        else:
+            yield f'data: {json.dumps({"type": "provider_selected", "provider": provider, "message": f"Using provider: {provider}"})}\n\n'
+
+        engine = BusinessIntelligenceEngine()
+
+        # Run analysis in thread, progresss_cb sends events to queue
+        analysis_task = asyncio.create_task(
+            asyncio.to_thread(
+                engine.analyze,
+                project_id,
+                url=url,
+                manual_input=manual,
+                competitor_urls=competitor_urls,
+                ai_provider=provider,
+                force=True,
+                progress_cb=_progress_cb,
+                session_id=session_id,
+            )
+        )
+
+        # Stream events while analysis runs
+        profile = None
+        error_msg = None
+        try:
+            while True:
+                # Poll queue with short timeout so we can yield keepalives and check task completion
+                try:
+                    ev = await asyncio.wait_for(event_queue.get(), timeout=2.0)
+                    yield f"data: {json.dumps(ev)}\n\n"
+                    if ev.get("type") == "done":
+                        profile = ev.get("profile")
+                        break
+                    if ev.get("type") == "providers_exhausted":
+                        # Don't break — wait for analysis_task to raise/return
+                        pass
+                except asyncio.TimeoutError:
+                    # Keepalive ping
+                    yield ": keepalive\n\n"
+                    if analysis_task.done():
+                        break
+        except Exception as e:
+            error_msg = str(e)
+
+        # Ensure analysis_task is awaited
+        try:
+            result = await analysis_task
+            if profile is None:
+                profile = result
+        except Exception as e:
+            error_msg = str(e)
+            log.error(f"[kw2 phase1 stream] analysis failed: {e}")
+            yield f'data: {json.dumps({"type": "error", "message": str(e)})}\n\n'
+            return
+
+        # Drain any remaining events from queue
+        while not event_queue.empty():
+            try:
+                ev = event_queue.get_nowait()
+                yield f"data: {json.dumps(ev)}\n\n"
+            except Exception:
+                break
+
+        if profile:
+            # Update session state
+            kw2_db.update_session(session_id, phase1_done=1, current_phase="BI")
+
+            # Auto-seed competitor URLs into BI competitors table
+            if competitor_urls:
+                try:
+                    from engines.kw2.deep_intel import DeepIntelEngine as _DIE_seed2
+                    _die2 = _DIE_seed2()
+                    existing = {c.get("domain", "") for c in (kw2_db.get_biz_competitors(session_id) or [])}
+                    for curl in competitor_urls:
+                        curl = curl.strip()
+                        if curl and curl not in existing:
+                            _die2.add_competitor(session_id, project_id, curl)
+                except Exception as e:
+                    log.warning(f"[kw2] Failed to seed BI competitors: {e}")
+
+            # Emit final done event with profile (analysis_done might already have sent it,
+            # but send a session_updated marker so frontend knows to proceed)
+            yield f'data: {json.dumps({"type": "session_updated", "phase1_done": True})}\n\n'
+        elif error_msg:
+            yield f'data: {json.dumps({"type": "error", "message": error_msg})}\n\n'
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/kw2/{project_id}/profile", tags=["KW2"])
@@ -21088,7 +21995,7 @@ def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scop
     from engines.intelligent_crawl_engine import IntelligentSiteCrawler
     from engines.kw2.entity_extractor import extract_entities
     from engines.kw2.ai_caller import kw2_ai_call as _ai_call
-    from engines.kw2.constants import GARBAGE_WORDS
+    from engines.kw2.constants import GARBAGE_WORDS, GARBAGE_PHRASES
 
     crawler = IntelligentSiteCrawler()
     db_path = tempfile.mktemp(suffix=".db", prefix="comp_kw_")
@@ -21172,8 +22079,11 @@ def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scop
         cleaned = []
         seen_stems = set()
         for kw, freq in rows:
-            # Filter garbage words (single-word only)
+            # Filter known garbage phrases (multi-word ecommerce/UI noise)
+            if kw in GARBAGE_PHRASES:
+                continue
             words = kw.split()
+            # Filter single garbage words
             if len(words) == 1 and kw in GARBAGE_WORDS:
                 continue
             # Filter too-short
@@ -21182,6 +22092,12 @@ def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scop
             # Filter if all words are garbage
             non_garbage = [w for w in words if w not in GARBAGE_WORDS and len(w) > 2]
             if not non_garbage:
+                continue
+            # Filter phrases where >50% of words are garbage (e.g. "all taxes add")
+            if len(non_garbage) / max(len(words), 1) < 0.5:
+                continue
+            # Filter phrases that are ONLY numeric/price fragments
+            if all(re.sub(r'[0-9.,₹$%]', '', w) == '' for w in words):
                 continue
             # Filter exact duplicates and near-duplicates by sorted words
             stem = " ".join(sorted(non_garbage))
@@ -21204,12 +22120,16 @@ def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scop
             f"geo: {geo_scope or 'India'}) has these pillars: {pillar_str}.\n\n"
             f"From competitor analysis, here are {len(cand_list)} candidate keywords:\n"
             f"{', '.join(cand_list[:300])}\n\n"
-            "Select the TOP 100 most valuable keywords for this business's SEO strategy.\n"
-            "Criteria: commercial intent, relevance to business pillars, realistic to rank for, "
-            "not too generic or too branded.\n\n"
+            "Select the TOP 100 most valuable SEO keywords for this business.\n"
+            "REQUIRED criteria: commercial intent, relevance to business pillars, realistic to rank for.\n\n"
+            "HARD REJECT (score 0, exclude) anything that is:\n"
+            "- Ecommerce UI noise: 'add to cart', 'out of stock', 'your price', 'all taxes', 'inclusive', 'taxes', 'skip'\n"
+            "- Price fragments: 'original price', 'price price', 'inclusive all', 'out original'\n"
+            "- Generic UI words: 'your', 'out', 'all', 'get', 'view', 'back'\n"
+            "- Not a real search keyword someone would type into Google\n\n"
             "Return ONLY valid JSON array of objects (no markdown):\n"
             '[{"keyword": "...", "score": 0-100, "reason": "brief reason"}, ...]\n'
-            "Return exactly 100 items or fewer if not enough quality candidates."
+            "Return only genuinely valuable keywords, 100 or fewer."
         )
         try:
             import threading as _threading
@@ -21235,7 +22155,15 @@ def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scop
                 top_100 = []
         except Exception as e:
             log.warning(f"[competitor-crawl] AI ranking failed: {e}, using frequency-based fallback")
-            top_100 = [{"keyword": c["keyword"], "score": min(100, c["freq"] * 10)} for c in candidates[:100]]
+            # Fallback: use frequency but also filter garbage phrases
+            _fallback = [
+                {"keyword": c["keyword"], "score": min(100, c["freq"] * 10)}
+                for c in candidates
+                if c["keyword"] not in GARBAGE_PHRASES
+                and not any(gw == c["keyword"] or c["keyword"].startswith(gw + " ") or c["keyword"].endswith(" " + gw)
+                            for gw in {"your", "all", "out", "skip", "taxes", "inclusive", "price inclusive", "original price"})
+            ]
+            top_100 = _fallback[:100]
 
         # ── Phase D: Extract content ideas from headings ───────────────
         heading_rows = conn.execute(
@@ -21243,11 +22171,25 @@ def _competitor_crawl_sync(competitor_urls, our_pillars, business_type, geo_scop
         ).fetchall()
         content_ideas = [h for h, _ in heading_rows]
 
+        # Final post-processing: strip any remaining garbage from AI-returned list
+        _garbage_starts = {"your", "all", "out", "skip", "taxes", "inclusive", "price", "original", "add", "view", "get"}
+        _clean_top = []
+        for item in top_100:
+            term = item.get("keyword", "") if isinstance(item, dict) else str(item)
+            if not term or len(term) < 4:
+                continue
+            if term.lower() in GARBAGE_PHRASES:
+                continue
+            first_word = term.lower().split()[0] if term.split() else ""
+            if first_word in _garbage_starts and len(term.split()) <= 2:
+                continue
+            _clean_top.append(item)
+
         return {
             "pages_crawled": pages_crawled,
             "total_keywords": total_raw,
             "cleaned_count": cleaned_count,
-            "top_100": top_100[:100],
+            "top_100": _clean_top[:100],
             "content_ideas": content_ideas[:20],
         }
     finally:
@@ -21284,10 +22226,128 @@ async def kw2_competitor_crawl(
             body.business_type,
             body.geo_scope,
         )
+
+        # Persist top 100 keywords to kw2_biz_competitor_keywords for Phase 2 usage
+        top_kws = result.get("top_100", [])
+        if top_kws:
+            # Use a synthetic competitor_id for Phase 1 crawl results
+            comp_id = f"phase1_crawl_{session_id[:8]}"
+            persist_kws = []
+            for kw in top_kws:
+                term = kw if isinstance(kw, str) else (kw.get("keyword", "") if isinstance(kw, dict) else "")
+                if not term:
+                    continue
+                score = kw.get("score", 70) / 100.0 if isinstance(kw, dict) else 0.7
+                persist_kws.append({
+                    "keyword": term,
+                    "intent": "commercial",
+                    "source_page_type": "competitor_crawl",
+                    "confidence": min(1.0, max(0.1, score)),
+                })
+            if persist_kws:
+                kw2_db.add_biz_competitor_keywords(session_id, comp_id, persist_kws)
+                log.info(f"[competitor-crawl] Persisted {len(persist_kws)} keywords to DB for session {session_id}")
+
         return result
     except Exception as e:
         log.error(f"[competitor-crawl] Error: {e}", exc_info=True)
         raise HTTPException(500, f"Competitor crawl failed: {str(e)[:200]}")
+
+
+class _KW2AddToProfileBody(BaseModel):
+    keywords: list[str] = []
+    target: str = "pillars"  # "pillars" or "modifiers"
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/add-to-profile", tags=["KW2"])
+async def kw2_add_to_profile(
+    project_id: str,
+    session_id: str,
+    body: _KW2AddToProfileBody,
+    user=Depends(current_user),
+):
+    """Add keywords (from competitor crawl or elsewhere) to business profile pillars or modifiers."""
+    _validate_project_exists(project_id, user)
+    if body.target not in ("pillars", "modifiers"):
+        raise HTTPException(400, "target must be 'pillars' or 'modifiers'")
+    if not body.keywords:
+        raise HTTPException(400, "No keywords provided")
+
+    profile = kw2_db.load_business_profile(project_id)
+    if not profile:
+        raise HTTPException(404, "No business profile found")
+
+    existing = set(p.lower() for p in profile.get(body.target, []))
+    added = []
+    for kw in body.keywords:
+        kw = kw.strip()
+        if kw and kw.lower() not in existing:
+            existing.add(kw.lower())
+            profile.setdefault(body.target, []).append(kw)
+            added.append(kw)
+
+    if added:
+        kw2_db.save_business_profile(project_id, profile)
+
+    return {"added": added, "total": len(profile.get(body.target, []))}
+
+
+class _KW2AnalyzeCompetitorKWBody(BaseModel):
+    keywords: list[str] = []
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/analyze-competitor-keywords", tags=["KW2"])
+async def kw2_analyze_competitor_keywords(
+    project_id: str,
+    session_id: str,
+    body: _KW2AnalyzeCompetitorKWBody,
+    user=Depends(current_user),
+):
+    """AI-analyze competitor keywords and classify each as pillar, modifier, or irrelevant."""
+    _validate_project_exists(project_id, user)
+    if not body.keywords:
+        raise HTTPException(400, "No keywords provided")
+
+    profile = kw2_db.load_business_profile(project_id)
+    universe = (profile.get("universe", "") if profile else "") or "Business"
+    current_pillars = (profile.get("pillars", []) if profile else [])
+    business_type = (profile.get("business_type", "") if profile else "")
+
+    from engines.kw2.ai_caller import kw2_ai_call, kw2_extract_json
+
+    prompt = (
+        f"Business: {universe} ({business_type})\n"
+        f"Current pillars: {', '.join(current_pillars[:10])}\n\n"
+        f"Classify each of these competitor keywords into one of three categories:\n"
+        f"- 'pillar': broad product/service category this business should target (e.g. 'black pepper', 'cardamom')\n"
+        f"- 'modifier': qualifying word that combines with pillars to create long-tail keywords (e.g. 'organic', 'wholesale', 'bulk')\n"
+        f"- 'irrelevant': not useful for this business's SEO\n\n"
+        f"Keywords to classify:\n{chr(10).join(body.keywords[:80])}\n\n"
+        f"Return ONLY valid JSON:\n"
+        f'[{{"keyword": "...", "category": "pillar|modifier|irrelevant", "reason": "brief"}}]'
+    )
+
+    try:
+        raw = await asyncio.to_thread(
+            kw2_ai_call, prompt,
+            "You are a JSON-only SEO classification expert. Output only valid JSON array.",
+            provider="auto", max_tokens=3000,
+        )
+        result = kw2_extract_json(raw) or []
+        if not isinstance(result, list):
+            result = []
+    except Exception as e:
+        log.error(f"[analyze-competitor-kw] AI failed: {e}")
+        raise HTTPException(500, f"AI analysis failed: {str(e)[:100]}")
+
+    pillars = [r for r in result if isinstance(r, dict) and r.get("category") == "pillar"]
+    modifiers = [r for r in result if isinstance(r, dict) and r.get("category") == "modifier"]
+    irrelevant = [r for r in result if isinstance(r, dict) and r.get("category") == "irrelevant"]
+
+    return {
+        "pillars": pillars,
+        "modifiers": modifiers,
+        "irrelevant": irrelevant,
+        "total": len(result),
+    }
 
 
 @app.get("/api/kw2/{project_id}/sessions/{session_id}/business-readme", tags=["KW2"])
@@ -21375,6 +22435,14 @@ async def kw2_generate_business_readme(
             if k in ("raw_ai_json", "manual_input"):
                 continue  # skip large nested blobs
             safe_profile[k] = v
+        # Restore pass-through fields from manual_input so README has full context
+        mi = profile.get("manual_input") if isinstance(profile.get("manual_input"), dict) else {}
+        for field in ("usp", "business_locations", "target_locations",
+                       "languages", "cultural_context", "customer_reviews"):
+            if field not in safe_profile or not safe_profile.get(field):
+                val = mi.get(field)
+                if val:
+                    safe_profile[field] = val
 
         prompt = BIZ_README_USER.format(
             profile_json=json.dumps(safe_profile, indent=2, default=str),
@@ -22241,9 +23309,20 @@ async def kw2_phase2_generate(
 
     provider = session.get("preferred_provider", "auto")
     gen = KeywordUniverseGenerator()
+
+    # Load competitor URLs from project (saved during Phase 1)
+    comp_urls = []
+    try:
+        with _get_db() as conn:
+            _row = conn.execute("SELECT competitor_urls FROM projects WHERE project_id=?", (project_id,)).fetchone()
+            if _row:
+                comp_urls = json.loads(dict(_row).get("competitor_urls") or "[]")
+    except Exception:
+        pass
+
     result = await asyncio.to_thread(
         gen.generate, project_id, session_id,
-        competitor_urls=None, ai_provider=provider,
+        competitor_urls=comp_urls or None, ai_provider=provider,
     )
     kw2_db.update_session(session_id, current_phase="3")
     return {"universe": result}
@@ -22299,6 +23378,16 @@ async def kw2_phase2_stream(
     provider = session.get("preferred_provider", "auto")
     gen = KeywordUniverseGenerator()
 
+    # Load competitor URLs from project (saved during Phase 1)
+    _comp_urls_stream = []
+    try:
+        with _get_db() as conn:
+            _crow = conn.execute("SELECT competitor_urls FROM projects WHERE project_id=?", (project_id,)).fetchone()
+            if _crow:
+                _comp_urls_stream = json.loads(dict(_crow).get("competitor_urls") or "[]")
+    except Exception:
+        pass
+
     import queue as _queue
     import threading as _threading
 
@@ -22306,7 +23395,9 @@ async def kw2_phase2_stream(
 
     def _run_sync():
         try:
-            for event in gen.generate_stream(project_id, session_id, ai_provider=provider):
+            for event in gen.generate_stream(project_id, session_id,
+                                              competitor_urls=_comp_urls_stream or None,
+                                              ai_provider=provider):
                 q.put(event)
         except Exception as exc:
             q.put(f"data: {json.dumps({'type': 'error', 'msg': str(exc)})}\n\n")
@@ -22316,10 +23407,18 @@ async def kw2_phase2_stream(
     _threading.Thread(target=_run_sync, daemon=True).start()
 
     async def event_stream():
-        while True:
-            event = await asyncio.to_thread(q.get)
+        import queue as _q_mod
+        stale = 0
+        while stale < 180:  # 180 × 2s = 6 min max silence before giving up
+            try:
+                event = await asyncio.to_thread(q.get, True, 2.0)
+            except _q_mod.Empty:
+                stale += 1
+                yield ": keepalive\n\n"  # SSE comment — keeps proxy/browser connection alive
+                continue
             if event is None:
                 break
+            stale = 0
             yield event
         yield f"data: {json.dumps({'done': True})}\n\n"
 
@@ -22722,11 +23821,21 @@ async def kw2_phase8_calendar(
         raise HTTPException(400, "Phase 7 not complete")
 
     cal = ContentCalendar()
-    result = await asyncio.to_thread(
-        cal.build, project_id, session_id,
-        body.blogs_per_week, body.duration_weeks,
-        body.start_date, body.seasonal_overrides,
-    )
+
+    if body.use_strategy_ideas and session.get("phase9_done"):
+        # Use Phase 9 strategy ideas to build a richer calendar
+        strat_engine = StrategyEngine()
+        strategy = strat_engine.get_strategy(session_id) or {}
+        result = await asyncio.to_thread(
+            cal.build_from_strategy, project_id, session_id, strategy, body.start_date,
+        )
+    else:
+        result = await asyncio.to_thread(
+            cal.build, project_id, session_id,
+            body.blogs_per_week, body.duration_weeks,
+            body.start_date, body.seasonal_overrides,
+            body.pillar_quotas or {},
+        )
     kw2_db.update_session(session_id, current_phase="9")
     return {"calendar": result}
 
@@ -22743,6 +23852,110 @@ async def kw2_get_calendar(
     return {"items": items, "count": len(items)}
 
 
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/calendar/rebuild", tags=["KW2"])
+async def kw2_rebuild_calendar(
+    project_id: str, session_id: str,
+    body: dict = Body(default={}),
+    user=Depends(current_user),
+):
+    """Rebuild content calendar from existing strategy + intelligence questions + keywords.
+    No need to re-run Phase 9 — uses cached strategy output.
+    Accepts optional start_date (ISO string) to anchor article publish dates."""
+    _validate_project_exists(project_id, user)
+    session = kw2_db.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    start_date = body.get("start_date") or None
+
+    # Load existing strategy
+    strat_engine = StrategyEngine()
+    strategy = strat_engine.get_strategy(session_id) or {}
+
+    cal = ContentCalendar()
+    result = await asyncio.to_thread(
+        cal.build_from_strategy, project_id, session_id, strategy, start_date,
+    )
+    return {"calendar": result}
+
+
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/calendar/summary", tags=["KW2"])
+async def kw2_calendar_summary(
+    project_id: str, session_id: str,
+    user=Depends(current_user),
+):
+    """Return calendar analytics: per-pillar counts, by-month, by-intent, and strategy ideas."""
+    _validate_project_exists(project_id, user)
+    conn = kw2_db.get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT pillar, article_type, source, scheduled_date, COALESCE(source,'keyword') as src "
+            "FROM kw2_calendar WHERE session_id=? ORDER BY scheduled_date",
+            (session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Per-pillar counts
+    pillar_map: dict = {}
+    month_map: dict = {}
+    type_map: dict = {}
+    source_map: dict = {}
+    for r in rows:
+        p = (r["pillar"] or "General").strip()
+        pillar_map[p] = pillar_map.get(p, 0) + 1
+        sd = (r["scheduled_date"] or "")[:7]
+        if sd:
+            month_map[sd] = month_map.get(sd, 0) + 1
+        t = r["article_type"] or "topic"
+        type_map[t] = type_map.get(t, 0) + 1
+        s = r["src"] or "keyword"
+        source_map[s] = source_map.get(s, 0) + 1
+
+    total = len(rows)
+    by_pillar = sorted(
+        [{"pillar": p, "count": c, "pct": round(c * 100 / max(total, 1))}
+         for p, c in pillar_map.items()],
+        key=lambda x: -x["count"],
+    )
+    by_month = [{"month": m, "count": c} for m, c in sorted(month_map.items())]
+    by_type = [{"type": t, "count": c} for t, c in sorted(type_map.items(), key=lambda x: -x[1])]
+    by_source = [{"source": s, "count": c} for s, c in sorted(source_map.items(), key=lambda x: -x[1])]
+
+    # Load strategy ideas if Phase 9 is done
+    strategy_ideas: dict = {}
+    session = kw2_db.get_session(session_id)
+    strategy_available = bool(session and session.get("phase9_done"))
+    if strategy_available:
+        try:
+            strat_engine = StrategyEngine()
+            strategy = strat_engine.get_strategy(session_id) or {}
+            strategy_ideas = {
+                "priority_pillars": strategy.get("priority_pillars", [])[:10],
+                "quick_wins": strategy.get("quick_wins", [])[:15],
+                "content_gaps": strategy.get("content_gaps", [])[:15],
+                "weekly_plan_preview": strategy.get("weekly_plan", [])[:8],
+                "strategy_summary": strategy.get("strategy_summary", {}),
+            }
+        except Exception:
+            strategy_available = False
+
+    # Pillar list from business profile (for quota UI)
+    profile = kw2_db.load_business_profile(project_id)
+    profile_pillars = [str(p) for p in (profile.get("pillars") or []) if p]
+
+    return {
+        "total": total,
+        "by_pillar": by_pillar,
+        "by_month": by_month,
+        "by_type": by_type,
+        "by_source": by_source,
+        "strategy_available": strategy_available,
+        "strategy_ideas": strategy_ideas,
+        "profile_pillars": profile_pillars,
+    }
+
+
 # ── KW2 Phase 9: Strategy ───────────────────────────────────────────────────
 
 class _Phase9Body(BaseModel):
@@ -22752,6 +23965,61 @@ class _Phase9Body(BaseModel):
     content_mix: Optional[dict] = None
     publishing_cadence: Optional[list] = None
     extra_prompt: Optional[str] = None
+    pillar_velocity: Optional[dict] = None
+
+
+def _kw2_strategy_prereq_status(session_id: str) -> dict:
+    """Compute readiness snapshot for Phase 9 strategy generation."""
+    validated_keywords = kw2_db.load_validated_keywords(session_id) or []
+    biz_intel = kw2_db.get_biz_intel(session_id) or {}
+
+    has_biz_intel = bool(
+        biz_intel.get("usps")
+        or biz_intel.get("goals")
+        or biz_intel.get("audience_segments")
+        or (biz_intel.get("website_summary") or "").strip()
+        or (biz_intel.get("knowledge_summary") or "").strip()
+    )
+
+    conn = kw2_db.get_conn()
+    try:
+        q_total_row = conn.execute(
+            "SELECT COUNT(1) FROM kw2_intelligence_questions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        q_scored_row = conn.execute(
+            "SELECT COUNT(1) FROM kw2_intelligence_questions "
+            "WHERE session_id=? AND final_score > 0 AND IFNULL(is_duplicate, 0)=0",
+            (session_id,),
+        ).fetchone()
+        clusters_row = conn.execute(
+            "SELECT COUNT(1) FROM kw2_content_clusters WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    return {
+        "has_biz_intel": has_biz_intel,
+        "validated_keywords": len(validated_keywords),
+        "questions": int((q_total_row[0] if q_total_row else 0) or 0),
+        "scored": int((q_scored_row[0] if q_scored_row else 0) or 0),
+        "clusters": int((clusters_row[0] if clusters_row else 0) or 0),
+    }
+
+
+def _kw2_missing_strategy_prereqs(snapshot: dict) -> list[str]:
+    """Return missing prerequisite labels for Phase 9."""
+    missing = []
+    if not snapshot.get("has_biz_intel"):
+        missing.append("Business Intelligence")
+    if int(snapshot.get("validated_keywords", 0) or 0) <= 0:
+        missing.append("Validated Keywords")
+    if int(snapshot.get("questions", 0) or 0) <= 0:
+        missing.append("Intelligence Questions")
+    if int(snapshot.get("scored", 0) or 0) <= 0 or int(snapshot.get("clusters", 0) or 0) <= 0:
+        missing.append("Scored & Clustered")
+    return missing
 
 @app.post("/api/kw2/{project_id}/sessions/{session_id}/phase9", tags=["KW2"])
 async def kw2_phase9_strategy(
@@ -22759,13 +24027,21 @@ async def kw2_phase9_strategy(
     body: _Phase9Body = _Phase9Body(),
     user=Depends(current_user),
 ):
-    """Phase 9: Generate AI-powered SEO strategy."""
+    """Phase 9: Generate AI-powered SEO strategy after Research readiness."""
     _validate_project_exists(project_id, user)
     session = kw2_db.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
-    if not session.get("phase8_done"):
-        raise HTTPException(400, "Phase 8 not complete")
+
+    prereq_snapshot = _kw2_strategy_prereq_status(session_id)
+    missing_prereqs = _kw2_missing_strategy_prereqs(prereq_snapshot)
+    if missing_prereqs:
+        raise HTTPException(
+            409,
+            "Strategy prerequisites not met. Complete: "
+            + ", ".join(missing_prereqs)
+            + ". Open Configure -> Research and finish required steps first.",
+        )
 
     provider = body.ai_provider or session.get("preferred_provider", "auto")
     content_params = {
@@ -22774,6 +24050,7 @@ async def kw2_phase9_strategy(
         "content_mix": body.content_mix,
         "publishing_cadence": body.publishing_cadence,
         "extra_prompt": body.extra_prompt,
+        "pillar_velocity": body.pillar_velocity,
     }
     import time as _time_mod
     _t0 = _time_mod.time()
@@ -22781,6 +24058,16 @@ async def kw2_phase9_strategy(
     result = await asyncio.to_thread(strat.generate, project_id, session_id, provider, content_params)
     _elapsed = round(_time_mod.time() - _t0, 1)
     kw2_db.update_session(session_id, current_phase="9")
+
+    # Auto-rebuild content calendar from strategy's weekly_plan
+    _cal_result = {}
+    try:
+        cal = ContentCalendar()
+        _cal_result = await asyncio.to_thread(
+            cal.build_from_strategy, project_id, session_id, result,
+        )
+    except Exception as _cal_exc:
+        log.warning("[Phase9] Calendar rebuild from strategy failed: %s", _cal_exc)
 
     # Collect AI usage from llm_audit_logs for this run window
     _ai_usage: list[dict] = []
@@ -22813,6 +24100,7 @@ async def kw2_phase9_strategy(
             "module_names": ["2A: Business Analysis", "2B: Keyword Intelligence", "2C: Strategy Builder", "2D: Action Mapping"],
             "total_tokens": _total_tokens,
             "ai_usage": _ai_usage,
+            "calendar_rebuilt": _cal_result,
         },
     }
 
@@ -22899,6 +24187,38 @@ class _QuestionRunBody(BaseModel):
     modules: list[str] | None = None
 
 
+def _kw2_raise_route_error(stage_label: str, exc: Exception):
+    if isinstance(exc, HTTPException):
+        raise exc
+
+    message = (str(exc) or stage_label).strip()
+    lowered = message.lower()
+
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        raise HTTPException(504, f"{stage_label} timed out. Please retry.")
+
+    if isinstance(exc, ValueError):
+        raise HTTPException(400, message)
+
+    if isinstance(exc, sqlite3.OperationalError):
+        if "locked" in lowered or "busy" in lowered:
+            raise HTTPException(503, f"{stage_label} is temporarily busy. Please retry.")
+        raise HTTPException(500, f"{stage_label} failed: {message}")
+
+    if isinstance(exc, ConnectionError) or any(code in lowered for code in ["502", "503", "504", "bad gateway"]):
+        raise HTTPException(502, f"{stage_label} upstream request failed. Please retry.")
+
+    log.exception("[kw2] %s failed: %s", stage_label, message)
+    raise HTTPException(500, f"{stage_label} failed: {message}")
+
+
+async def _kw2_run_in_thread(stage_label: str, fn, *args, **kwargs):
+    try:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    except Exception as exc:
+        _kw2_raise_route_error(stage_label, exc)
+
+
 @app.post("/api/kw2/{project_id}/sessions/{session_id}/questions/run", tags=["KW2"])
 async def kw2_questions_run(
     project_id: str, session_id: str,
@@ -22911,7 +24231,8 @@ async def kw2_questions_run(
     if not session:
         raise HTTPException(404, "Session not found")
     engine = _QuestionEngine()
-    result = await asyncio.to_thread(
+    result = await _kw2_run_in_thread(
+        "Question generation",
         engine.run, project_id, session_id,
         body.ai_provider, body.modules,
     )
@@ -22927,7 +24248,8 @@ async def kw2_questions_enrich(
     """Phase 5: Enrich questions with intent, funnel, geo metadata."""
     _validate_project_exists(project_id, user)
     engine = _QuestionEngine()
-    result = await asyncio.to_thread(
+    result = await _kw2_run_in_thread(
+        "Question enrichment",
         engine.run_enrichment, project_id, session_id, body.ai_provider,
     )
     return result
@@ -22944,7 +24266,11 @@ async def kw2_questions_list(
     """List intelligence questions for a session."""
     _validate_project_exists(project_id, user)
     engine = _QuestionEngine()
-    questions = engine.list_questions(session_id, module, enriched_only, limit)
+    limit = max(1, min(limit, 500))
+    try:
+        questions = engine.list_questions(session_id, module, enriched_only, limit)
+    except Exception as exc:
+        _kw2_raise_route_error("Question listing", exc)
     return {"questions": questions, "count": len(questions)}
 
 
@@ -22955,7 +24281,10 @@ async def kw2_questions_summary(
     """Get question counts by module and enrichment status."""
     _validate_project_exists(project_id, user)
     engine = _QuestionEngine()
-    return engine.get_summary(session_id)
+    try:
+        return engine.get_summary(session_id)
+    except Exception as exc:
+        _kw2_raise_route_error("Question summary", exc)
 
 
 @app.delete("/api/kw2/{project_id}/sessions/{session_id}/questions/{question_id}", tags=["KW2"])
@@ -22965,8 +24294,34 @@ async def kw2_questions_delete(
     """Delete a question."""
     _validate_project_exists(project_id, user)
     engine = _QuestionEngine()
-    engine.delete_question(question_id, session_id)
+    try:
+        engine.delete_question(question_id, session_id)
+    except Exception as exc:
+        _kw2_raise_route_error("Question deletion", exc)
     return {"ok": True}
+
+
+class _PillarGenerateBody(BaseModel):
+    pillar: str
+    count: int = 5
+    ai_provider: str = "auto"
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/intelligence/generate-for-pillar", tags=["KW2"])
+async def kw2_generate_for_pillar(
+    project_id: str, session_id: str,
+    body: _PillarGenerateBody,
+    user=Depends(current_user),
+):
+    """Generate N questions specifically for one product pillar (round-robin expansion)."""
+    _validate_project_exists(project_id, user)
+    engine = _QuestionEngine()
+    result = await _kw2_run_in_thread(
+        "Pillar question generation",
+        engine.generate_for_pillar,
+        project_id, session_id, body.pillar, body.count, body.ai_provider,
+    )
+    return result
 
 
 # ── Expansion Engine routes (Phase 4) ────────────────────────────────────────
@@ -22992,7 +24347,8 @@ async def kw2_expansion_discover(
     """Discover expansion dimensions for this business (AI-driven, no hardcoding)."""
     _validate_project_exists(project_id, user)
     engine = _ExpansionEngine()
-    result = await asyncio.to_thread(
+    result = await _kw2_run_in_thread(
+        "Dimension discovery",
         engine.discover_dimensions, project_id, session_id, body.ai_provider,
     )
     return result
@@ -23007,7 +24363,8 @@ async def kw2_expansion_run(
     """Expand seed questions across discovered dimensions."""
     _validate_project_exists(project_id, user)
     engine = _ExpansionEngine()
-    result = await asyncio.to_thread(
+    result = await _kw2_run_in_thread(
+        "Question expansion",
         engine.run, project_id, session_id,
         body.ai_provider, body.max_depth, body.max_per_node, body.max_total,
     )
@@ -23024,11 +24381,47 @@ async def kw2_expansion_config(
     return engine.get_config(session_id)
 
 
+@app.get("/api/kw2/{project_id}/sessions/{session_id}/expansion/seeds", tags=["KW2"])
+async def kw2_expansion_seeds(
+    project_id: str, session_id: str, user=Depends(current_user)
+):
+    """Return all depth-0 seed questions for frontend-driven per-seed expansion."""
+    _validate_project_exists(project_id, user)
+    engine = _ExpansionEngine()
+    seeds = await _kw2_run_in_thread("Expansion seed loading", engine.all_seeds_for_expansion, session_id)
+    return {"seeds": seeds, "count": len(seeds)}
+
+
+class _ExpandSeedBody(BaseModel):
+    seed_id: str
+    max_per_node: int = 3
+    max_total_remaining: int = 99999
+    ai_provider: str = "auto"
+
+
+@app.post("/api/kw2/{project_id}/sessions/{session_id}/expansion/expand-seed", tags=["KW2"])
+async def kw2_expand_one_seed(
+    project_id: str, session_id: str,
+    body: _ExpandSeedBody,
+    user=Depends(current_user),
+):
+    """Expand a single seed question across all discovered dimensions (used for progress tracking)."""
+    _validate_project_exists(project_id, user)
+    engine = _ExpansionEngine()
+    result = await _kw2_run_in_thread(
+        "Single-seed expansion",
+        engine.expand_seed,
+        session_id, project_id, body.seed_id, body.ai_provider,
+        body.max_per_node, body.max_total_remaining,
+    )
+    return result
+
+
 # ── Dedup + Cluster routes (Phase 6) ─────────────────────────────────────────
 
 
 class _DedupBody(BaseModel):
-    threshold: float = 0.85
+    threshold: float = 0.75
 
 
 @app.post("/api/kw2/{project_id}/sessions/{session_id}/dedup/run", tags=["KW2"])
@@ -23040,7 +24433,7 @@ async def kw2_dedup_run(
     """Run deduplication on all questions."""
     _validate_project_exists(project_id, user)
     engine = _DedupEngine()
-    result = await asyncio.to_thread(engine.run_dedup, session_id, body.threshold)
+    result = await _kw2_run_in_thread("Question deduplication", engine.run_dedup, session_id, body.threshold)
     return result
 
 
@@ -23058,7 +24451,8 @@ async def kw2_dedup_cluster(
     """Cluster deduplicated questions into content topic clusters."""
     _validate_project_exists(project_id, user)
     engine = _DedupEngine()
-    result = await asyncio.to_thread(
+    result = await _kw2_run_in_thread(
+        "Question clustering",
         engine.run_clustering, project_id, session_id,
         body.ai_provider, body.max_clusters,
     )
@@ -23091,7 +24485,7 @@ async def kw2_scoring_run(
     """Score all questions using weighted formula."""
     _validate_project_exists(project_id, user)
     engine = _ScoringEngine()
-    result = await asyncio.to_thread(engine.run, session_id, project_id, body.weights)
+    result = await _kw2_run_in_thread("Question scoring", engine.run, session_id, project_id, body.weights)
     return result
 
 
@@ -23155,7 +24549,9 @@ async def kw2_selection_run(
     """Select the top N diversity-balanced questions."""
     _validate_project_exists(project_id, user)
     engine = _SelectionEngine()
-    result = engine.run(
+    result = await _kw2_run_in_thread(
+        "Question selection",
+        engine.run,
         session_id,
         project_id,
         target_count=body.n,
@@ -23210,6 +24606,9 @@ async def kw2_pipeline_status(project_id: str, session_id: str, user=Depends(cur
             conn.row_factory = _sl3.Row
             cur = conn.execute(query, params)
             return cur.fetchall()
+
+    # Load business profile (for pillars list)
+    profile = _kw2_db_mod.load_business_profile(project_id)
 
     # Questions
     q_rows = _fetch(
@@ -23287,6 +24686,7 @@ async def kw2_pipeline_status(project_id: str, session_id: str, user=Depends(cur
         "selection":  {"count": selected_count},
         "stages": {name: _stage(name) for name in
                    ["generate","enrich","discover","expand","dedup","cluster","score","select"]},
+        "profile_pillars": profile.get("pillars", []) if profile else [],
     }
 
 
