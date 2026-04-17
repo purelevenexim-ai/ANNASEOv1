@@ -2382,6 +2382,8 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
   const [openBrief, setOpenBrief] = useState({})    // keyword → bool (panel open)
   const [rebuilding, setRebuilding] = useState(false)
   const [rebuildResult, setRebuildResult] = useState(null)
+  const PAGE_SIZE = 50
+  const [page, setPage] = useState(0)
 
   const handleRebuildCalendar = async () => {
     setRebuilding(true)
@@ -2417,8 +2419,6 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
     retry: false,
   })
   const articleList = Array.isArray(articlesData) ? articlesData : []
-  const articleMap = {}
-  articleList.forEach(a => { articleMap[(a.keyword || "").toLowerCase()] = a })
 
   const generateMut = useMutation({
     mutationFn: async ({ keyword, title, research_ai }) => {
@@ -2518,6 +2518,15 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
 
   // Primary list: Phase 8 items or weekly_plan-flattened items
   const primaryItems = calItems.length > 0 ? calItems : weeklyItems
+  const calendarKeywords = new Set(primaryItems.map(i => (i.keyword || i.title || "").toLowerCase()))
+  const articleMap = {}
+  articleList
+    .filter(a => calendarKeywords.has((a.keyword || "").toLowerCase()))
+    .forEach(a => { articleMap[(a.keyword || "").toLowerCase()] = a })
+
+  // Reset to page 0 when filter/search/pillar changes, or when calendar reloads
+  useEffect(() => setPage(0), [filter, search, pillarFilter, primaryItems.length])
+
   const pillars = [...new Set(primaryItems.map(i => i.pillar).filter(Boolean))]
 
   const filtered = primaryItems.filter(item => {
@@ -2672,9 +2681,28 @@ function ContentPlanTab({ strat, calendarData, projectId, sessionId, startDate, 
         {filter !== "all" && ` · showing ${filtered.length}`}
       </div>
 
+      {/* Pagination controls */}
+      {Math.ceil(filtered.length / PAGE_SIZE) > 1 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+          <button
+            onClick={() => setPage(p => Math.max(0, p - 1))}
+            disabled={page === 0}
+            style={{ padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`, background: page === 0 ? T.grayLight : "#fff", cursor: page === 0 ? "not-allowed" : "pointer", fontSize: 12, color: page === 0 ? T.textSoft : T.text }}
+          >← Prev</button>
+          <span style={{ color: T.textSoft }}>
+            Page {page + 1} of {Math.ceil(filtered.length / PAGE_SIZE)}
+          </span>
+          <button
+            onClick={() => setPage(p => Math.min(Math.ceil(filtered.length / PAGE_SIZE) - 1, p + 1))}
+            disabled={page >= Math.ceil(filtered.length / PAGE_SIZE) - 1}
+            style={{ padding: "4px 12px", borderRadius: 6, border: `1px solid ${T.border}`, background: page >= Math.ceil(filtered.length / PAGE_SIZE) - 1 ? T.grayLight : "#fff", cursor: page >= Math.ceil(filtered.length / PAGE_SIZE) - 1 ? "not-allowed" : "pointer", fontSize: 12, color: page >= Math.ceil(filtered.length / PAGE_SIZE) - 1 ? T.textSoft : T.text }}
+          >Next →</button>
+        </div>
+      )}
+
       {/* Article grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gap: 10 }}>
-        {filtered.slice(0, 80).map((item, i) => {
+        {filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((item, i) => {
           const kw = item.keyword || item.title || ""
           const art = articleMap[kw.toLowerCase()]
           const gs = genStatus[kw]
