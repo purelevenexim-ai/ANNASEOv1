@@ -11,16 +11,12 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from "react"
 import { create } from "zustand"
 import { useQuery, useMutation, useQueryClient, QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import KeywordInputPage from "./KeywordInput"
-import KeywordWorkflow from "./KeywordWorkflow"
 import StrategyPage from "./StrategyPage"
 import StrategyIntelligenceHub from "./StrategyIntelligenceHub"
 import DashboardPage from "./DashboardPage"
 import ContentPage from "./ContentPage"
 import PromptEditorPage from "./PromptEditorPage"
 import KwPage from "./kw2/KwPage"
-import AuditPage from "./AuditPage"
-import PagesPage from "./PagesPage"
 import GscSetupPage from "./gsc/GscSetupPage"
 import GscSearchPage from "./gsc/GscSearchPage"
 import Notification from "./components/Notification"
@@ -592,343 +588,6 @@ function RunCards({ runs, activeProject, onResumeRun }) {
           </div>
         )
       })}
-    </div>
-  )
-}
-
-// PAGE: KEYWORD UNIVERSE — 20-phase runner with editable gates
-// ─────────────────────────────────────────────────────────────────────────────
-function KeywordsPage() {
-  const { activeProject } = useStore()
-  const qclient = useQueryClient()
-  const [seed, setSeed] = useState("")
-  const [runId, setRunId] = useState(null)
-  const [events, setEvents] = useState([])
-  const [runStatus, setRunStatus] = useState("idle") // idle | running | waiting_gate | complete | error
-  const [gateData, setGateData] = useState(null)
-  const [gateName, setGateName] = useState(null)
-  // editable state per gate
-  const [editedKeywords, setEditedKeywords] = useState("")       // textarea for universe_keywords
-  const [editedClusters, setEditedClusters] = useState([])       // [{name,checked}] for pillars
-  const esRef = useRef(null)
-  const { data: runs, refetch: refetchRuns } = useQuery({ queryKey: ["runs", activeProject], queryFn: () => api.get(`/api/projects/${activeProject}/runs`), enabled: !!activeProject })
-
-  const startSSE = (rid) => {
-    if (esRef.current) esRef.current.close()
-    const es = new EventSource(`${API}/api/runs/${rid}/stream`)
-    esRef.current = es
-    es.onmessage = (e) => {
-      const ev = JSON.parse(e.data)
-      ev.ts = new Date().toLocaleTimeString()
-      setEvents(prev => [...prev, ev])
-      if (ev.type === "gate") {
-        setGateData(ev.data); setGateName(ev.gate); setRunStatus("waiting_gate")
-        if (ev.gate === "universe_keywords") setEditedKeywords((ev.data?.keywords || []).join("\n"))
-        if (ev.gate === "pillars") setEditedClusters((ev.data?.clusters || []).map(c => ({ name: c, checked: true })))
-      }
-      if (ev.type === "complete") { setRunStatus("complete"); es.close(); refetchRuns() }
-      if (ev.type === "error") { setRunStatus("error"); es.close(); refetchRuns() }
-    }
-    es.onerror = () => { setRunStatus("error"); es.close() }
-  }
-
-  const startRun = async () => {
-    if (!seed.trim() || !activeProject) return
-    setEvents([]); setRunStatus("running"); setGateData(null); setGateName(null)
-    const data = await api.post(`/api/projects/${activeProject}/runs`, { seed: seed.trim(), language: "english", region: "india" })
-    if (!data?.run_id) { setRunStatus("error"); return }
-    setRunId(data.run_id)
-    startSSE(data.run_id)
-  }
-
-  const confirmGate = async (payload) => {
-    await api.post(`/api/runs/${runId}/confirm/${gateName}`, payload)
-    setRunStatus("running"); setGateData(null); setGateName(null)
-  }
-
-  const confirmKeywords = () => {
-    const kws = editedKeywords.split("\n").map(k => k.trim()).filter(Boolean)
-    confirmGate({ keywords: kws })
-  }
-
-  const confirmPillars = () => {
-    const removed = editedClusters.filter(c => !c.checked).map(c => c.name)
-    confirmGate({ removed_clusters: removed })
-  }
-
-  const statusColor = { idle: T.gray, running: T.teal, waiting_gate: T.amber, complete: T.teal, error: T.red }
-
-  return (
-    <div>
-      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Keyword Universe</div>
-
-      {/* Run starter */}
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Run 20-phase keyword universe</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input value={seed} onChange={e=>setSeed(e.target.value)} placeholder="Enter seed keyword (e.g. turmeric)"
-            onKeyDown={e => e.key === "Enter" && startRun()}
-            style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 13 }}/>
-          <Btn onClick={startRun} variant="primary" disabled={runStatus === "running"}>
-            {runStatus === "running" ? "Running..." : "Start run"}
-          </Btn>
-        </div>
-      </Card>
-
-      {/* Gate: universe_keywords — editable keyword list after P3 */}
-      {runStatus === "waiting_gate" && gateName === "universe_keywords" && (
-        <Card style={{ marginBottom: 16, border: `1.5px solid ${T.amber}` }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: T.amber }}>Gate A — P3 Keywords</div>
-              <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
-                {editedKeywords.split("\n").filter(Boolean).length} keywords ready for P4–P9.
-                Edit the list below — remove irrelevant ones, add new ones (one per line).
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Btn onClick={() => confirmGate({ keywords: gateData?.keywords || [] })} small>Skip edits</Btn>
-              <Btn onClick={confirmKeywords} variant="success" small>
-                ✓ Confirm {editedKeywords.split("\n").filter(Boolean).length} keywords → P4
-              </Btn>
-            </div>
-          </div>
-          <textarea
-            value={editedKeywords}
-            onChange={e => setEditedKeywords(e.target.value)}
-            rows={12}
-            style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)",
-                     fontSize: 12, fontFamily: "monospace", resize: "vertical", boxSizing: "border-box",
-                     background: "#fafafa", lineHeight: 1.6 }}
-            placeholder="One keyword per line…"
-          />
-          <div style={{ marginTop: 6, fontSize: 11, color: T.gray }}>
-            Tip: Remove keywords that are off-topic, too broad, or low-value before continuing.
-          </div>
-        </Card>
-      )}
-
-      {/* Gate: pillars — cluster checklist after P9 */}
-      {runStatus === "waiting_gate" && gateName === "pillars" && (
-        <Card style={{ marginBottom: 16, border: `1.5px solid ${T.amber}` }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: T.amber }}>Gate B — Pillar Review</div>
-              <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
-                {editedClusters.filter(c=>c.checked).length}/{editedClusters.length} pillars selected.
-                Uncheck any pillar to remove it from the content plan.
-              </div>
-            </div>
-            <Btn onClick={confirmPillars} variant="success" small>
-              ✓ Confirm {editedClusters.filter(c=>c.checked).length} pillars → P10
-            </Btn>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-            {editedClusters.map((c, i) => (
-              <label key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
-                borderRadius: 8, background: c.checked ? T.tealLight : "#f5f5f5",
-                cursor: "pointer", fontSize: 12, fontWeight: c.checked ? 500 : 400,
-                color: c.checked ? T.teal : T.gray, border: `0.5px solid ${c.checked ? T.teal : "transparent"}` }}>
-                <input type="checkbox" checked={c.checked}
-                  onChange={() => setEditedClusters(prev => prev.map((x,j) => j===i ? {...x,checked:!x.checked} : x))}
-                  style={{ accentColor: T.teal }}/>
-                {c.name}
-              </label>
-            ))}
-          </div>
-        </Card>
-      )}
-
-      {/* Gate: content_calendar — confirm calendar */}
-      {runStatus === "waiting_gate" && gateName === "content_calendar" && (
-        <Card style={{ marginBottom: 16, border: `1.5px solid ${T.amber}` }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: T.amber }}>Gate C — Content Calendar</div>
-              <div style={{ fontSize: 11, color: T.gray, marginTop: 2 }}>
-                {gateData?.calendar_count || 0} articles planned. Review and confirm to start generation.
-              </div>
-            </div>
-            <Btn onClick={() => confirmGate(gateData || {})} variant="success" small>
-              ✓ Confirm and generate content
-            </Btn>
-          </div>
-          <pre style={{ fontSize: 11, color: T.gray, background: "#f8f8f8", padding: 10, borderRadius: 8,
-                        maxHeight: 200, overflow: "auto", margin: 0 }}>
-            {JSON.stringify(gateData, null, 2)}
-          </pre>
-        </Card>
-      )}
-
-      {/* SSE Console */}
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
-          Engine console
-          {runStatus === "running" && <span style={{ width: 7, height: 7, borderRadius: "50%", background: T.teal, display: "inline-block", animation: "pulse 1s infinite" }}/>}
-          {runStatus === "waiting_gate" && <Badge color="amber">Waiting for review</Badge>}
-          {runStatus === "complete" && <Badge color="teal">Complete</Badge>}
-          {runStatus === "error" && <Badge color="red">Error</Badge>}
-        </div>
-        <SSEConsole events={events}/>
-      </Card>
-
-      {/* Past runs — expandable cards */}
-      {runs?.length > 0 && (
-        <Card>
-          <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Recent runs</div>
-          <RunCards runs={runs} activeProject={activeProject} onResumeRun={(r) => {
-            setSeed(r.seed)
-            setRunId(r.run_id)
-            setRunStatus(r.status)
-            setEvents([{ type: "phase_log", payload: { msg: `Resumed view of run: ${r.seed}` } }])
-            startSSE(r.run_id)
-          }} />
-        </Card>
-      )}
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE: KEYWORD TREE (P3) — D3.js universe explorer
-// ─────────────────────────────────────────────────────────────────────────────
-function KeywordTreePage() {
-  const { activeProject } = useStore()
-  const svgRef = useRef()
-  const [filter, setFilter] = useState("")
-  const [intentFilter, setIntentFilter] = useState("all")
-
-  const { data: graphData, isLoading } = useQuery({
-    queryKey: ["knowledge-graph", activeProject],
-    queryFn: () => activeProject ? api.get(`/api/projects/${activeProject}/knowledge-graph`) : Promise.resolve(null),
-    enabled: !!activeProject
-  })
-
-  const treeData = graphData || {
-    name: activeProject ? "Keyword Universe" : "Select a project",
-    children: []
-  }
-
-  useEffect(() => {
-    // D3 tree rendering would go here
-    // Simplified version using SVG directly
-    const svg = svgRef.current
-    if (!svg) return
-    // D3 is loaded via CDN in index.html
-  }, [treeData])
-
-  const renderNode = (node, depth = 0, index = 0, total = 1) => {
-    const colors = { pillar: T.purple, cluster: T.teal, keyword: T.gray }
-    const c = colors[node.type] || T.gray
-    const visible = !filter || node.name.toLowerCase().includes(filter.toLowerCase())
-    if (!visible) return null
-    return (
-      <div key={node.name} style={{ marginLeft: depth * 20, marginBottom: 3 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", borderRadius: 7,
-          background: depth === 0 ? T.grayLight : "transparent", cursor: "pointer" }}
-          onClick={() => {}}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: c, flexShrink: 0 }}/>
-          <span style={{ fontSize: 12, color: depth === 0 ? "#1a1a1a" : T.gray, fontWeight: depth < 2 ? 500 : 400 }}>
-            {node.name}
-          </span>
-          {node.type && <Badge color={node.type === "pillar" ? "purple" : node.type === "cluster" ? "teal" : "gray"} size="xs">{node.type}</Badge>}
-          {node.intent && <Badge color={node.intent === "transactional" ? "amber" : "gray"} size="xs">{node.intent}</Badge>}
-          {node.score && <span style={{ marginLeft: "auto", fontSize: 10, color: node.score >= 80 ? T.teal : T.amber }}>{node.score}</span>}
-        </div>
-        {node.children?.map((child, i) => renderNode(child, depth + 1, i, node.children.length))}
-      </div>
-    )
-  }
-
-  return (
-    <div>
-      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Keyword Tree</div>
-      <Card style={{ marginBottom: 12 }}>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Filter keywords..."
-            style={{ flex: 1, padding: "6px 10px", borderRadius: 8, border: "0.5px solid rgba(0,0,0,0.15)", fontSize: 12 }}/>
-          {["all","informational","transactional","question","comparison"].map(i => (
-            <Btn key={i} small onClick={() => setIntentFilter(i)}
-              variant={intentFilter === i ? "primary" : "default"}>{i}</Btn>
-          ))}
-        </div>
-      </Card>
-      <Card style={{ minHeight: 400 }}>
-        <svg ref={svgRef} style={{ display: "none" }}/>
-        {isLoading ? (
-          <LoadingSpinner/>
-        ) : !treeData.children || treeData.children.length === 0 ? (
-          <div style={{ color: T.gray, padding: 20, textAlign: "center", fontSize: 13 }}>No keyword universe data yet. Run a keyword extraction first.</div>
-        ) : (
-          renderNode(treeData)
-        )}
-      </Card>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// UNIFIED KEYWORD PAGE — tabs: Workflow | Keyword Tree | Rankings
-// ─────────────────────────────────────────────────────────────────────────────
-function KeywordsUnifiedPage() {
-  const { activeProject, setPage } = useStore()
-  const [tab, setTab] = useState("workflow")
-  const [strategySummary, setStrategySummary] = useState(null)
-
-  useEffect(() => {
-    let active = true
-    if (!activeProject) return
-    api.get(`/api/strategy/${activeProject}/latest`).then(r => {
-      if (!active) return
-      setStrategySummary(r)
-    }).catch(() => {})
-    return () => { active = false }
-  }, [activeProject])
-
-  const TABS = [
-    { id: "workflow", label: "Workflow",     desc: "7-step keyword wizard" },
-    { id: "tree",     label: "Keyword Tree", desc: "Explore universe visually" },
-    { id: "rankings", label: "Rankings",     desc: "GSC keyword positions" },
-  ]
-
-  return (
-    <div>
-      <div style={{ fontSize: 18, fontWeight: 700, color: T.text, marginBottom: 16 }}>Keywords</div>
-
-      {strategySummary && strategySummary.result_json && (
-        <div style={{ marginBottom: 14 }}>
-          <Card>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700 }}>Strategy: {strategySummary.result_json.strategy?.strategy_summary?.headline || '—'}</div>
-                <div style={{ fontSize: 12, color: T.gray }}>{(strategySummary.result_json.strategy?.priority_personas || []).slice(0,3).map(p => p.persona || p).join(', ')}</div>
-              </div>
-              <div>
-                <Btn small onClick={() => setPage('strategy')}>Edit Strategy</Btn>
-              </div>
-            </div>
-          </Card>
-        </div>
-      )}
-      {/* Tab bar */}
-      <div style={{ display: "flex", gap: 0, borderBottom: `2px solid ${T.border}`, marginBottom: 24 }}>
-        {TABS.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{
-            padding: "10px 20px", border: "none", background: "none", cursor: "pointer",
-            fontSize: 13, fontWeight: tab === t.id ? 700 : 500,
-            color: tab === t.id ? T.purple : T.gray,
-            borderBottom: `3px solid ${tab === t.id ? T.purple : "transparent"}`,
-            marginBottom: -2, transition: "color 0.12s",
-          }}>
-            {t.label}
-            {tab !== t.id && <div style={{ fontSize: 10, color: T.gray, fontWeight: 400, marginTop: 1 }}>{t.desc}</div>}
-          </button>
-        ))}
-      </div>
-
-      {tab === "workflow" && <KeywordWorkflow projectId={activeProject} onGoToCalendar={() => setPage("blogs")} setPage={setPage}/>}
-      {tab === "tree"     && <KeywordTreePage/>}
-      {tab === "rankings" && <RankingsPage/>}
     </div>
   )
 }
@@ -2094,7 +1753,7 @@ function NewProjectPage() {
     onSuccess: (data) => {
       qclient.invalidateQueries(["projects"])
       setProject(data.project_id)
-      setPage("keywords")
+      setPage("kw2")
     }
   })
 
@@ -2257,6 +1916,12 @@ function BlogCalendarPage() {
   const [generating, setGenerating] = useState(false)
   const [populating, setPopulating] = useState(false)
   const [msg, setMsg] = useState("")
+  // Populate config
+  const [showPopConfig, setShowPopConfig] = useState(false)
+  const [cadenceMode, setCadenceMode] = useState("total") // "total"|"per_pillar"
+  const [popWeeks, setPopWeeks] = useState(12)
+  const [popBPW, setPopBPW] = useState(3)
+  const [pillarQuotas, setPillarQuotas] = useState({})
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
   const year = new Date().getFullYear()
 
@@ -2331,9 +1996,17 @@ function BlogCalendarPage() {
 
   const populateFromStrategy = async () => {
     setPopulating(true); setMsg("")
-    const r = await api.post(`/api/blogs/${activeProject}/populate-calendar`, { weeks: 12, blogs_per_week: 15 })
+    const body = cadenceMode === "per_pillar" && Object.keys(pillarQuotas).length
+      ? { weeks: popWeeks, blogs_per_week: popBPW, pillar_quotas: pillarQuotas }
+      : { weeks: popWeeks, blogs_per_week: popBPW }
+    const r = await api.post(`/api/blogs/${activeProject}/populate-calendar`, body)
     setPopulating(false)
-    setMsg(r?.created ? `Created ${r.created} blog stubs from strategy.` : (typeof r?.detail === 'string' ? r.detail : "Error — run strategy first"))
+    if (r?.created) {
+      setMsg(`✓ Created ${r.created} blog stubs from strategy.`)
+      setShowPopConfig(false)
+    } else {
+      setMsg(typeof r?.detail === "string" ? r.detail : "No strategy found — open Strategy Hub and run strategy first.")
+    }
     qclient.invalidateQueries(["blog-calendar", activeProject])
   }
 
@@ -2345,13 +2018,93 @@ function BlogCalendarPage() {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <div style={{ fontSize: 20, fontWeight: 600 }}>Content Calendar</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {msg && <span style={{ fontSize: 11, color: T.teal, alignSelf: "center" }}>{msg}</span>}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {msg && (
+            <span style={{ fontSize: 11, color: msg.startsWith("✓") ? T.teal : "#dc2626", alignSelf: "center", maxWidth: 300 }}>
+              {msg}
+            </span>
+          )}
+          <Btn small onClick={() => setShowPopConfig(v => !v)}>
+            {showPopConfig ? "✕ Close" : "⚙ Configure"}
+          </Btn>
           <Btn small variant="primary" onClick={populateFromStrategy} disabled={populating}>
-            {populating ? "..." : "Populate from Strategy"}
+            {populating ? "Populating…" : "Populate from Strategy"}
           </Btn>
         </div>
       </div>
+
+      {/* Populate config panel */}
+      {showPopConfig && (
+        <div style={{ marginBottom: 16, padding: 14, background: "#f8fafc", border: "0.5px solid rgba(0,0,0,0.12)", borderRadius: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: T.purpleDark, marginBottom: 10 }}>Populate Calendar Settings</div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+            <label style={{ fontSize: 12 }}>
+              Weeks to plan
+              <div>
+                <input type="number" min={1} max={52} value={popWeeks}
+                  onChange={e => setPopWeeks(+e.target.value)}
+                  style={{ marginTop: 4, padding: "5px 8px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 12, width: 80 }} />
+              </div>
+            </label>
+
+            <div>
+              <div style={{ fontSize: 12, marginBottom: 6 }}>Cadence mode</div>
+              <div style={{ display: "flex", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 6, overflow: "hidden" }}>
+                {[["total", "Total/week"], ["per_pillar", "Per Pillar"]].map(([mode, label]) => (
+                  <button key={mode} onClick={() => {
+                    setCadenceMode(mode)
+                    if (mode === "per_pillar" && pillars.length && !Object.keys(pillarQuotas).length) {
+                      const init = {}
+                      pillars.forEach((p, i) => { init[p] = i === 0 ? 2 : 1 })
+                      setPillarQuotas(init)
+                    }
+                  }} style={{
+                    padding: "5px 12px", fontSize: 12, cursor: "pointer", border: "none",
+                    background: cadenceMode === mode ? T.purple : "#fff",
+                    color: cadenceMode === mode ? "#fff" : T.gray,
+                  }}>{label}</button>
+                ))}
+              </div>
+            </div>
+
+            {cadenceMode === "total" ? (
+              <label style={{ fontSize: 12 }}>
+                Blogs/week
+                <div>
+                  <input type="number" min={1} max={14} value={popBPW}
+                    onChange={e => setPopBPW(+e.target.value)}
+                    style={{ marginTop: 4, padding: "5px 8px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 6, fontSize: 12, width: 80 }} />
+                </div>
+              </label>
+            ) : (
+              <div>
+                <div style={{ fontSize: 12, marginBottom: 6 }}>Blogs/week per pillar</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 160, overflow: "auto" }}>
+                  {pillars.map(p => (
+                    <label key={p} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                      <span style={{ width: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p}</span>
+                      <input type="number" min={0} max={7}
+                        value={pillarQuotas[p] ?? 1}
+                        onChange={e => setPillarQuotas(q => ({ ...q, [p]: +e.target.value }))}
+                        style={{ padding: "4px 6px", border: "0.5px solid rgba(0,0,0,0.15)", borderRadius: 4, fontSize: 12, width: 55 }} />
+                      <span style={{ fontSize: 11, color: T.gray }}>/wk</span>
+                    </label>
+                  ))}
+                  {!pillars.length && <span style={{ fontSize: 11, color: T.gray }}>No pillars found — run strategy first.</span>}
+                  {pillars.length > 0 && (
+                    <div style={{ fontSize: 11, color: T.gray, borderTop: "0.5px solid rgba(0,0,0,0.1)", paddingTop: 4, marginTop: 2 }}>
+                      Total: <strong>{Object.values(pillarQuotas).reduce((s, v) => s + (+v || 0), 0)}</strong>/week
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+          <div style={{ marginTop: 10, fontSize: 11, color: T.gray }}>
+            Requires a completed Strategy Hub run for this project.
+          </div>
+        </div>
+      )}
 
       {/* Stats bar */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 16 }}>
@@ -2482,17 +2235,26 @@ function BlogCalendarPage() {
           {pillars.length > 0 && (
             <div style={{ marginTop: 20 }}>
               <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Pillar Status</div>
-              {pillars.map(p => {
+              {pillars.map((p, pi) => {
                 const counts = stats?.by_pillar?.[p] || {}
+                const total = (counts.published || 0) + (counts.frozen || 0) + (counts.draft || 0) + (counts.generating || 0)
+                const pubPct = total ? Math.round(((counts.published || 0) / total) * 100) : 0
+                const COLORS = ["#7c3aed","#1d9e75","#b45309","#2563eb","#dc2626"]
                 return (
-                  <div key={p} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0",
-                    borderBottom: "0.5px solid rgba(0,0,0,0.06)", fontSize: 11 }}>
-                    <span style={{ fontWeight: 500 }}>{p}</span>
-                    <span style={{ color: T.gray }}>
-                      <span style={{ color: T.teal }}>{counts.published || 0} pub</span>
-                      {" · "}{counts.frozen || 0} frozen
-                      {" · "}{(counts.draft || 0) + (counts.generating || 0)} draft
-                    </span>
+                  <div key={p} style={{ marginBottom: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
+                      <span style={{ fontWeight: 500 }}>{p}</span>
+                      <span style={{ color: T.gray }}>
+                        <span style={{ color: T.teal }}>{counts.published || 0} pub</span>
+                        {" · "}{counts.frozen || 0} frozen
+                        {" · "}{(counts.draft || 0) + (counts.generating || 0)} draft
+                      </span>
+                    </div>
+                    {total > 0 && (
+                      <div style={{ height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{ width: `${pubPct}%`, height: "100%", background: COLORS[pi % COLORS.length] }} />
+                      </div>
+                    )}
                   </div>
                 )
               })}
@@ -2785,23 +2547,16 @@ function SystemGraphPage() {
 
 const NAV = [
   { id: "dashboard",    label: "Dashboard" },
-  { id: "keywords",     label: "Keywords" },
-  { id: "kw2",          label: "Keywords v2" },
+  { id: "kw2",          label: "Keywords" },
   { id: "strategy-hub", label: "Strategy Hub" },
   { id: "content",      label: "Content" },
-  { id: "audit",        label: "🔬 Audit" },
   { id: "blogs",        label: "Content Calendar" },
   { id: "graph",        label: "System Graph" },
   { id: "seo-checker",  label: "SEO Checker" },
   { id: "quality",      label: "Quality" },
   { id: "prompts",      label: "Prompts" },
-  { id: "rsd",          label: "Research & Dev" },
-  { id: "bug-fixer",    label: "Bug Fixer" },
-  { id: "queue",        label: "Queue" },
-  { id: "errors",       label: "Errors" },
   { id: "gsc-setup",    label: "🔍 GSC Setup" },
   { id: "gsc-search",   label: "🔎 GSC Search" },
-  { id: "pages",        label: "📄 Pages" },
   { id: "settings",     label: "⚙ Settings" },
 ]
 
@@ -3634,7 +3389,6 @@ function App() {
 
   const pages = {
     dashboard:    <DashboardPage/>,
-    "keywords":   <KeywordsUnifiedPage/>,
     "kw2":        <KwPage projectId={activeProject}/>,
     strategy:     <StrategyPage projectId={activeProject} setPage={setPage}/>,
     "strategy-hub": <StrategyIntelligenceHub projectId={activeProject} setPage={setPage}/>,
@@ -3644,16 +3398,10 @@ function App() {
     "seo-checker":<SEOCheckerPage/>,
     quality:      <QualityDashboard/>,
     prompts:      <PromptEditorPage/>,
-    "rsd":        <RSDPage/>,
-    "bug-fixer":  <BugFixerPage/>,
     "new-project":<NewProjectPage/>,
-    queue:        <QueueDashboard/>,
-    errors:       <ErrorsDashboard/>,
     "gsc-setup":  <GscSetupPage projectId={activeProject}/>,
     "gsc-search": <GscSearchPage projectId={activeProject}/>,
     settings:     <SettingsPage/>,
-    pages:        <PagesPage setPage={setPage}/>,
-    audit:        <AuditPage/>,
   }
 
   return (
