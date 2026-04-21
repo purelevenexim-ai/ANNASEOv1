@@ -1,8 +1,9 @@
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { T, api, Badge, Btn, LoadingSpinner } from "../App"
 import { useArticlePolling } from "../hooks/useArticlePolling"
 import { usePipelineQuery } from "../hooks/usePipelineQuery"
+import GenerationSummaryModal from "./GenerationSummaryModal"
 
 // ── Status helpers ─────────────────────────────────────────────────────────────
 const STATUS_COLOR = {
@@ -96,6 +97,7 @@ function CompactPipelineProgress({ articleId }) {
 // ── Article list item ──────────────────────────────────────────────────────────
 function ArticleItem({ article: a, isSelected, onSelect, onRetry, onDelete, onEdit, onRegenerate, isChecked, onCheck }) {
   const ptIcon = { article: "📝", homepage: "🏠", product: "🛍", about: "👥", landing: "🎯", service: "🔧" }[a.page_type] || ""
+  const [showError, setShowError] = useState(false)
   return (
     <div
       onClick={onSelect}
@@ -145,11 +147,39 @@ function ArticleItem({ article: a, isSelected, onSelect, onRetry, onDelete, onEd
               Score:{Math.round(a.seo_score)}
             </span>
           )}
+          {a.word_count > 0 && (
+            <span style={{ fontSize: 9, color: T.textSoft }}>
+              {a.word_count.toLocaleString()}w
+            </span>
+          )}
         </div>
       </div>
       {/* Mini pipeline progress for generating articles */}
       {a.status === "generating" && (
         <CompactPipelineProgress articleId={a.article_id} />
+      )}
+      {/* Failure reason — collapsible */}
+      {a.status === "failed" && (
+        <div style={{ marginTop: 5 }}>
+          <button
+            onClick={e => { e.stopPropagation(); setShowError(v => !v) }}
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              fontSize: 10, color: "#dc2626", padding: 0, display: "flex", alignItems: "center", gap: 3,
+            }}
+          >
+            {showError ? "▾" : "▸"} Why failed?
+          </button>
+          {showError && (
+            <div style={{
+              marginTop: 4, padding: "6px 8px", borderRadius: 6,
+              background: "#fef2f2", border: "1px solid #fecaca",
+              fontSize: 10, color: "#991b1b", lineHeight: 1.5, wordBreak: "break-word",
+            }}>
+              {a.error_message || "No error details stored — service may have restarted during generation."}
+            </div>
+          )}
+        </div>
       )}
       <div style={{ display: "flex", gap: 4, marginTop: 6, justifyContent: "flex-end" }}>
         {(a.status === "failed" || a.status === "generating") && (
@@ -177,9 +207,40 @@ function ArticleItem({ article: a, isSelected, onSelect, onRetry, onDelete, onEd
 // ── Article List Panel ─────────────────────────────────────────────────────────
 export default function ArticleListPanel({ projectId, selected, onSelect, onEditMeta, onShowGenModal, onShowPrompts, onTestKeyword }) {
   const [bulkSelected, setBulkSelected] = useState([])
+  const [searchQuery, setSearchQuery] = useState("")
+  const [statusFilter, setStatusFilter] = useState("all")
+  const [sortBy, setSortBy] = useState("newest")
+  const [summaryQueue, setSummaryQueue] = useState([])
+  const prevStatusMap = useRef({})
   const qclient = useQueryClient()
 
   const { data: articles, isLoading } = useArticlePolling(projectId)
+
+  // Detect when any article transitions out of "generating" and show summary modal
+  useEffect(() => {
+    if (!articles) return
+    const prev = prevStatusMap.current
+    for (const a of articles) {
+      const wasGenerating = prev[a.article_id] === "generating"
+      const isNowDone = a.status !== "generating"
+      if (wasGenerating && isNowDone) {
+        api.get(`/api/content/${a.article_id}/generation-summary`)
+          .then(data => { if (data) setSummaryQueue(q => [...q, data]) })
+          .catch(() => {
+            setSummaryQueue(q => [...q, {
+              article_id: a.article_id,
+              keyword: a.keyword || "Unknown",
+              status: a.status,
+              _fetchError: true,
+            }])
+          })
+      }
+    }
+    // Update map with current statuses
+    const next = {}
+    for (const a of articles) next[a.article_id] = a.status
+    prevStatusMap.current = next
+  }, [articles])
 
   const retry = useMutation({
     mutationFn: (id) => api.post(`/api/content/${id}/retry`),
@@ -217,7 +278,11 @@ export default function ArticleListPanel({ projectId, selected, onSelect, onEdit
   })
 
   return (
-    <div style={{ width: 300, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <>
+    {summaryQueue.length > 0 && (
+      <GenerationSummaryModal summary={summaryQueue[0]} onClose={() => setSummaryQueue(q => q.slice(1))} />
+    )}
+    <div style={{ width: 340, flexShrink: 0, borderRight: `1px solid ${T.border}`, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* List header: lifecycle + generate */}
       <div style={{ padding: "12px 14px", borderBottom: `1px solid ${T.border}` }}>
         <LifecycleStrip articles={articles} />
@@ -241,6 +306,54 @@ export default function ArticleListPanel({ projectId, selected, onSelect, onEdit
         >
           ✏️
         </button>
+      </div>
+
+      {/* Search, filter, sort bar */}
+      <div style={{ padding: "8px 12px", borderBottom: `1px solid ${T.border}`, display: "flex", flexDirection: "column", gap: 6 }}>
+        {/* Search input */}
+        <div style={{ position: "relative" }}>
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Search articles..."
+            style={{
+              width: "100%", padding: "6px 10px 6px 28px", borderRadius: 8,
+              border: `1px solid ${T.border}`, fontSize: 11, outline: "none",
+              background: "#FAFAFA",
+            }}
+          />
+          <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: T.textSoft, pointerEvents: "none" }}>🔍</span>
+          {searchQuery && (
+            <button onClick={() => setSearchQuery("")} style={{
+              position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)",
+              background: "none", border: "none", cursor: "pointer", fontSize: 12, color: T.textSoft, padding: 0,
+            }}>✕</button>
+          )}
+        </div>
+        {/* Status filter + sort */}
+        <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+          {["all", "generating", "draft", "review", "approved", "published", "failed"].map(s => (
+            <button key={s} onClick={() => setStatusFilter(s)} style={{
+              padding: "2px 7px", borderRadius: 99, fontSize: 9, fontWeight: 500,
+              border: "none", cursor: "pointer",
+              background: statusFilter === s ? (s === "all" ? T.purple : STATUS_COLOR[s] === "amber" ? "#fef3c7" : STATUS_COLOR[s] === "teal" ? "#d1fae5" : STATUS_COLOR[s] === "red" ? "#fee2e2" : STATUS_COLOR[s] === "purple" ? "#ede9fe" : "#f3f4f6") : "transparent",
+              color: statusFilter === s ? (s === "all" ? T.purple : T.text) : T.textSoft,
+            }}>
+              {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+            </button>
+          ))}
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
+            marginLeft: "auto", fontSize: 9, padding: "2px 4px", borderRadius: 4,
+            border: `1px solid ${T.border}`, background: "#fff", cursor: "pointer", color: T.textSoft,
+          }}>
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="score_high">Score ↓</option>
+            <option value="score_low">Score ↑</option>
+            <option value="alpha">A → Z</option>
+          </select>
+        </div>
       </div>
 
       {/* Bulk action toolbar */}
@@ -269,32 +382,67 @@ export default function ArticleListPanel({ projectId, selected, onSelect, onEdit
           <div style={{ padding: 20, textAlign: "center", color: T.textSoft, fontSize: 12 }}>
             No articles yet. Generate your first one above.
           </div>
-        ) : (
-          (articles || []).map(a => (
-            <ArticleItem
-              key={a.article_id}
-              article={a}
-              isSelected={selected?.article_id === a.article_id}
-              onSelect={() => onSelect(a)}
-              onRetry={() => retry.mutate(a.article_id)}
-              onRegenerate={() => regenerate.mutate({ id: a.article_id, step_mode: "pause" })}
-              onDelete={() => api.delete(`/api/content/${a.article_id}`).then(() => {
-                qclient.invalidateQueries(["articles", projectId])
-                if (selected?.article_id === a.article_id) onSelect(null)
-              })}
-              onEdit={() => onEditMeta(a)}
-              isChecked={bulkSelected.includes(a.article_id)}
-              onCheck={(id, checked) => {
-                if (checked) {
-                  setBulkSelected(prev => [...prev, id])
-                } else {
-                  setBulkSelected(prev => prev.filter(bid => bid !== id))
-                }
-              }}
-            />
-          ))
-        )}
+        ) : (() => {
+          let filtered = (articles || []).slice()
+          // Status filter
+          if (statusFilter !== "all") {
+            filtered = filtered.filter(a => a.status === statusFilter)
+          }
+          // Search filter
+          if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase()
+            filtered = filtered.filter(a =>
+              (a.keyword || "").toLowerCase().includes(q) ||
+              (a.title || "").toLowerCase().includes(q)
+            )
+          }
+          // Sort
+          if (sortBy === "newest") filtered.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))
+          else if (sortBy === "oldest") filtered.sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""))
+          else if (sortBy === "score_high") filtered.sort((a, b) => (b.review_score || b.seo_score || 0) - (a.review_score || a.seo_score || 0))
+          else if (sortBy === "score_low") filtered.sort((a, b) => (a.review_score || a.seo_score || 0) - (b.review_score || b.seo_score || 0))
+          else if (sortBy === "alpha") filtered.sort((a, b) => (a.keyword || "").localeCompare(b.keyword || ""))
+
+          if (filtered.length === 0) {
+            return (
+              <div style={{ padding: 20, textAlign: "center", color: T.textSoft, fontSize: 11 }}>
+                No articles match{statusFilter !== "all" ? ` "${statusFilter}"` : ""}{searchQuery ? ` "${searchQuery}"` : ""}
+              </div>
+            )
+          }
+          return (
+            <>
+              <div style={{ padding: "4px 12px", fontSize: 9, color: T.textSoft, borderBottom: `1px solid ${T.border}`, background: "#FAFAFA" }}>
+                {filtered.length} article{filtered.length !== 1 ? "s" : ""}{statusFilter !== "all" || searchQuery ? " (filtered)" : ""}
+              </div>
+              {filtered.map(a => (
+                <ArticleItem
+                  key={a.article_id}
+                  article={a}
+                  isSelected={selected?.article_id === a.article_id}
+                  onSelect={() => onSelect(a)}
+                  onRetry={() => retry.mutate(a.article_id)}
+                  onRegenerate={() => regenerate.mutate({ id: a.article_id, step_mode: "pause" })}
+                  onDelete={() => api.delete(`/api/content/${a.article_id}`).then(() => {
+                    qclient.invalidateQueries(["articles", projectId])
+                    if (selected?.article_id === a.article_id) onSelect(null)
+                  })}
+                  onEdit={() => onEditMeta(a)}
+                  isChecked={bulkSelected.includes(a.article_id)}
+                  onCheck={(id, checked) => {
+                    if (checked) {
+                      setBulkSelected(prev => [...prev, id])
+                    } else {
+                      setBulkSelected(prev => prev.filter(bid => bid !== id))
+                    }
+                  }}
+                />
+              ))}
+            </>
+          )
+        })()}
       </div>
     </div>
+    </>
   )
 }

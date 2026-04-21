@@ -1491,15 +1491,15 @@ def keyword_stats(project_id: str):
 
     # ── Try kw2 pipeline data first (newest source) ────────────────────────
     kw2_row = db.execute(
-        "SELECT session_id, phase, created_at FROM kw2_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
+        "SELECT id AS session_id, current_phase AS phase, created_at FROM kw2_sessions WHERE project_id=? ORDER BY created_at DESC LIMIT 1",
         (project_id,)
     ).fetchone()
 
     if kw2_row:
         session_id = kw2_row["session_id"]
-        # Count validated keywords grouped by keyword_type
+        # Count validated keywords grouped by role (keyword_type)
         counts = db.execute(
-            "SELECT keyword_type, COUNT(*) as cnt FROM kw2_keywords WHERE session_id=? GROUP BY keyword_type",
+            "SELECT role AS keyword_type, COUNT(*) as cnt FROM kw2_keywords WHERE session_id=? GROUP BY role",
             (session_id,)
         ).fetchall()
         type_map = {r["keyword_type"]: r["cnt"] for r in counts}
@@ -1525,13 +1525,13 @@ def keyword_stats(project_id: str):
         pricing_model = bi_row["pricing_model"] if bi_row else ""
         # Profile confidence
         profile_row = db.execute(
-            "SELECT confidence_score, business_type, pillars, target_locations FROM kw2_business_profile WHERE session_id=? LIMIT 1",
-            (session_id,)
+            "SELECT confidence_score, business_type, pillars, geo_scope FROM kw2_business_profile WHERE project_id=? ORDER BY id DESC LIMIT 1",
+            (project_id,)
         ).fetchone()
         confidence = round((profile_row["confidence_score"] or 0) * 100, 0) if profile_row else 0
         biz_type = profile_row["business_type"] if profile_row else ""
         pillar_names = json.loads(profile_row["pillars"] or "[]") if profile_row else []
-        locations = json.loads(profile_row["target_locations"] or "[]") if profile_row else []
+        locations = json.loads(profile_row["geo_scope"] or "[]") if profile_row else []
 
         total = pillar_count + cluster_count + supporting_count or 1
         return {
@@ -1692,6 +1692,7 @@ class GenBody(BaseModel):
     page_type: str = "article"          # article | homepage | product | about | landing | service
     page_inputs: Dict = {}              # type-specific inputs (product_name, features, etc.)
     step_mode: str = "auto"             # auto | pause
+    pipeline_mode: str = "standard"     # standard | lean
 
 def _build_routing(body):
     """Convert ai_routing dict from request body into AIRoutingConfig.
@@ -1718,6 +1719,11 @@ def _build_routing(body):
     if not raw or not isinstance(raw, dict):
         return None
     
+    # Handle v2 canonical routing format → expand to legacy for processing
+    if raw.get("version") == 2 and "steps" in raw:
+        from core.routing_adapter import normalize_template, adapt_template_to_legacy
+        raw = adapt_template_to_legacy(normalize_template(raw))
+    
     # Normalize legacy provider IDs → canonical IDs
     _PROVIDER_ALIASES = {
         "claude": "anthropic", "chatgpt": "openai_paid", "openai": "openai_paid",
@@ -1737,8 +1743,10 @@ def _build_routing(body):
         # Guard: if ALL slots are skip/unavailable, fall back to defaults (prevents broken UI config)
         _usable = {"groq", "ollama", "ollama_remote", "gemini_free",
                    "gemini_paid", "openai_paid", "anthropic", "openrouter",
-                   "or_qwen", "or_deepseek", "or_gemini_flash", "or_gemini_lite",
-                   "or_glm", "or_gpt4o", "or_claude", "or_llama", "or_qwen_coder", "or_deepseek_r1"}
+                   "or_qwen", "or_qwen_next", "or_deepseek", "or_gemini_flash", "or_gemini_lite",
+                   "or_glm", "or_gpt4o", "or_claude", "or_llama", "or_qwen_coder", "or_deepseek_r1",
+                   "or_gemma3", "or_qwq", "or_phi4", "or_mistral", "or_maverick_free",
+                   "or_haiku", "or_gemini_pro", "or_o4_mini", "or_claude_opus"}
         if first not in _usable and second not in _usable and third not in _usable:
             log.warning(f"_build_routing: step '{key}' has no usable provider — using defaults")
             return default
@@ -1750,8 +1758,10 @@ def _build_routing(body):
         links=_cfg("links",           defaults.links),
         references=_cfg("references", defaults.references),
         draft=_cfg("draft",           defaults.draft),
+        recovery=_cfg("recovery",     defaults.recovery),
         review=_cfg("review",         defaults.review),
         issues=_cfg("issues",         defaults.issues),
+        humanize=_cfg("humanize",     defaults.humanize),
         redevelop=_cfg("redevelop",   defaults.redevelop),
         score=_cfg("score",           defaults.score),
         quality_loop=_cfg("quality_loop", defaults.quality_loop),
@@ -1810,6 +1820,63 @@ def list_prompts(user=Depends(current_user)):
     from engines.prompt_manager import PromptManager
     return {"prompts": PromptManager.get_instance().all_prompts()}
 
+
+# ── Content Prompt Live Test (must be before {step_key} wildcard) ────────
+
+@app.post("/api/prompts/test", tags=["Content"])
+async def content_prompt_test(body: Dict, user=Depends(current_user)):
+    """Live-test a content prompt with sample data against a selected AI model."""
+    import time as _time
+    from engines.prompt_manager import PROMPT_KEYS
+    from engines.prompt_test_data import CONTENT_SAMPLE_DATA
+    from engines.kw2.ai_caller import kw2_ai_call
+
+    prompt_key = body.get("prompt_key", "")
+    template = body.get("template", "")
+    provider = body.get("provider", "ollama")
+    user_sample = body.get("sample_data") or {}
+    max_tokens = min(body.get("max_tokens", 500), 2000)
+
+    if not prompt_key:
+        raise HTTPException(400, "prompt_key is required")
+    if not template:
+        raise HTTPException(400, "template is required")
+
+    # Merge default sample data with user overrides
+    defaults = dict(CONTENT_SAMPLE_DATA.get(prompt_key, {}))
+    meta = defaults.pop("_meta", {})
+    defaults.update(user_sample)
+
+    # Format the template
+    try:
+        formatted = template.format(**defaults)
+    except KeyError as e:
+        return {"error": f"Missing variable in template: {e}", "variables_used": defaults}
+
+    # Build context from meta for system prompt
+    system = "You are an expert SEO content strategist and writer."
+    if meta.get("keyword"):
+        system += f" The target keyword is: {meta['keyword']}."
+
+    t0 = _time.time()
+    try:
+        response = kw2_ai_call(
+            formatted, system=system, provider=provider,
+            temperature=0.3, task="prompt_test",
+        )
+    except Exception as exc:
+        return {"error": f"AI call failed: {exc}", "provider": provider, "elapsed_seconds": round(_time.time() - t0, 2)}
+
+    elapsed = round(_time.time() - t0, 2)
+    return {
+        "response": response,
+        "provider": provider,
+        "elapsed_seconds": elapsed,
+        "variables_used": defaults,
+        "meta": meta,
+    }
+
+
 @app.post("/api/prompts/{step_key}", tags=["Content"])
 async def save_prompt(step_key: str, body: Dict, user=Depends(current_user)):
     """Save a custom instruction block for a pipeline step."""
@@ -1825,6 +1892,41 @@ async def reset_prompt(step_key: str, user=Depends(current_user)):
     from engines.prompt_manager import PromptManager
     PromptManager.get_instance().reset(step_key)
     return {"ok": True, "key": step_key}
+
+@app.get("/api/prompts/{step_key}/versions", tags=["Content"])
+async def list_prompt_versions(step_key: str, user=Depends(current_user)):
+    """Return the version history for a prompt key (newest first)."""
+    from engines.prompt_manager import PromptManager, PROMPT_KEYS
+    if step_key not in PROMPT_KEYS:
+        raise HTTPException(400, f"Unknown prompt key: {step_key}")
+    versions = PromptManager.get_instance().get_versions(step_key)
+    return {"key": step_key, "versions": versions}
+
+@app.post("/api/prompts/{step_key}/restore/{version_index}", tags=["Content"])
+async def restore_prompt_version(step_key: str, version_index: int, user=Depends(current_user)):
+    """Restore a prompt to a saved version (0 = newest saved version)."""
+    from engines.prompt_manager import PromptManager, PROMPT_KEYS
+    if step_key not in PROMPT_KEYS:
+        raise HTTPException(400, f"Unknown prompt key: {step_key}")
+    try:
+        content = PromptManager.get_instance().restore_version(step_key, version_index)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "key": step_key, "content": content}
+
+
+# ── Content Prompt Sample Data ───────────────────────────────────────────
+
+@app.get("/api/prompts/{step_key}/sample-data", tags=["Content"])
+async def content_prompt_sample_data(step_key: str, user=Depends(current_user)):
+    """Return default sample data for testing a content prompt."""
+    from engines.prompt_manager import PROMPT_KEYS
+    from engines.prompt_test_data import CONTENT_SAMPLE_DATA
+    if step_key not in PROMPT_KEYS:
+        raise HTTPException(400, f"Unknown prompt key: {step_key}")
+    data = CONTENT_SAMPLE_DATA.get(step_key, {})
+    return {"prompt_key": step_key, "sample_data": data}
+
 
 @app.get("/api/content/{article_id}",tags=["Content"])
 def get_article(article_id: str):
@@ -1863,6 +1965,7 @@ def get_article_pipeline(article_id: str):
         "logs": snap.get("logs", []),
         "step_mode": snap.get("step_mode", "auto"),
         "is_paused": snap.get("is_paused", False),
+        "ai_recovery_needed": snap.get("ai_recovery_needed", False),
     }
 
 
@@ -2007,6 +2110,26 @@ async def ai_health_check(force: bool = False):
     else:
         results["openai_paid"] = {"status": "no_key"}
 
+    # OpenRouter health check — probe models list endpoint (no tokens consumed)
+    or_key = os.environ.get("OPENROUTER_API_KEY") or (os.environ.get("OPENROUTER_ALL_KEYS", "").split(",")[0].strip())
+    if or_key:
+        def _check_openrouter():
+            try:
+                import requests as _req
+                r = _req.get(
+                    "https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {or_key}"},
+                    timeout=8,
+                )
+                if r.status_code == 200:
+                    return {"status": "ok"}
+                return {"status": "error", "error": f"HTTP {r.status_code}"}
+            except Exception as e:
+                return {"status": "error", "error": str(e)[:100]}
+        results["openrouter"] = _health_cached("openrouter", _check_openrouter, force=force)
+    else:
+        results["openrouter"] = {"status": "no_key"}
+
     # Copy anthropic health to anthropic_paid (same key, separate option)
     if "anthropic" in results:
         results["anthropic_paid"] = results["anthropic"]
@@ -2083,6 +2206,22 @@ async def pipeline_continue(article_id: str, request: dict = None, user=Depends(
     return {"status": "resumed", "mode": "auto" if switch_auto else pipeline._step_mode}
 
 
+@app.post("/api/content/{article_id}/pipeline/ai-recovery", tags=["Content"])
+async def pipeline_ai_recovery(article_id: str, request: dict, user=Depends(current_user)):
+    """Unblock an AI recovery pause by providing a provider to retry with."""
+    pipeline = _active_pipelines.get(article_id)
+    if not pipeline:
+        raise HTTPException(404, "No active pipeline for this article")
+    provider = request.get("provider", "").strip()
+    if not provider:
+        raise HTTPException(400, "provider is required")
+    pipeline._ai_recovery_provider = provider
+    pipeline._ai_recovery_needed = False
+    if hasattr(pipeline, '_ai_recovery_event'):
+        pipeline._ai_recovery_event.set()
+    return {"status": "recovery_triggered", "provider": provider}
+
+
 @app.post("/api/content/{article_id}/pipeline/cancel", tags=["Content"])
 async def pipeline_cancel(article_id: str, user=Depends(current_user)):
     """Cancel a running/paused pipeline."""
@@ -2091,6 +2230,16 @@ async def pipeline_cancel(article_id: str, user=Depends(current_user)):
         raise HTTPException(404, "No active pipeline for this article")
     pipeline.cancel()
     return {"status": "cancelled"}
+
+
+@app.post("/api/content/{article_id}/pipeline/finalize", tags=["Content"])
+async def pipeline_finalize(article_id: str, user=Depends(current_user)):
+    """Finalize the current iteration — stop the Score/Quality/Redevelop loop."""
+    pipeline = _active_pipelines.get(article_id)
+    if not pipeline:
+        raise HTTPException(404, "No active pipeline for this article")
+    pipeline.finalize_iteration()
+    return {"status": "finalized"}
 
 
 @app.post("/api/content/{article_id}/pipeline/pause", tags=["Content"])
@@ -2175,7 +2324,8 @@ def get_article_rules(article_id: str):
     If not yet scored, runs check_all_rules() on the fly.
     """
     row = get_db().execute(
-        "SELECT body, keyword, title, meta_title, meta_desc, review_breakdown FROM content_articles WHERE article_id=?",
+        "SELECT body, keyword, title, meta_title, meta_desc, review_breakdown, "
+        "page_type, word_count, page_inputs FROM content_articles WHERE article_id=?",
         (article_id,)
     ).fetchone()
     if not row:
@@ -2195,13 +2345,40 @@ def get_article_rules(article_id: str):
         raise HTTPException(400, "Article has no body content")
 
     from quality.content_rules import check_all_rules
+    from engines.content_planner import _build_quality_profile, _build_seo_checklist
+
+    # Reconstruct quality_profile from stored article metadata so the
+    # on-the-fly score uses the same thresholds as the generation pipeline.
+    _row = dict(row)  # sqlite3.Row → plain dict for .get() support
+    _page_type = _row.get("page_type") or "article"
+    _word_count = int(_row.get("word_count") or 2000)
+    try:
+        _pi = json.loads(_row.get("page_inputs") or "{}")
+    except Exception:
+        _pi = {}
+    _intent = _pi.get("intent") or "informational"
+    try:
+        _checklist = _build_seo_checklist(
+            page_type=_page_type,
+            word_count=_word_count,
+        )
+        _quality_profile = _build_quality_profile(
+            page_type=_page_type,
+            intent=_intent,
+            word_count=_word_count,
+            checklist=_checklist,
+        )
+    except Exception:
+        _quality_profile = None
+
     scored = check_all_rules(
         body_html=row["body"],
         keyword=row["keyword"] or "",
         title=row["title"] or "",
         meta_title=row["meta_title"] or "",
         meta_desc=row["meta_desc"] or "",
-        page_type=row.get("page_type", "article") or "article",
+        page_type=_page_type,
+        quality_profile=_quality_profile,
     )
     return {
         "percentage": scored["percentage"],
@@ -2449,6 +2626,7 @@ async def _gen_article(article_id, body, step_mode: str = "auto", start_step: in
             ai_routing=_build_routing(body),
             page_type=getattr(body, "page_type", "article") or "article",
             page_inputs=getattr(body, "page_inputs", {}) or {},
+            pipeline_mode=getattr(body, "pipeline_mode", "standard") or "standard",
         )
         # Load Ollama servers from DB so engine can resolve ollama_remote_{id}
         try:
@@ -2759,6 +2937,137 @@ def article_ai_analytics(project_id: str, article_id: str, user=Depends(current_
         },
         "steps": [dict(r) for r in rows],
         "cost_comparison": alternatives,
+    }
+
+
+@app.get("/api/content/{article_id}/generation-summary", tags=["Content"])
+def generation_summary(article_id: str):
+    """Post-generation summary: cost, duration, per-model AI calls, and error/warning logs."""
+    import json as _json
+    from datetime import datetime, timezone
+    db = get_db()
+
+    article = db.execute(
+        "SELECT keyword, status, created_at, updated_at, schema_json FROM content_articles WHERE article_id=?",
+        (article_id,),
+    ).fetchone()
+    if not article:
+        raise HTTPException(404, "Article not found")
+    article = dict(article)
+
+    # ── AI usage breakdown by model ───────────────────────────────────────────
+    usage_rows = db.execute(
+        """SELECT model, provider,
+                  COUNT(*) AS calls,
+                  SUM(input_tokens) AS input_tokens,
+                  SUM(output_tokens) AS output_tokens,
+                  SUM(cost_usd) AS cost_usd
+           FROM ai_usage WHERE article_id=?
+           GROUP BY model, provider
+           ORDER BY cost_usd DESC""",
+        (article_id,),
+    ).fetchall()
+
+    by_model = [
+        {
+            "model": r["model"] or "unknown",
+            "provider": r["provider"] or "unknown",
+            "calls": r["calls"] or 0,
+            "input_tokens": r["input_tokens"] or 0,
+            "output_tokens": r["output_tokens"] or 0,
+            "cost_usd": round(r["cost_usd"] or 0, 6),
+        }
+        for r in usage_rows
+    ]
+    total_cost = sum(r["cost_usd"] for r in by_model)
+    total_calls = sum(r["calls"] for r in by_model)
+
+    # ── Parse schema_json for logs and step timings ───────────────────────────
+    error_logs, warning_logs, step_timings = [], [], []
+    snapshot = {}
+    try:
+        snapshot = _json.loads(article["schema_json"] or "{}")
+        # Filter logs
+        for entry in snapshot.get("logs", []):
+            lvl = (entry.get("level") or "").lower()
+            if lvl == "error":
+                error_logs.append(entry)
+            elif lvl in ("warn", "warning"):
+                warning_logs.append(entry)
+        # Step timings
+        for s in snapshot.get("steps", []):
+            sa, ea = s.get("started_at", ""), s.get("ended_at", "")
+            dur = None
+            if sa and ea:
+                try:
+                    dur = round((datetime.fromisoformat(ea) - datetime.fromisoformat(sa)).total_seconds(), 1)
+                except Exception:
+                    dur = None
+            step_timings.append({
+                "step": s.get("step"),
+                "name": s.get("name"),
+                "status": s.get("status"),
+                "duration_seconds": dur,
+            })
+    except Exception:
+        pass
+
+    # ── Total duration: prefer step timestamps, fall back to article timestamps ─
+    total_duration = None
+    try:
+        step_starts = [s.get("started_at", "") for s in snapshot.get("steps", []) if s.get("started_at")]
+        step_ends   = [s.get("ended_at", "")   for s in snapshot.get("steps", []) if s.get("ended_at")]
+        if step_starts and step_ends:
+            t0 = min(step_starts)
+            t1 = max(step_ends)
+            total_duration = round(
+                (datetime.fromisoformat(t1) - datetime.fromisoformat(t0)).total_seconds(), 1
+            )
+        else:
+            valid = [s for s in step_timings if s["duration_seconds"] is not None]
+            if valid:
+                total_duration = round(sum(s["duration_seconds"] for s in valid), 1)
+            else:
+                t_start = article["created_at"]
+                t_end = article["updated_at"]
+                if t_start and t_end:
+                    total_duration = round(
+                        (datetime.fromisoformat(t_end) - datetime.fromisoformat(t_start)).total_seconds(), 1
+                    )
+    except Exception:
+        pass
+
+    # ── Insights ──────────────────────────────────────────────────────────────
+    most_expensive_model = None
+    if by_model:
+        top = max(by_model, key=lambda r: r["cost_usd"])
+        if top["cost_usd"] > 0:
+            most_expensive_model = top["model"]
+
+    slowest_step = None
+    if step_timings:
+        top_step = max(step_timings, key=lambda s: s["duration_seconds"] or 0)
+        if top_step.get("duration_seconds"):
+            slowest_step = {
+                "step": top_step["step"],
+                "name": top_step["name"],
+                "duration_seconds": top_step["duration_seconds"],
+            }
+
+    return {
+        "article_id": article_id,
+        "keyword": article["keyword"],
+        "status": article["status"],
+        "total_cost_usd": round(total_cost, 6),
+        "total_duration_seconds": total_duration,
+        "total_calls": total_calls,
+        "models_used": len(by_model),
+        "by_model": by_model,
+        "error_logs": error_logs,
+        "warning_logs": warning_logs,
+        "step_timings": step_timings,
+        "most_expensive_model": most_expensive_model,
+        "slowest_step": slowest_step,
     }
 
 
@@ -3328,7 +3637,7 @@ def ai_dashboard(user=Depends(current_user)):
         "cost": "Paid ($2.50-$10/1M tokens)",
         "speed": "Fast (~3-6s)",
         "quality": "Excellent for polishing, fluency, E-E-A-T",
-        "note": "Used in Step 9 redevelopment polish pass. Only runs if API key is set.",
+        "note": "Used in Step 10 redevelopment polish pass. Only runs if API key is set.",
     }
 
     # ── Claude / Anthropic ───────────────────────────────────────────────
@@ -3344,7 +3653,7 @@ def ai_dashboard(user=Depends(current_user)):
         "cost": "Paid ($3-$15/1M tokens)",
         "speed": "Fast (~3-8s)",
         "quality": "Best for final polish, accuracy, nuance",
-        "note": "Used as final polish in Step 9. Only runs if valid API key is set." + (" (Current key is placeholder)" if claude_key and not claude_valid else ""),
+        "note": "Used as final polish in Step 10. Only runs if valid API key is set." + (" (Current key is placeholder)" if claude_key and not claude_valid else ""),
     }
 
     # ── OpenRouter ───────────────────────────────────────────────────────
@@ -3425,6 +3734,29 @@ def ai_dashboard(user=Depends(current_user)):
             "is_openrouter_model": True,
             "note": f"OpenRouter model: {or_info['model']}",
         }
+
+    # ── Custom AI Models (user-defined, routed via OpenRouter) ───────────
+    try:
+        _ensure_custom_models_table(db)
+        custom_rows = db.execute("SELECT * FROM custom_ai_models ORDER BY created_at").fetchall()
+        for crow in custom_rows:
+            result["providers"][crow["provider_id"]] = {
+                "name": crow["name"],
+                "model": crow["model_id"],
+                "status": openrouter_status if or_available else "unconfigured",
+                "available": or_available,
+                "rate_limited": openrouter_status == "rate_limited",
+                "key_configured": bool(openrouter_key),
+                "cost": crow["cost_label"] or "Custom",
+                "speed": "Varies",
+                "quality": "Custom",
+                "tier": "custom",
+                "is_openrouter_model": True,
+                "is_custom_model": True,
+                "note": f"Custom model: {crow['model_id']}",
+            }
+    except Exception as e:
+        log.warning(f"Failed to load custom AI models: {e}")
 
     # ── Multi-key provider info ──────────────────────────────────────────
     try:
@@ -3575,6 +3907,85 @@ async def get_openrouter_usage(user=Depends(current_user)):
         return {"error": str(e), "key_configured": True}
 
 
+# ── Custom AI Models ─────────────────────────────────────────────────────────
+
+def _ensure_custom_models_table(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS custom_ai_models (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider_id TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        tier TEXT DEFAULT 'custom',
+        cost_label TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    db.commit()
+
+
+@app.get("/api/ai/models/custom", tags=["AI Hub"])
+def list_custom_models(user=Depends(current_user)):
+    """List all user-defined custom AI models."""
+    db = get_db()
+    _ensure_custom_models_table(db)
+    rows = db.execute("SELECT * FROM custom_ai_models ORDER BY created_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/ai/models/custom", tags=["AI Hub"])
+async def create_custom_model(body: dict = Body(...), user=Depends(current_user)):
+    """Create a custom AI model that can be used in routing dropdowns."""
+    import re as _re
+    name = (body.get("name") or "").strip()
+    model_id = (body.get("model_id") or "").strip()
+    cost_label = (body.get("cost_label") or "").strip()
+
+    if not name or not model_id:
+        raise HTTPException(400, "Name and model_id are required")
+    if len(name) > 60:
+        raise HTTPException(400, "Name must be 60 characters or less")
+    if len(model_id) > 200:
+        raise HTTPException(400, "Model ID must be 200 characters or less")
+
+    # Generate a safe provider_id from the name
+    safe = _re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:40]
+    provider_id = f"custom_{safe}"
+
+    # Check for collision with built-in providers
+    from engines.content_generation_engine import OPENROUTER_MODELS
+    if provider_id in OPENROUTER_MODELS:
+        raise HTTPException(409, f"Provider ID '{provider_id}' conflicts with a built-in model")
+
+    db = get_db()
+    _ensure_custom_models_table(db)
+
+    # Check for duplicate provider_id
+    existing = db.execute("SELECT id FROM custom_ai_models WHERE provider_id=?", (provider_id,)).fetchone()
+    if existing:
+        raise HTTPException(409, f"A custom model with the name '{name}' already exists")
+
+    db.execute(
+        "INSERT INTO custom_ai_models(provider_id, name, model_id, tier, cost_label) VALUES(?, ?, ?, 'custom', ?)",
+        (provider_id, name, model_id, cost_label)
+    )
+    db.commit()
+    log.info(f"Created custom AI model: {name} → {model_id} (provider_id={provider_id})")
+    return {"ok": True, "provider_id": provider_id, "name": name, "model_id": model_id}
+
+
+@app.delete("/api/ai/models/custom/{model_id:int}", tags=["AI Hub"])
+async def delete_custom_model(model_id: int, user=Depends(current_user)):
+    """Delete a custom AI model."""
+    db = get_db()
+    _ensure_custom_models_table(db)
+    row = db.execute("SELECT provider_id, name FROM custom_ai_models WHERE id=?", (model_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Custom model not found")
+    db.execute("DELETE FROM custom_ai_models WHERE id=?", (model_id,))
+    db.commit()
+    log.info(f"Deleted custom AI model: {row['name']} (provider_id={row['provider_id']})")
+    return {"ok": True, "deleted": row["name"]}
+
+
 @app.post("/api/ai/routing", tags=["AI Hub"])
 async def save_ai_routing(body: dict = Body(...), user=Depends(current_user)):
     """Save custom AI routing config for content generation steps."""
@@ -3594,6 +4005,32 @@ async def save_ai_routing(body: dict = Body(...), user=Depends(current_user)):
                 }
             else:
                 normalized[step_key] = step_cfg
+
+        # ── Validate: warn if any step's chain has only disabled providers ──
+        warnings = []
+        try:
+            from engines.content_generation_engine import _force_disabled
+            for step_key, step_cfg in normalized.items():
+                if not isinstance(step_cfg, dict):
+                    continue
+                slots = [step_cfg.get("first"), step_cfg.get("second"), step_cfg.get("third")]
+                slots = [s for s in slots if s and s != "skip"]
+                if not slots:
+                    continue
+                disabled_in_chain = [s for s in slots if s in _force_disabled]
+                if len(disabled_in_chain) == len(slots):
+                    warnings.append(
+                        f"Step '{step_key}': ALL providers ({', '.join(slots)}) are currently disabled. "
+                        "Pipeline will use emergency fallback."
+                    )
+                elif disabled_in_chain:
+                    warnings.append(
+                        f"Step '{step_key}': {len(disabled_in_chain)} of {len(slots)} provider(s) "
+                        f"disabled ({', '.join(disabled_in_chain)})"
+                    )
+        except Exception as _ve:
+            log.warning(f"Routing chain validation failed: {_ve}")
+
         routing_json = json.dumps(normalized)
         routing_enc = _encrypt(routing_json)
         db.execute(
@@ -3602,7 +4039,9 @@ async def save_ai_routing(body: dict = Body(...), user=Depends(current_user)):
         )
         db.commit()
         log.info(f"Saved AI routing config: {list(normalized.keys())}")
-        return {"ok": True}
+        if warnings:
+            log.warning(f"AI routing warnings: {warnings}")
+        return {"ok": True, "warnings": warnings}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -3633,18 +4072,180 @@ def get_ai_routing(user=Depends(current_user)):
     except Exception as e:
         log.warning(f"Failed to fetch AI routing: {e}")
     return {
-        "research":     {"first": "ollama",      "second": "groq",        "third": "gemini_paid"},
-        "structure":    {"first": "ollama",      "second": "groq",        "third": "gemini_paid"},
-        "verify":       {"first": "groq",        "second": "gemini_paid", "third": "skip"},
-        "links":        {"first": "groq",        "second": "ollama",      "third": "gemini_paid"},
-        "references":   {"first": "groq",        "second": "gemini_paid", "third": "skip"},
-        "draft":        {"first": "ollama",      "second": "groq",        "third": "gemini_paid"},
-        "review":       {"first": "groq",        "second": "gemini_paid", "third": "skip"},
-        "issues":       {"first": "groq",        "second": "gemini_paid", "third": "skip"},
-        "redevelop":    {"first": "ollama",      "second": "groq",        "third": "gemini_paid"},
-        "score":        {"first": "groq",        "second": "gemini_paid", "third": "skip"},
-        "quality_loop": {"first": "ollama",      "second": "groq",        "third": "gemini_paid"},
+        "research":     {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemma3"},
+        "structure":    {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemma3"},
+        "verify":       {"first": "or_gemini_flash", "second": "or_gemini_lite",   "third": "skip"},
+        "links":        {"first": "or_gemini_lite",  "second": "or_deepseek",      "third": "skip"},
+        "references":   {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemma3"},
+        "draft":        {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemini_lite"},
+        "recovery":     {"first": "or_deepseek",     "second": "or_gemini_flash",  "third": "or_gemini_lite"},
+        "review":       {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemma3"},
+        "issues":       {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "skip"},
+        "humanize":     {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemini_lite"},
+        "redevelop":    {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "or_gemini_lite"},
+        "score":        {"first": "or_gemini_flash", "second": "or_deepseek",      "third": "skip"},
+        "quality_loop": {"first": "or_deepseek",     "second": "or_gemini_flash",  "third": "or_gemini_lite"},
     }
+
+
+def _norm_routing_provider_ids(raw: Dict) -> Dict:
+    """Normalize legacy routing provider IDs to canonical IDs."""
+    _PA = {
+        "claude": "anthropic",
+        "chatgpt": "openai_paid",
+        "openai": "openai_paid",
+        "gemini": "gemini_free",
+        "ollama_local": "ollama",
+    }
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for step_key, step_val in raw.items():
+        if isinstance(step_val, dict):
+            out[step_key] = {
+                slot: _PA.get(v, v) if isinstance(v, str) else v
+                for slot, v in step_val.items()
+            }
+        else:
+            out[step_key] = step_val
+    return out
+
+
+def _load_routing_templates(db) -> List[Dict]:
+    """Load saved custom AI routing templates from api_settings."""
+    try:
+        row = db.execute("SELECT value_enc FROM api_settings WHERE key='ai_routing_templates'").fetchone()
+        if not row or not row["value_enc"]:
+            return []
+        decrypted = _decrypt(row["value_enc"])
+        if not decrypted:
+            return []
+        parsed = json.loads(decrypted)
+        if isinstance(parsed, list):
+            templates = parsed
+        elif isinstance(parsed, dict):
+            templates = parsed.get("templates", [])
+        else:
+            templates = []
+
+        # Keep only valid template objects
+        out = []
+        for t in templates:
+            if not isinstance(t, dict):
+                continue
+            t_id = str(t.get("id", "")).strip()
+            name = str(t.get("name", "")).strip()
+            routing = _norm_routing_provider_ids(t.get("routing", {}))
+            if not t_id or not name or not isinstance(routing, dict) or not routing:
+                continue
+            out.append({
+                "id": t_id,
+                "name": name,
+                "routing": routing,
+                "created_at": t.get("created_at", ""),
+                "updated_at": t.get("updated_at", ""),
+            })
+        return out
+    except Exception as e:
+        log.warning(f"Failed to load routing templates: {e}")
+        return []
+
+
+def _save_routing_templates(db, templates: List[Dict]):
+    """Persist custom AI routing templates to api_settings."""
+    payload = json.dumps({"templates": templates})
+    enc = _encrypt(payload)
+    db.execute(
+        "INSERT OR REPLACE INTO api_settings(key, value_enc, updated_at) VALUES('ai_routing_templates', ?, ?)",
+        (enc, datetime.now(timezone.utc).isoformat()),
+    )
+    db.commit()
+
+
+@app.get("/api/ai/routing/templates", tags=["AI Hub"])
+def get_ai_routing_templates(user=Depends(current_user)):
+    """Get user-defined AI routing templates."""
+    db = get_db()
+    templates = _load_routing_templates(db)
+    return {"templates": templates}
+
+
+@app.post("/api/ai/routing/templates", tags=["AI Hub"])
+async def upsert_ai_routing_template(body: dict = Body(...), user=Depends(current_user)):
+    """Create or update a custom AI routing template.
+
+    Body:
+      name: required template name
+      routing: required routing object
+      template_id: optional existing template id to update
+    """
+    name = str(body.get("name", "")).strip()
+    routing = body.get("routing", {})
+    # Handle v2 canonical format → flatten to legacy for storage compatibility
+    if isinstance(routing, dict) and routing.get("version") == 2 and "steps" in routing:
+        from core.routing_adapter import normalize_template, adapt_template_to_legacy
+        routing = adapt_template_to_legacy(normalize_template(routing))
+    routing = _norm_routing_provider_ids(routing)
+    template_id = str(body.get("template_id", "")).strip()
+
+    if not name:
+        raise HTTPException(400, "name is required")
+    if not isinstance(routing, dict) or not routing:
+        raise HTTPException(400, "routing is required")
+
+    db = get_db()
+    templates = _load_routing_templates(db)
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Enforce unique names (case-insensitive)
+    for t in templates:
+        if t["name"].strip().lower() == name.lower() and t["id"] != template_id:
+            raise HTTPException(409, f"A template named '{name}' already exists")
+
+    if template_id:
+        found = False
+        for t in templates:
+            if t["id"] == template_id:
+                t["name"] = name
+                t["routing"] = routing
+                t["updated_at"] = now
+                found = True
+                template = t
+                break
+        if not found:
+            raise HTTPException(404, "Template not found")
+    else:
+        safe = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:30] or "template"
+        template_id = f"{safe}_{uuid.uuid4().hex[:8]}"
+        template = {
+            "id": template_id,
+            "name": name,
+            "routing": routing,
+            "created_at": now,
+            "updated_at": now,
+        }
+        templates.append(template)
+
+    _save_routing_templates(db, templates)
+    return {"ok": True, "template": template}
+
+
+@app.delete("/api/ai/routing/templates/{template_id}", tags=["AI Hub"])
+async def delete_ai_routing_template(template_id: str, user=Depends(current_user)):
+    """Delete a custom AI routing template by id."""
+    template_id = (template_id or "").strip()
+    if not template_id:
+        raise HTTPException(400, "template_id is required")
+
+    db = get_db()
+    templates = _load_routing_templates(db)
+    kept = [t for t in templates if t.get("id") != template_id]
+
+    if len(kept) == len(templates):
+        raise HTTPException(404, "Template not found")
+
+    _save_routing_templates(db, kept)
+    return {"ok": True, "deleted": template_id}
 
 
 @app.post("/api/ai/routing/propagate", tags=["AI Hub"])
@@ -3657,6 +4258,11 @@ async def propagate_ai_routing(body: dict = Body(...), user=Depends(current_user
     }
     def _norm(v):
         return _PROVIDER_ALIASES.get(v, v) if isinstance(v, str) else v
+
+    # Handle v2 canonical format → flatten to legacy for storage
+    if isinstance(body, dict) and body.get("version") == 2 and "steps" in body:
+        from core.routing_adapter import normalize_template, adapt_template_to_legacy
+        body = adapt_template_to_legacy(normalize_template(body))
 
     normalized = {}
     for step_key, step_cfg in body.items():
@@ -3700,6 +4306,7 @@ async def propagate_ai_routing(body: dict = Body(...), user=Depends(current_user
             links=_cfg("links",           defaults.links),
             references=_cfg("references", defaults.references),
             draft=_cfg("draft",           defaults.draft),
+            recovery=_cfg("recovery",     defaults.recovery),
             review=_cfg("review",         defaults.review),
             issues=_cfg("issues",         defaults.issues),
             redevelop=_cfg("redevelop",   defaults.redevelop),
@@ -24856,6 +25463,81 @@ async def kw2_prompts_restore(
     if not ok:
         raise HTTPException(404, "Version not found")
     return {"ok": True}
+
+
+# ── KW2 Prompt Live Test ─────────────────────────────────────────────────
+
+@app.get("/api/kw2/prompts/{prompt_key}/sample-data", tags=["KW2"])
+async def kw2_prompt_sample_data(prompt_key: str, user=Depends(current_user)):
+    """Return default sample data for testing a KW2 prompt."""
+    from engines.kw2.prompt_test_data import KW2_SAMPLE_DATA
+    data = KW2_SAMPLE_DATA.get(prompt_key, {})
+    return {"prompt_key": prompt_key, "sample_data": data}
+
+
+@app.post("/api/kw2/prompts/test", tags=["KW2"])
+async def kw2_prompt_test(body: Dict, user=Depends(current_user)):
+    """Live-test a KW2 prompt with sample data against a selected AI model."""
+    import time as _time
+    from engines.kw2.prompt_test_data import KW2_SAMPLE_DATA, SYSTEM_PROMPT_MAP
+    from engines.kw2.ai_caller import kw2_ai_call
+
+    prompt_key = body.get("prompt_key", "")
+    template = body.get("template", "")
+    provider = body.get("provider", "ollama")
+    user_sample = body.get("sample_data") or {}
+    max_tokens = min(body.get("max_tokens", 500), 2000)
+
+    if not prompt_key:
+        raise HTTPException(400, "prompt_key is required")
+    if not template:
+        raise HTTPException(400, "template is required")
+
+    # Merge default sample data with user overrides
+    defaults = dict(KW2_SAMPLE_DATA.get(prompt_key, {}))
+    test_user_prompt = defaults.pop("_test_user_prompt", None)
+    defaults.pop("_meta", None)
+    defaults.update(user_sample)
+
+    # Determine if this is a system prompt being tested
+    is_system_prompt = prompt_key.endswith("_system")
+
+    if is_system_prompt:
+        # For system prompts: template IS the system message, use a fixed test user prompt
+        system = template
+        formatted = test_user_prompt or "Briefly describe your role and approach."
+    else:
+        # For user prompts: format template with variables, look up the system prompt
+        try:
+            formatted = template.format(**defaults)
+        except KeyError as e:
+            return {"error": f"Missing variable in template: {e}", "variables_used": defaults}
+
+        # Get corresponding system prompt from DB
+        system_key = SYSTEM_PROMPT_MAP.get(prompt_key)
+        system = "You are an expert SEO analyst."
+        if system_key:
+            pm = _KW2PM()
+            sys_detail = pm.get_prompt_detail(system_key)
+            if sys_detail:
+                system = sys_detail.get("template", system)
+
+    t0 = _time.time()
+    try:
+        response = kw2_ai_call(
+            formatted, system=system, provider=provider,
+            temperature=0.3, task="prompt_test",
+        )
+    except Exception as exc:
+        return {"error": f"AI call failed: {exc}", "provider": provider, "elapsed_seconds": round(_time.time() - t0, 2)}
+
+    elapsed = round(_time.time() - t0, 2)
+    return {
+        "response": response,
+        "provider": provider,
+        "elapsed_seconds": elapsed,
+        "variables_used": defaults,
+    }
 
 
 # ---------------------------------------------------------------------------
