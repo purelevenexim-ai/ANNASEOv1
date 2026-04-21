@@ -2,24 +2,52 @@ import { useState, useEffect, useCallback } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { T, api, Btn } from "./App"
 import RateLimitDashboard from "./aihub/RateLimitDashboard"
+import { SYSTEM_TEMPLATES, DEFAULT_TEMPLATE_ID, expandToLegacyRouting } from "./aihub/systemRoutingTemplates"
 
 // ── Provider Icons ─────────────────────────────────────────────────────────────
-const PROVIDER_ICONS = { ollama: "🦙", groq: "⚡", gemini: "💎", gemini_free: "💎", gemini_paid: "💎", chatgpt: "🤖", openai_paid: "🤖", claude: "🧠", anthropic: "🧠", anthropic_paid: "🧠", openrouter: "🌐", or_qwen: "🌐", or_qwen_next: "🌐", or_deepseek: "🌐", or_gemini_flash: "🌐", or_gemini_lite: "🌐", or_glm: "🌐", or_gpt4o: "🌐", or_claude: "🌐", or_llama: "🌐", or_qwen_coder: "🌐", or_deepseek_r1: "🌐" }
-const PROVIDER_LABELS = { ollama: "Ollama", groq: "Groq", gemini: "Gemini", gemini_free: "Gemini", gemini_paid: "Gemini Paid", chatgpt: "ChatGPT", openai_paid: "ChatGPT", claude: "Claude", anthropic: "Claude", anthropic_paid: "Claude Pro", openrouter: "OpenRouter", or_qwen: "OR: Qwen 3.6+", or_qwen_next: "OR: Qwen3 Next 80B", or_deepseek: "OR: DeepSeek V3.2", or_gemini_flash: "OR: Gemini Flash", or_gemini_lite: "OR: Gemini Lite", or_glm: "OR: GLM 5 Turbo", or_gpt4o: "OR: GPT-4o", or_claude: "OR: Claude", or_llama: "OR: Llama 4", or_qwen_coder: "OR: Qwen Coder", or_deepseek_r1: "OR: DeepSeek R1", skip: "Skip" }
+const PROVIDER_ICONS = { ollama: "🦙", groq: "⚡", gemini: "💎", gemini_free: "💎", gemini_paid: "💎", chatgpt: "🤖", openai_paid: "🤖", claude: "🧠", anthropic: "🧠", anthropic_paid: "🧠", openrouter: "🌐", or_qwen: "🌐", or_qwen_next: "🌐", or_deepseek: "🌐", or_gemini_flash: "🌐", or_gemini_lite: "🌐", or_glm: "🌐", or_qwq: "🌐", or_phi4: "🌐", or_gemma3: "🌐", or_mistral: "🌐", or_maverick_free: "🌐", or_haiku: "🌐", or_gpt4o: "🌐", or_claude: "🌐", or_llama: "🌐", or_qwen_coder: "🌐", or_deepseek_r1: "🌐", or_gemini_pro: "🌐", or_o4_mini: "🌐", or_claude_opus: "🌐" }
+const PROVIDER_LABELS = { ollama: "Ollama", groq: "Groq", gemini: "Gemini", gemini_free: "Gemini", gemini_paid: "Gemini Paid", chatgpt: "ChatGPT", openai_paid: "ChatGPT", claude: "Claude", anthropic: "Claude", anthropic_paid: "Claude Pro", openrouter: "OpenRouter", or_qwen: "OR: GPT-OSS 120B", or_qwen_next: "OR: GPT-OSS 20B", or_deepseek: "OR: DeepSeek V3.2", or_gemini_flash: "OR: Gemini 2.5 Flash", or_gemini_lite: "OR: Gemini 2.0 Lite", or_glm: "OR: GLM 5 Turbo", or_qwq: "OR: QwQ 32B", or_phi4: "OR: Phi-4 Reasoning", or_gemma3: "OR: Gemma 3 27B", or_mistral: "OR: Mistral Small", or_maverick_free: "OR: Llama 4 Free", or_haiku: "OR: Claude Haiku 4.5", or_gpt4o: "OR: GPT-4o", or_claude: "OR: Claude Sonnet 4", or_llama: "OR: Llama 4 Maverick", or_qwen_coder: "OR: Qwen3 Coder 480B", or_deepseek_r1: "OR: DeepSeek R1", or_gemini_pro: "OR: Gemini 2.5 Pro", or_o4_mini: "OR: o4-mini", or_claude_opus: "OR: Claude Opus 4", skip: "Skip" }
 
 const STEPS = [
-  { key: "research",     label: "Step 1: Research",     desc: "Topic analysis & crawling" },
-  { key: "structure",    label: "Step 2: Structure",    desc: "Outline & headings" },
-  { key: "verify",       label: "Step 3: Verify",       desc: "Structure validation" },
-  { key: "links",        label: "Step 4: Links",        desc: "Internal link planning" },
-  { key: "references",   label: "Step 5: References",   desc: "Wikipedia references" },
-  { key: "draft",        label: "Step 6: Draft",        desc: "Write full article" },
-  { key: "review",       label: "Step 7: Review",       desc: "AI quality review" },
-  { key: "issues",       label: "Step 8: Issues",       desc: "53-rule checks" },
-  { key: "redevelop",    label: "Step 9: Redevelop",    desc: "Rewrite & polish" },
-  { key: "score",        label: "Step 10: Score",       desc: "Final quality scoring" },
-  { key: "quality_loop", label: "Step 11: Quality",     desc: "Iterate to ≥75%" },
+  { key: "research",     label: "Step 1: Research",         desc: "Topic analysis & crawling" },
+  { key: "structure",    label: "Step 2: Structure",         desc: "Outline & headings" },
+  { key: "verify",       label: "Step 3: Blueprint",        desc: "3-layer blueprint assembly" },
+  { key: "links",        label: "Step 4: Links",            desc: "Internal link planning" },
+  { key: "references",   label: "Step 5: References",       desc: "Wikipedia refs + confidence" },
+  { key: "draft",        label: "Step 6: Draft",            desc: "Blueprint-controlled generation" },
+  { key: "review",       label: "Step 7: Validate & Score", desc: "Deterministic quality check", local: true },
+  { key: "recovery",     label: "Step 8: Recovery",         desc: "Section-level targeted fixes" },
+  { key: "humanize",     label: "Step 9: Humanize",         desc: "AI pattern removal & voice" },
+  { key: "quality_loop", label: "Step 11: Quality Loop",    desc: "Iterative quality improvement" },
+  { key: "redevelop",    label: "Step 12: Redevelopment",   desc: "Full content polish pass" },
 ]
+
+const PHASES = [
+  {
+    key: "research_planning",
+    label: "Research & Planning",
+    icon: "🔍",
+    color: "#007AFF",
+    steps: ["research", "structure", "verify", "links", "references"],
+  },
+  {
+    key: "writing",
+    label: "Writing & Recovery",
+    icon: "✍️",
+    color: "#7c3aed",
+    steps: ["draft", "review", "recovery"],
+  },
+  {
+    key: "quality_polish",
+    label: "Quality & Polish",
+    icon: "✨",
+    color: "#16a34a",
+    steps: ["humanize", "quality_loop", "redevelop"],
+  },
+]
+
+// AI-routed steps in v2 pipeline (Validate & Score stays deterministic/local)
+const AI_ROUTED_STEPS = new Set(["research", "structure", "verify", "links", "references", "draft", "recovery", "humanize", "quality_loop", "redevelop"])
 
 // Build dynamic provider groups from ALL providers (active + inactive)
 function buildProviderGroups(providers = {}) {
@@ -27,11 +55,18 @@ function buildProviderGroups(providers = {}) {
   const cloud = []
   const orPrimary = []
   const orSecondary = []
+  const customModels = []
 
   // Process ALL providers — including unconfigured, rate-limited, offline
   Object.entries(providers).forEach(([key, p]) => {
     // Status badge: ⚠ = rate limited, ○ = offline/no-key, nothing = ok/idle
     const badge = p.rate_limited ? " ⚠" : !p.available ? " ○" : ""
+
+    // Custom models (custom_*)
+    if (p.is_custom_model || key.startsWith("custom_")) {
+      customModels.push({ value: key, label: `🔧 ${p.name || key}${badge}` })
+      return
+    }
 
     // OpenRouter model variants (or_*)
     if (p.is_openrouter_model) {
@@ -78,10 +113,13 @@ function buildProviderGroups(providers = {}) {
     groups.push({ label: "── Cloud (Paid) ──", providers: cloudUnique })
   }
   if (orPrimary.length > 0) {
-    groups.push({ label: "── OpenRouter ★ Primary ──", providers: orPrimary })
+    groups.push({ label: "── OpenRouter ★ Free ──", providers: orPrimary })
   }
   if (orSecondary.length > 0) {
-    groups.push({ label: "── OpenRouter Secondary ──", providers: orSecondary })
+    groups.push({ label: "── OpenRouter Premium ──", providers: orSecondary })
+  }
+  if (customModels.length > 0) {
+    groups.push({ label: "── Custom Models ──", providers: customModels })
   }
   groups.push({ label: "──", providers: [{ value: "skip", label: "Skip" }] })
 
@@ -102,20 +140,31 @@ const PROVIDER_GROUPS = [
     { value: "openai_paid",    label: "🤖 ChatGPT" },
     { value: "openrouter",     label: "🌐 OpenRouter (default)" },
   ]},
-  { label: "── OpenRouter ★ Primary ──", providers: [
-    { value: "or_qwen",         label: "🌐 Qwen 3.6 Plus" },
-    { value: "or_qwen_next",    label: "🌐 Qwen3 Next 80B" },
-    { value: "or_deepseek",     label: "🌐 DeepSeek V3.2" },
-    { value: "or_gemini_flash", label: "🌐 Gemini 2.5 Flash" },
-    { value: "or_gemini_lite",  label: "🌐 Gemini 2.0 Flash Lite" },
-    { value: "or_glm",          label: "🌐 GLM 5 Turbo" },
+  { label: "── OpenRouter ★ Free ──", providers: [
+    { value: "or_qwen",           label: "🌐 GPT-OSS 120B (Free)" },
+    { value: "or_qwen_next",      label: "🌐 GPT-OSS 20B (Free)" },
+    { value: "or_qwq",            label: "🌐 QwQ 32B (Free)" },
+    { value: "or_phi4",           label: "🌐 Phi-4 Reasoning (Free)" },
+    { value: "or_gemma3",         label: "🌐 Gemma 3 27B (Free)" },
+    { value: "or_mistral",        label: "🌐 Mistral Small 3.2 (Free)" },
+    { value: "or_maverick_free",  label: "🌐 Llama 4 Maverick (Free)" },
+    { value: "or_qwen_coder",     label: "🌐 Qwen3 Coder 480B (Free)" },
   ]},
-  { label: "── OpenRouter Secondary ──", providers: [
-    { value: "or_gpt4o",        label: "🌐 GPT-4o" },
-    { value: "or_claude",       label: "🌐 Claude Sonnet 4.5" },
-    { value: "or_llama",        label: "🌐 Llama 4 Maverick" },
-    { value: "or_qwen_coder",   label: "🌐 Qwen3 Coder 480B" },
-    { value: "or_deepseek_r1",  label: "🌐 DeepSeek R1" },
+  { label: "── OpenRouter ★ Budget ──", providers: [
+    { value: "or_gemini_lite",  label: "🌐 Gemini 2.0 Flash Lite ($0.07/M)" },
+    { value: "or_llama",        label: "🌐 Llama 4 Maverick ($0.20/M)" },
+    { value: "or_deepseek",     label: "🌐 DeepSeek V3.2 ($0.26/M)" },
+    { value: "or_gemini_flash", label: "🌐 Gemini 2.5 Flash ($0.30/M)" },
+    { value: "or_deepseek_r1",  label: "🌐 DeepSeek R1 ($0.45/M)" },
+    { value: "or_haiku",         label: "🌐 Claude Haiku 4.5 ($0.80/M)" },
+  ]},
+  { label: "── OpenRouter Premium ──", providers: [
+    { value: "or_o4_mini",       label: "🌐 o4-mini ($1.10/M)" },
+    { value: "or_glm",           label: "🌐 GLM 5 Turbo ($1.20/M)" },
+    { value: "or_gemini_pro",    label: "🌐 Gemini 2.5 Pro ($1.25/M)" },
+    { value: "or_gpt4o",         label: "🌐 GPT-4o ($2.50/M)" },
+    { value: "or_claude",        label: "🌐 Claude Sonnet 4 ($3/M)" },
+    { value: "or_claude_opus",   label: "🌐 Claude Opus 4 ($15/M)" },
   ]},
   { label: "──", providers: [
     { value: "skip",  label: "Skip" },
@@ -435,276 +484,275 @@ function ProviderCard({ id, p, onTest, onToggle }) {
   )
 }
 
-// ── Routing Table ──────────────────────────────────────────────────────────────
-const thStyle = { padding: "8px 10px", textAlign: "left", fontSize: 11, fontWeight: 600, borderBottom: "1px solid #E5E5EA" }
-const tdStyle = { padding: "8px 10px", borderBottom: "1px solid #E5E5EA", verticalAlign: "top" }
+// ── Routing Tiers — 5 smart categories ────────────────────────────────────────
+// Based on real cost data: Flash Redevelop=10K tok $0.003, Claude Draft=2.7K tok $0.017
+const TIERS = [
+  {
+    id: "smart_balance",
+    label: "⚖️ Smart Balance",
+    desc: "Best value — Flash quality at $0.30/M, DeepSeek fallback, free safety net",
+    color: "#6366f1", bg: "#eef2ff",
+    chain: { first: "or_gemini_flash", second: "or_deepseek", third: "or_qwen" },
+    models: ["Gemini 2.5 Flash", "DeepSeek V3.2", "GPT-OSS 120B"],
+  },
+  {
+    id: "turbo_free",
+    label: "🆓 Turbo Free",
+    desc: "100% free — Groq fastest + OR free models, zero cost",
+    color: "#10b981", bg: "#ecfdf5",
+    chain: { first: "groq", second: "or_qwen", third: "or_gemma3" },
+    models: ["Groq", "GPT-OSS 120B", "Gemma 3 27B"],
+  },
+  {
+    id: "budget",
+    label: "💸 Budget",
+    desc: "Ultra cheap paid — Gemini Lite at $0.07/M, DeepSeek V3.2 fallback",
+    color: "#f59e0b", bg: "#fef3c7",
+    chain: { first: "or_gemini_lite", second: "or_deepseek", third: "or_qwen" },
+    models: ["Gemini 2.0 Lite", "DeepSeek V3.2", "GPT-OSS 120B"],
+  },
+  {
+    id: "quality",
+    label: "💎 Quality",
+    desc: "High quality — Flash workhorse, Gemini Pro for hard steps",
+    color: "#0ea5e9", bg: "#e0f2fe",
+    chain: { first: "or_gemini_flash", second: "or_gemini_pro", third: "or_claude" },
+    models: ["Gemini 2.5 Flash", "Gemini 2.5 Pro", "Claude Sonnet 4"],
+  },
+  {
+    id: "premium",
+    label: "👑 Premium",
+    desc: "Top tier — Gemini Pro + Claude Sonnet 4, best output quality",
+    color: "#7c3aed", bg: "#f3e8ff",
+    chain: { first: "or_gemini_pro", second: "or_claude", third: "or_o4_mini" },
+    models: ["Gemini 2.5 Pro", "Claude Sonnet 4", "o4-mini"],
+  },
+]
 
-function RoutingTable({ routing, onChange, providerGroups }) {
+// ── Step Row ──────────────────────────────────────────────────────────────────
+function StepRow({ stepDef, config, onChange, providerGroups }) {
   const groups = providerGroups || PROVIDER_GROUPS
-  
-  const handleChange = (stepKey, slotKey, value) => {
-    const updated = { ...routing, [stepKey]: { ...routing[stepKey], [slotKey]: value } }
-    onChange(updated)
+  const isAiRouted = AI_ROUTED_STEPS.has(stepDef.key)
+  const tierMatch = TIERS.find(t =>
+    t.chain.first === (config?.first || "skip") &&
+    t.chain.second === (config?.second || "skip") &&
+    t.chain.third === (config?.third || "skip")
+  )
+  return (
+    <tr style={{ borderBottom: "1px solid rgba(60,60,67,0.07)" }}>
+      <td style={{ padding: "8px 12px", verticalAlign: "middle" }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: T.text }}>{stepDef.label.replace(/Step \d+: /, "")}</div>
+        <div style={{ fontSize: 10, color: T.textSoft }}>{stepDef.desc}</div>
+      </td>
+      {isAiRouted ? (
+        ["first", "second", "third"].map(slot => (
+          <td key={slot} style={{ padding: "6px 8px", verticalAlign: "middle" }}>
+            <select
+              value={config?.[slot] || "skip"}
+              onChange={e => onChange(slot, e.target.value)}
+              style={{
+                width: "100%", padding: "5px 6px", borderRadius: 6,
+                border: "1px solid rgba(60,60,67,0.15)",
+                fontSize: 11, background: "#fff", cursor: "pointer",
+              }}
+            >
+              {groups.map(g => (
+                <optgroup key={g.label} label={g.label}>
+                  {g.providers.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </td>
+        ))
+      ) : (
+        <td colSpan={3} style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle" }}>
+          <span style={{
+            display: "inline-block", padding: "4px 12px", borderRadius: 20, fontSize: 11, fontWeight: 600,
+            background: "#ecfdf5", color: "#059669", border: "1px solid #a7f3d030",
+          }}>
+            Deterministic (No AI Call)
+          </span>
+        </td>
+      )}
+      <td style={{ padding: "6px 8px", textAlign: "center", verticalAlign: "middle" }}>
+        {isAiRouted ? (
+          tierMatch ? (
+            <span style={{
+              display: "inline-block", padding: "2px 7px", borderRadius: 20, fontSize: 9, fontWeight: 700,
+              background: tierMatch.bg, color: tierMatch.color, border: `1px solid ${tierMatch.color}30`,
+              whiteSpace: "nowrap",
+            }}>
+              {tierMatch.label.split(" ").slice(0, 2).join(" ")}
+            </span>
+          ) : (
+            <span style={{
+              display: "inline-block", padding: "2px 7px", borderRadius: 20, fontSize: 9, fontWeight: 600,
+              background: "#f1f5f9", color: "#64748b",
+            }}>
+              Custom
+            </span>
+          )
+        ) : (
+          <span style={{ fontSize: 9, color: T.textSoft }}>—</span>
+        )}
+      </td>
+    </tr>
+  )
+}
+
+// ── Phase Group ────────────────────────────────────────────────────────────────
+function PhaseGroup({ phase, routing, onChangeStep, providerGroups }) {
+  const [open, setOpen] = useState(true)
+  const stepDefs = STEPS.filter(s => phase.steps.includes(s.key))
+
+  const detectPhaseTier = () => {
+    for (const tier of TIERS) {
+      const allMatch = phase.steps.every(key => {
+        const r = routing[key]
+        return r && r.first === tier.chain.first && r.second === tier.chain.second && r.third === tier.chain.third
+      })
+      if (allMatch) return tier.id
+    }
+    return ""
+  }
+  const phaseTier = detectPhaseTier()
+
+  const applyToPhase = (tierId) => {
+    const tier = TIERS.find(t => t.id === tierId)
+    if (!tier) return
+    phase.steps.forEach(key => onChangeStep(key, { ...tier.chain }))
   }
 
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-        <thead>
-          <tr style={{ background: "#F9F9F9" }}>
-            <th style={{ ...thStyle, width: 180 }}>Pipeline Step</th>
-            <th style={thStyle}>1st Priority</th>
-            <th style={thStyle}>2nd Priority</th>
-            <th style={thStyle}>3rd Priority</th>
-          </tr>
-        </thead>
-        <tbody>
-          {STEPS.map(s => (
-            <tr key={s.key}>
-              <td style={tdStyle}>
-                <div style={{ fontWeight: 600, color: T.text }}>{s.label}</div>
-                <div style={{ fontSize: 10, color: T.textSoft }}>{s.desc}</div>
-              </td>
-              {["first", "second", "third"].map(slot => (
-                <td key={slot} style={tdStyle}>
-                  <select value={routing[s.key]?.[slot] || "skip"} onChange={e => handleChange(s.key, slot, e.target.value)}
-                    style={{ padding: "5px 8px", borderRadius: 6, border: `1px solid ${T.border}`, fontSize: 12, background: "#fff", cursor: "pointer", width: "100%" }}>
-                    {groups.map(g => (
-                      <optgroup key={g.label} label={g.label}>
-                        {g.providers.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                      </optgroup>
-                    ))}
-                  </select>
-                </td>
+    <div style={{ borderRadius: 10, border: "1px solid rgba(60,60,67,0.12)", overflow: "hidden", marginBottom: 12 }}>
+      <div
+        style={{
+          display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+          background: phase.color + "0d", borderLeft: `3px solid ${phase.color}`, cursor: "pointer",
+        }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <span style={{ fontSize: 15 }}>{phase.icon}</span>
+        <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: T.text }}>{phase.label}</span>
+        <div onClick={e => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 10, color: T.textSoft, fontWeight: 600 }}>Apply tier:</span>
+          <select
+            value={phaseTier}
+            onChange={e => applyToPhase(e.target.value)}
+            style={{ padding: "3px 8px", borderRadius: 6, fontSize: 11, border: "1px solid rgba(60,60,67,0.2)", background: "#fff", cursor: "pointer" }}
+          >
+            <option value="">— Mixed —</option>
+            {TIERS.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+        </div>
+        <span style={{ fontSize: 12, color: T.textSoft }}>{open ? "▾" : "▸"}</span>
+      </div>
+      {open && (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#f5f5f7" }}>
+                <th style={{ padding: "6px 12px", textAlign: "left", fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.5 }}>Step</th>
+                <th style={{ padding: "6px 8px", textAlign: "left", fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.5, width: "21%" }}>1st Priority</th>
+                <th style={{ padding: "6px 8px", textAlign: "left", fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.5, width: "21%" }}>2nd Priority</th>
+                <th style={{ padding: "6px 8px", textAlign: "left", fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.5, width: "21%" }}>3rd Priority</th>
+                <th style={{ padding: "6px 8px", textAlign: "center", fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.5, width: 80 }}>Tier</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stepDefs.map(s => (
+                <StepRow
+                  key={s.key}
+                  stepDef={s}
+                  config={routing[s.key]}
+                  onChange={(slot, val) => onChangeStep(s.key, { ...(routing[s.key] || {}), [slot]: val })}
+                  providerGroups={providerGroups}
+                />
               ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Routing Presets ────────────────────────────────────────────────────────────
-const _groq_ollama_routing = {
-  research:     { first: "groq",        second: "gemini_paid", third: "or_qwen" },
-  structure:    { first: "groq",        second: "gemini_paid", third: "or_qwen" },
-  verify:       { first: "groq",        second: "gemini_paid", third: "skip" },
-  links:        { first: "groq",        second: "gemini_paid", third: "or_qwen" },
-  references:   { first: "groq",        second: "gemini_paid", third: "or_qwen" },
-  draft:        { first: "gemini_paid", second: "groq",        third: "or_qwen" },
-  review:       { first: "groq",        second: "gemini_paid", third: "or_qwen" },
-  issues:       { first: "groq",        second: "gemini_paid", third: "skip" },
-  redevelop:    { first: "gemini_paid", second: "groq",        third: "or_qwen" },
-  score:        { first: "groq",        second: "gemini_paid", third: "skip" },
-  quality_loop: { first: "gemini_paid", second: "groq",        third: "or_qwen" },
-}
-
-const PRESETS = {
-  groq_ollama: {
-    label: "⚡💎 Groq + Gemini (Default)",
-    desc: "Groq for simple tasks, Gemini Paid for heavy writing, OR Qwen fallback",
-    routing: _groq_ollama_routing,
-  },
-  speed: {
-    label: "⚡ Max Speed",
-    desc: "Groq primary for everything, Gemini fallback",
-    routing: {
-      research:     { first: "groq", second: "gemini_paid", third: "skip" },
-      structure:    { first: "groq", second: "gemini_paid", third: "skip" },
-      verify:       { first: "groq", second: "gemini_paid", third: "skip" },
-      links:        { first: "groq", second: "gemini_paid", third: "skip" },
-      references:   { first: "groq", second: "gemini_paid", third: "skip" },
-      draft:        { first: "groq", second: "gemini_paid", third: "or_qwen" },
-      review:       { first: "groq", second: "gemini_paid", third: "skip" },
-      issues:       { first: "groq", second: "gemini_paid", third: "skip" },
-      redevelop:    { first: "groq", second: "gemini_paid", third: "or_qwen" },
-      score:        { first: "groq", second: "gemini_paid", third: "skip" },
-      quality_loop: { first: "groq", second: "gemini_paid", third: "or_qwen" },
-    },
-  },
-  ollama_remote: {
-    label: "🦙 Ollama Remote",
-    desc: "Ollama remote primary, Groq fallback",
-    routing: {
-      research:     { first: "ollama", second: "groq",   third: "skip" },
-      structure:    { first: "ollama", second: "groq",   third: "skip" },
-      verify:       { first: "ollama", second: "groq",   third: "skip" },
-      links:        { first: "ollama", second: "groq",   third: "skip" },
-      references:   { first: "ollama", second: "groq",   third: "skip" },
-      draft:        { first: "ollama", second: "groq",   third: "gemini_paid" },
-      review:       { first: "ollama", second: "groq",   third: "skip" },
-      issues:       { first: "ollama", second: "groq",   third: "skip" },
-      redevelop:    { first: "ollama", second: "groq",   third: "gemini_paid" },
-      score:        { first: "ollama", second: "groq",   third: "skip" },
-      quality_loop: { first: "ollama", second: "groq",   third: "gemini_paid" },
-    },
-  },
-  quality: {
-    label: "🏆 Max Quality",
-    desc: "Gemini + Groq + Ollama — all providers active",
-    routing: {
-      research:     { first: "groq",        second: "gemini_free", third: "ollama" },
-      structure:    { first: "groq",        second: "gemini_free", third: "ollama" },
-      verify:       { first: "gemini_free", second: "groq",        third: "skip" },
-      links:        { first: "groq",        second: "gemini_free", third: "ollama" },
-      references:   { first: "ollama",      second: "groq",        third: "skip" },
-      draft:        { first: "ollama",      second: "groq",        third: "gemini_free" },
-      review:       { first: "groq",        second: "gemini_free", third: "ollama" },
-      issues:       { first: "groq",        second: "gemini_free", third: "skip" },
-      redevelop:    { first: "ollama",      second: "groq",        third: "gemini_free" },
-      score:        { first: "groq",        second: "gemini_free", third: "skip" },
-      quality_loop: { first: "ollama",      second: "groq",        third: "gemini_free" },
-    },
-  },
-  or_free: {
-    label: "🆓 OR Free Models",
-    desc: "Free models only: Qwen 3.6 (free) + Groq + Qwen Next (free)",
-    routing: {
-      research:     { first: "groq",     second: "or_qwen",       third: "or_qwen_next" },
-      structure:    { first: "groq",     second: "or_qwen",       third: "or_qwen_next" },
-      verify:       { first: "groq",     second: "or_qwen",       third: "skip" },
-      links:        { first: "groq",     second: "or_qwen",       third: "skip" },
-      references:   { first: "groq",     second: "or_qwen",       third: "skip" },
-      draft:        { first: "or_qwen",  second: "or_qwen_next",  third: "groq" },
-      review:       { first: "groq",     second: "or_qwen",       third: "skip" },
-      issues:       { first: "groq",     second: "or_qwen",       third: "skip" },
-      redevelop:    { first: "or_qwen",  second: "or_qwen_next",  third: "groq" },
-      score:        { first: "groq",     second: "or_qwen",       third: "skip" },
-      quality_loop: { first: "or_qwen",  second: "groq",          third: "or_qwen_next" },
-    },
-  },
-  or_balanced: {
-    label: "⚖️ OR Balanced",
-    desc: "DeepSeek V3.2 + Gemini Lite + Groq — great cost/quality ratio",
-    routing: {
-      research:     { first: "or_deepseek",     second: "or_gemini_lite",  third: "groq" },
-      structure:    { first: "or_deepseek",     second: "or_gemini_lite",  third: "groq" },
-      verify:       { first: "groq",            second: "or_gemini_lite",  third: "skip" },
-      links:        { first: "groq",            second: "or_deepseek",     third: "skip" },
-      references:   { first: "groq",            second: "or_deepseek",     third: "skip" },
-      draft:        { first: "or_deepseek",     second: "or_gemini_flash", third: "groq" },
-      review:       { first: "or_gemini_lite",  second: "groq",            third: "skip" },
-      issues:       { first: "groq",            second: "or_deepseek",     third: "skip" },
-      redevelop:    { first: "or_deepseek",     second: "or_gemini_flash", third: "groq" },
-      score:        { first: "groq",            second: "or_gemini_lite",  third: "skip" },
-      quality_loop: { first: "or_deepseek",     second: "or_gemini_flash", third: "groq" },
-    },
-  },
-  or_quality: {
-    label: "🌐 OR Quality",
-    desc: "Gemini Flash + GPT-4o + DeepSeek — premium OpenRouter output",
-    routing: {
-      research:     { first: "or_gemini_flash", second: "or_deepseek", third: "groq" },
-      structure:    { first: "or_gemini_flash", second: "or_deepseek", third: "groq" },
-      verify:       { first: "or_gemini_flash", second: "or_deepseek", third: "groq" },
-      links:        { first: "groq",            second: "or_deepseek", third: "skip" },
-      references:   { first: "groq",            second: "or_deepseek", third: "skip" },
-      draft:        { first: "or_gpt4o",        second: "or_gemini_flash", third: "or_deepseek" },
-      review:       { first: "or_gemini_flash", second: "or_deepseek", third: "groq" },
-      issues:       { first: "or_gemini_flash", second: "groq",        third: "skip" },
-      redevelop:    { first: "or_gpt4o",        second: "or_gemini_flash", third: "or_deepseek" },
-      score:        { first: "or_gemini_flash", second: "groq",        third: "skip" },
-      quality_loop: { first: "or_gpt4o",        second: "or_gemini_flash", third: "or_deepseek" },
-    },
-  },
-  groq_or: {
-    label: "⚡🌐 Groq + OpenRouter",
-    desc: "Groq for speed, OpenRouter free models as fallback",
-    routing: {
-      research:     { first: "groq", second: "or_qwen",      third: "or_deepseek" },
-      structure:    { first: "groq", second: "or_qwen",      third: "or_deepseek" },
-      verify:       { first: "groq", second: "or_qwen",      third: "skip" },
-      links:        { first: "groq", second: "or_qwen",      third: "skip" },
-      references:   { first: "groq", second: "or_qwen",      third: "skip" },
-      draft:        { first: "groq", second: "or_deepseek",  third: "or_gemini_flash" },
-      review:       { first: "groq", second: "or_deepseek",  third: "skip" },
-      issues:       { first: "groq", second: "or_qwen",      third: "skip" },
-      redevelop:    { first: "groq", second: "or_deepseek",  third: "or_gemini_flash" },
-      score:        { first: "groq", second: "or_qwen",      third: "skip" },
-      quality_loop: { first: "groq", second: "or_deepseek",  third: "or_gemini_flash" },
-    },
-  },
-  or_smart: {
-    label: "🧠 OR Smart Mix",
-    desc: "DeepSeek R1 reasoning + Gemini Flash + Qwen for intelligent pipeline",
-    routing: {
-      research:     { first: "or_qwen",        second: "or_deepseek_r1",  third: "groq" },
-      structure:    { first: "or_deepseek_r1", second: "or_qwen",         third: "groq" },
-      verify:       { first: "or_deepseek_r1", second: "groq",            third: "skip" },
-      links:        { first: "groq",           second: "or_qwen",         third: "skip" },
-      references:   { first: "groq",           second: "or_qwen",         third: "skip" },
-      draft:        { first: "or_deepseek_r1", second: "or_gemini_flash", third: "or_deepseek" },
-      review:       { first: "or_gemini_flash",second: "or_deepseek_r1",  third: "groq" },
-      issues:       { first: "or_deepseek_r1", second: "groq",            third: "skip" },
-      redevelop:    { first: "or_deepseek_r1", second: "or_gemini_flash", third: "or_deepseek" },
-      score:        { first: "or_gemini_flash",second: "groq",            third: "skip" },
-      quality_loop: { first: "or_deepseek_r1", second: "or_gemini_flash", third: "or_deepseek" },
-    },
-  },
-}
-
-// ── Button Styles ──────────────────────────────────────────────────────────────
-const smallBtn = { padding: "3px 10px", borderRadius: 6, border: "1px solid #E5E5EA", background: "#fff", fontSize: 11, cursor: "pointer", fontWeight: 500 }
-
-// ── Prompts Editor ─────────────────────────────────────────────────────────────
-function PromptsEditor() {
-  const { data: prompts, refetch } = useQuery({ queryKey: ["prompts"], queryFn: () => api.get("/api/prompts") })
-  const [editing, setEditing] = useState(null)
-  const [editValue, setEditValue] = useState("")
-  const [saving, setSaving] = useState(false)
-
-  const startEdit = (p) => { setEditing(p.key); setEditValue(p.content || p.default || "") }
-  const cancel = () => { setEditing(null); setEditValue("") }
-  const save = async () => {
-    setSaving(true)
-    try {
-      await api.post(`/api/prompts/${editing}`, { content: editValue })
-      refetch(); setEditing(null); setEditValue("")
-    } catch (e) { alert(e.message) }
-    setSaving(false)
-  }
-  const reset = async (key) => {
-    if (!confirm("Reset to default?")) return
-    try { await api.delete(`/api/prompts/${key}`); refetch() } catch (e) { alert(e.message) }
+// ── Routing Table ──────────────────────────────────────────────────────────────
+function RoutingTable({ routing, onChange, providerGroups }) {
+  const handleChangeStep = (stepKey, newConfig) => {
+    onChange({ ...routing, [stepKey]: newConfig })
   }
 
-  const items = prompts?.prompts || []
+  const applyToAll = (tier) => {
+    const updated = {}
+    STEPS.forEach(s => { updated[s.key] = { ...tier.chain } })
+    onChange({ ...routing, ...updated })
+  }
+
+  const detectGlobalTier = () => {
+    for (const tier of TIERS) {
+      if (STEPS.every(s => {
+        const r = routing[s.key]
+        return r && r.first === tier.chain.first && r.second === tier.chain.second && r.third === tier.chain.third
+      })) return tier.id
+    }
+    return null
+  }
+  const globalTier = detectGlobalTier()
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {items.length === 0 && <div style={{ fontSize: 12, color: T.textSoft }}>Loading prompts…</div>}
-      {items.map(p => (
-        <div key={p.key} style={{ background: "#fff", borderRadius: 10, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 8, borderBottom: editing === p.key ? `1px solid ${T.border}` : "none" }}>
-            <span style={{ fontSize: 14 }}>{p.key.includes("structure") ? "📐" : p.key.includes("draft") || p.key.includes("step6") ? "✍️" : p.key.includes("review") ? "🔎" : "🚀"}</span>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>{p.label || p.key}</div>
-              {p.desc && <div style={{ fontSize: 10, color: T.textSoft }}>{p.desc}</div>}
-            </div>
-            {p.is_custom && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 99, background: T.purpleLight, color: T.purple, fontWeight: 600 }}>Custom</span>}
-            {editing !== p.key ? (
-              <div style={{ display: "flex", gap: 4 }}>
-                <button onClick={() => startEdit(p)} style={smallBtn}>Edit</button>
-                {p.is_custom && <button onClick={() => reset(p.key)} style={{ ...smallBtn, color: T.red }}>Reset</button>}
-              </div>
-            ) : (
-              <div style={{ display: "flex", gap: 4 }}>
-                <button onClick={save} disabled={saving} style={{ ...smallBtn, background: T.purple, color: "#fff" }}>{saving ? "Saving…" : "Save"}</button>
-                <button onClick={cancel} style={smallBtn}>Cancel</button>
-              </div>
-            )}
-          </div>
-          {editing === p.key && (
-            <textarea value={editValue} onChange={e => setEditValue(e.target.value)}
-              style={{ width: "100%", minHeight: 200, padding: 14, border: "none", outline: "none", fontFamily: "monospace", fontSize: 12, resize: "vertical", background: "#FAFAFA" }} />
-          )}
+    <div style={{ padding: 16 }}>
+      {/* Global tier quick-apply bar */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+          Apply to all steps
         </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {TIERS.map(tier => {
+            const isActive = globalTier === tier.id
+            return (
+              <button key={tier.id} onClick={() => applyToAll(tier)} title={tier.desc}
+                style={{
+                  padding: "7px 14px", borderRadius: 20, fontSize: 12, fontWeight: isActive ? 700 : 500,
+                  cursor: "pointer", transition: "all 0.15s",
+                  border: `2px solid ${isActive ? tier.color : tier.color + "50"}`,
+                  background: isActive ? tier.color : tier.bg,
+                  color: isActive ? "#fff" : tier.color,
+                  boxShadow: isActive ? `0 2px 8px ${tier.color}30` : "none",
+                }}
+                onMouseEnter={e => { if (!isActive) e.currentTarget.style.borderColor = tier.color }}
+                onMouseLeave={e => { if (!isActive) e.currentTarget.style.borderColor = tier.color + "50" }}
+              >
+                {tier.label}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Phase-grouped matrix */}
+      {PHASES.map(phase => (
+        <PhaseGroup
+          key={phase.key}
+          phase={phase}
+          routing={routing}
+          onChangeStep={handleChangeStep}
+          providerGroups={providerGroups}
+        />
       ))}
     </div>
   )
 }
 
+// ── System Templates now imported from ./aihub/systemRoutingTemplates.js ──────
+
+// ── Button Styles ──────────────────────────────────────────────────────────────
+const smallBtn = { padding: "3px 10px", borderRadius: 6, border: "1px solid #E5E5EA", background: "#fff", fontSize: 11, cursor: "pointer", fontWeight: 500 }
+
 // ── Log Table ──────────────────────────────────────────────────────────────────
+const thStyle = { padding: "6px 10px", textAlign: "left", fontSize: 10, fontWeight: 700, color: "rgba(60,60,67,0.55)", textTransform: "uppercase", letterSpacing: 0.5, borderBottom: "1px solid rgba(60,60,67,0.12)" }
+const tdStyle = { padding: "6px 10px", fontSize: 12, color: "#000000", borderBottom: "1px solid rgba(60,60,67,0.12)", verticalAlign: "middle" }
+
 function LogTable({ logs }) {
   if (!logs || logs.length === 0) return <div style={{ fontSize: 12, color: T.textSoft, padding: 16 }}>No recent AI logs.</div>
   return (
@@ -990,6 +1038,102 @@ function APIKeysManager() {
   )
 }
 
+// ── Custom Models Manager ──────────────────────────────────────────────────────
+function CustomModelsManager({ onModelsChanged }) {
+  const [models, setModels] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [name, setName] = useState("")
+  const [modelId, setModelId] = useState("")
+  const [adding, setAdding] = useState(false)
+  const [error, setError] = useState("")
+
+  const fetchModels = useCallback(async () => {
+    try {
+      const data = await api.get("/api/ai/models/custom")
+      setModels(data || [])
+    } catch { setModels([]) }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { fetchModels() }, [fetchModels])
+
+  const handleAdd = async () => {
+    if (!name.trim() || !modelId.trim()) { setError("Name and Model ID are required"); return }
+    setAdding(true); setError("")
+    try {
+      const res = await api.post("/api/ai/models/custom", { name: name.trim(), model_id: modelId.trim() })
+      if (res?.ok) {
+        setName(""); setModelId("")
+        await fetchModels()
+        if (onModelsChanged) onModelsChanged()
+      } else {
+        setError(res?.error || "Failed to add model")
+      }
+    } catch (e) { setError(e.message || "Failed to add model") }
+    setAdding(false)
+  }
+
+  const handleDelete = async (id) => {
+    if (!confirm("Delete this custom model?")) return
+    try {
+      await api.delete(`/api/ai/models/custom/${id}`)
+      await fetchModels()
+      if (onModelsChanged) onModelsChanged()
+    } catch (e) { alert(e.message) }
+  }
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 12, border: `1px solid ${T.border}`, padding: 16, marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: 12 }}>🔧 Custom AI Models</div>
+      <div style={{ fontSize: 11, color: T.textSoft, marginBottom: 12 }}>
+        Add custom OpenRouter models. They'll appear in the routing dropdowns above.
+      </div>
+
+      {/* Add form */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ flex: "1 1 180px" }}>
+          <label style={{ fontSize: 11, color: T.textSoft, display: "block", marginBottom: 2 }}>Display Name</label>
+          <input
+            value={name} onChange={e => setName(e.target.value)}
+            placeholder="e.g. My GPT-4o"
+            style={{ width: "100%", padding: "6px 10px", borderRadius: 6, border: `1px solid ${T.border}`, fontSize: 12 }}
+          />
+        </div>
+        <div style={{ flex: "1 1 260px" }}>
+          <label style={{ fontSize: 11, color: T.textSoft, display: "block", marginBottom: 2 }}>OpenRouter Model ID</label>
+          <input
+            value={modelId} onChange={e => setModelId(e.target.value)}
+            placeholder="e.g. openai/gpt-4o or anthropic/claude-3-opus"
+            style={{ width: "100%", padding: "6px 10px", borderRadius: 6, border: `1px solid ${T.border}`, fontSize: 12 }}
+          />
+        </div>
+        <Btn variant="primary" onClick={handleAdd} disabled={adding} style={{ height: 32 }}>
+          {adding ? "Adding…" : "+ Add Model"}
+        </Btn>
+      </div>
+      {error && <div style={{ fontSize: 11, color: "#cc3300", marginBottom: 8 }}>{error}</div>}
+
+      {/* Models list */}
+      {loading ? (
+        <div style={{ fontSize: 12, color: T.textSoft }}>Loading…</div>
+      ) : models.length === 0 ? (
+        <div style={{ fontSize: 12, color: T.textSoft, fontStyle: "italic" }}>No custom models added yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {models.map(m => (
+            <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", background: "#F9F9FB", borderRadius: 8, fontSize: 12 }}>
+              <span style={{ fontWeight: 600, color: T.text, flex: "0 0 auto" }}>🔧 {m.name}</span>
+              <span style={{ color: T.textSoft, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.model_id}</span>
+              <span style={{ fontSize: 10, color: T.textSoft, fontFamily: "monospace" }}>{m.provider_id}</span>
+              <button onClick={() => handleDelete(m.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#cc3300", fontSize: 14, padding: "2px 6px" }} title="Delete model">✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // MAIN AI HUB COMPONENT
 // ════════════════════════════════════════════════════════════════════════════════
@@ -999,6 +1143,8 @@ export default function AIHub() {
   const [routing, setRouting] = useState(null)
   const [routingDirty, setRoutingDirty] = useState(false)
   const [savingRouting, setSavingRouting] = useState(false)
+  const [templateName, setTemplateName] = useState("")
+  const [savingTemplate, setSavingTemplate] = useState(false)
 
   // ── Queries ──────────────────────────────────────────────────────────────
   const { data: dashboard, isLoading, refetch } = useQuery({
@@ -1024,6 +1170,11 @@ export default function AIHub() {
   const { data: savedRouting } = useQuery({
     queryKey: ["ai-routing"],
     queryFn: () => api.get("/api/ai/routing"),
+  })
+
+  const { data: routingTemplatesData } = useQuery({
+    queryKey: ["ai-routing-templates"],
+    queryFn: () => api.get("/api/ai/routing/templates"),
   })
 
   // Initialize routing from saved or dashboard defaults
@@ -1058,9 +1209,59 @@ export default function AIHub() {
     setSavingRouting(false)
   }
 
-  const applyPreset = (key) => {
-    setRouting(PRESETS[key].routing)
+  const applySystemTemplate = (tpl) => {
+    setRouting(expandToLegacyRouting(tpl.steps))
     setRoutingDirty(true)
+  }
+
+  const copySystemTemplate = async (tpl) => {
+    const name = tpl.name.replace(/^[^\w]*\s*/, "") + " (Copy)"
+    const routing = expandToLegacyRouting(tpl.steps)
+    try {
+      await api.post("/api/ai/routing/templates", { name, routing })
+      qclient.invalidateQueries(["ai-routing-templates"])
+    } catch (e) { alert(e.message) }
+  }
+
+  const routingTemplates = routingTemplatesData?.templates || []
+
+  const saveCurrentAsTemplate = async () => {
+    const name = (templateName || "").trim()
+    if (!name) {
+      alert("Template name is required")
+      return
+    }
+    if (!routing) {
+      alert("Routing is not ready yet")
+      return
+    }
+
+    setSavingTemplate(true)
+    try {
+      await api.post("/api/ai/routing/templates", { name, routing })
+      setTemplateName("")
+      qclient.invalidateQueries(["ai-routing-templates"])
+    } catch (e) {
+      alert(e.message)
+    }
+    setSavingTemplate(false)
+  }
+
+  const applyCustomTemplate = (tpl) => {
+    if (!tpl?.routing) return
+    setRouting(tpl.routing)
+    setRoutingDirty(true)
+  }
+
+  const deleteCustomTemplate = async (tpl) => {
+    if (!tpl?.id) return
+    if (!confirm(`Delete template "${tpl.name}"?`)) return
+    try {
+      await api.delete(`/api/ai/routing/templates/${tpl.id}`)
+      qclient.invalidateQueries(["ai-routing-templates"])
+    } catch (e) {
+      alert(e.message)
+    }
   }
 
   const providers = dashboard?.providers || {}
@@ -1120,7 +1321,6 @@ export default function AIHub() {
         {sectionBtn("status", "Provider Status", "📡")}
         {sectionBtn("keys", "API Keys", "🔑")}
         {sectionBtn("routing", "AI Routing", "🔀")}
-        {sectionBtn("prompts", "Prompts", "📝")}
         {sectionBtn("logs", "Logs & Usage", "📊")}
         {sectionBtn("ratelimits", "Rate Limits", "⏱")}
       </div>
@@ -1263,17 +1463,115 @@ export default function AIHub() {
       {/* ── SECTION: Routing ──────────────────────────────────────────────── */}
       {section === "routing" && routing && (
         <div>
-          {/* Presets */}
-          <div style={{ marginBottom: 14, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: T.textSoft }}>Presets:</span>
-            {Object.entries(PRESETS).map(([key, preset]) => (
-              <button key={key} onClick={() => applyPreset(key)} style={{
-                padding: "5px 12px", borderRadius: 8, border: `1px solid ${T.border}`,
-                background: "#fff", fontSize: 11, cursor: "pointer", fontWeight: 500,
-              }} title={preset.desc}>
-                {preset.label}
-              </button>
-            ))}
+          <CustomModelsManager onModelsChanged={() => { refetch() }} />
+
+          {/* System Templates */}
+          <div style={{ background: "#fff", borderRadius: 12, border: `1px solid ${T.border}`, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>🎯 System Templates</div>
+            <div style={{ fontSize: 11, color: T.textSoft, marginBottom: 10 }}>
+              Curated routing presets optimized for different goals. Apply directly or copy to customize.
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {SYSTEM_TEMPLATES.map(tpl => (
+                <div key={tpl.id} style={{
+                  display: "flex", flexDirection: "column", gap: 6,
+                  borderRadius: 10, padding: "10px 14px",
+                  border: `1px solid ${tpl.id === DEFAULT_TEMPLATE_ID ? "#6366f140" : "#d1d5db"}`,
+                  background: tpl.id === DEFAULT_TEMPLATE_ID ? "#eef2ff" : "#f9fafb",
+                  minWidth: 200, flex: "1 1 200px", maxWidth: 280,
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>{tpl.name}</div>
+                  <div style={{ fontSize: 10, color: T.textSoft, lineHeight: 1.4 }}>{tpl.description}</div>
+                  <div style={{ display: "flex", gap: 4, marginTop: "auto" }}>
+                    <button onClick={() => applySystemTemplate(tpl)} style={{
+                      border: "1px solid #93c5fd", background: "#eff6ff", color: "#1d4ed8",
+                      borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: "pointer", padding: "3px 10px",
+                    }}>Apply</button>
+                    <button onClick={() => copySystemTemplate(tpl)} title="Copy as custom template" style={{
+                      border: "1px solid #d1d5db", background: "#fff", color: T.textSoft,
+                      borderRadius: 6, fontSize: 10, fontWeight: 600, cursor: "pointer", padding: "3px 8px",
+                    }}>📋 Copy</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: "#fff", borderRadius: 12, border: `1px solid ${T.border}`, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>🧩 Custom Routing Templates</div>
+            <div style={{ fontSize: 11, color: T.textSoft, marginBottom: 10 }}>
+              Save your current routing as a reusable template and apply it anytime like Smart Balance or Premium.
+            </div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+              <input
+                value={templateName}
+                onChange={e => setTemplateName(e.target.value)}
+                placeholder="Template name (e.g. My SEO Mix)"
+                style={{
+                  minWidth: 260,
+                  flex: "1 1 280px",
+                  padding: "7px 10px",
+                  borderRadius: 8,
+                  border: `1px solid ${T.border}`,
+                  fontSize: 12,
+                  background: "#fff",
+                }}
+              />
+              <Btn variant="primary" onClick={saveCurrentAsTemplate} disabled={savingTemplate || !templateName.trim()}>
+                {savingTemplate ? "Saving…" : "+ Save Current as Template"}
+              </Btn>
+            </div>
+
+            {routingTemplates.length === 0 ? (
+              <div style={{ fontSize: 11, color: T.textSoft, fontStyle: "italic" }}>No custom templates yet.</div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {routingTemplates.map(tpl => (
+                  <div key={tpl.id} style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    borderRadius: 20,
+                    padding: "4px 8px 4px 10px",
+                    border: "1px solid #d1d5db",
+                    background: "#f9fafb",
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: T.text }}>{tpl.name}</span>
+                    <button
+                      onClick={() => applyCustomTemplate(tpl)}
+                      style={{
+                        border: "1px solid #93c5fd",
+                        background: "#eff6ff",
+                        color: "#1d4ed8",
+                        borderRadius: 12,
+                        fontSize: 10,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        padding: "2px 8px",
+                      }}
+                    >
+                      Apply
+                    </button>
+                    <button
+                      onClick={() => deleteCustomTemplate(tpl)}
+                      title="Delete template"
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "#b91c1c",
+                        fontSize: 12,
+                        cursor: "pointer",
+                        padding: "0 4px",
+                        lineHeight: 1,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div style={{ background: "#fff", borderRadius: 12, border: `1px solid ${T.border}`, overflow: "hidden" }}>
@@ -1293,23 +1591,10 @@ export default function AIHub() {
           </div>
 
           {/* Legend */}
-          <div style={{ marginTop: 16, padding: 14, background: "#F9F9F9", borderRadius: 10, fontSize: 11, color: T.textSoft, lineHeight: 1.8 }}>
-            <strong style={{ color: T.text }}>How routing works:</strong><br />
-            Each pipeline step tries providers in order: 1st → 2nd → 3rd.<br />
-            If a provider fails (timeout, rate limit, error), it falls through to the next.<br />
-            <strong>"skip"</strong> = stop trying, use fallback data for that step.<br />
-            <strong>"Save Routing"</strong> applies to new articles. <strong>"Save &amp; Propagate"</strong> also pushes changes to any currently running pipelines.
+          <div style={{ marginTop: 14, padding: 12, background: "#F9F9F9", borderRadius: 10, fontSize: 11, color: T.textSoft, lineHeight: 1.7 }}>
+            <strong style={{ color: T.text }}>How it works:</strong> Pick a tier to set all steps at once. Each tier has 3 models — if the first fails, it tries the next.<br />
+            <strong>"Save Routing"</strong> applies to new articles. <strong>"Save &amp; Propagate"</strong> also pushes changes to running pipelines.
           </div>
-        </div>
-      )}
-
-      {/* ── SECTION: Prompts ──────────────────────────────────────────────── */}
-      {section === "prompts" && (
-        <div>
-          <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 12 }}>
-            Customize the instructions given to AI at each pipeline step. Changes apply to all new articles.
-          </div>
-          <PromptsEditor />
         </div>
       )}
 

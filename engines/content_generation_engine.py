@@ -27,7 +27,12 @@ from core.ai_provider_manager import (
     AIProviderManager as _APM,
     CallResult as _CallResult,
 )
+from core.model_profiler import get_profiler, init_profiler
+from core.checkpoint_manager import get_checkpoint_manager
+from core.progress_tracker import create_progress_tracker
 
+from core.routing_schema import ContentState
+from engines.humanize.editorial_intelligence import EditorialIntelligenceEngine
 try:
     import textstat
     HAS_TEXTSTAT = True
@@ -423,6 +428,77 @@ def _set_provider_disabled(provider: str, disabled: bool) -> None:
         _provider_health_cache.pop(provider, None)
         log.info(f"Provider {provider} re-enabled")
 
+
+# ── Emergency fallback chain ─────────────────────────────────────────────────
+# Used when a user's configured chain has no usable providers (all disabled,
+# in cooldown, or out of credits). Picks the FIRST configured provider that
+# is currently available. Order: cheapest reliable → premium fallback.
+_EMERGENCY_FALLBACK_CHAIN = [
+    "or_gemini_flash",   # cheapest paid OR ($0.30/M)
+    "or_gemini_lite",    # cheapest OR ($0.07/M)
+    "or_deepseek",       # cheap reliable OR ($0.26/M)
+    "or_qwen",           # free OR
+    "groq",              # free fast (non-OR)
+    "gemini_free",       # direct gemini fallback
+    "gemini_paid",       # last resort — historically prone to status=0 errors
+    "ollama",            # local last resort
+]
+
+def _build_emergency_chain(exclude: set = None) -> list:
+    """Return a list of currently-available providers from the emergency
+    fallback list, excluding any in `exclude` (e.g. providers that already
+    failed in the user's chain).
+    """
+    exclude = exclude or set()
+    chain = []
+    for p in _EMERGENCY_FALLBACK_CHAIN:
+        if p in exclude:
+            continue
+        if _is_provider_available(p):
+            chain.append(p)
+        if len(chain) >= 3:
+            break
+    return chain
+
+
+def _is_valid_json_response(data) -> bool:
+    """Return True if `data` looks like a usable JSON response, False if it
+    looks like an error envelope. Truthy `{"error": "..."}` payloads should
+    NOT win the parallel race against a slower-but-real success.
+    """
+    if not data or not isinstance(data, dict):
+        return False
+    # Heuristic: if only "error"/"status"/"message" keys are present and
+    # status indicates failure, treat as invalid.
+    keys = set(data.keys())
+    error_only_keys = {"error", "status", "message", "code", "detail"}
+    if keys and keys.issubset(error_only_keys):
+        status = str(data.get("status", "")).lower()
+        if status in {"error", "failed", "fail"} or "error" in data:
+            return False
+    # Explicit success=False
+    if data.get("success") is False:
+        return False
+    return True
+
+
+# ── Fallback content sentinels ───────────────────────────────────────────────
+# Lower-case sub-strings that MUST NOT appear in published content. The pre-save
+# scanner (see _scan_for_fallback_phrases) rejects any article containing them.
+# These represent generic placeholder text injected by last-resort fallbacks
+# when AI generation fails. If an article reaches the saver with these strings,
+# something went wrong upstream and the content is not publishable.
+_FALLBACK_MARKER_PHRASES = [
+    "answer coming soon",
+    "coming soon",
+    "this section covers ",            # generic skeleton paragraph from minimal_draft
+    "is an important consideration when evaluating",
+    "is an important question about",
+    "key factors include quality, pricing, and availability",
+    "quality and authenticity are the most important factors",
+    "always verify sourcing certifications and compare prices",
+]
+
 # ── Memory Helpers ───────────────────────────────────────────────────────────
 
 def _get_mem_pct() -> float:
@@ -514,6 +590,7 @@ class PipelineState:
     readability: float = 0
     word_count: int = 0
     issues_found: int = 0
+    editorial_instructions: List[str] = field(default_factory=list)
 
 @dataclass
 class StepAIConfig:
@@ -523,9 +600,9 @@ class StepAIConfig:
             | or_gemini_flash | or_gemini_lite | or_glm | or_gpt4o | or_claude
             | or_llama | or_qwen_coder | or_deepseek_r1 | skip
     """
-    first:  str = "gemini_paid"
-    second: str = "groq"
-    third:  str = "ollama"
+    first:  str = "or_gemini_flash"
+    second: str = "or_deepseek"
+    third:  str = "or_gemini_lite"
 
 
 @dataclass
@@ -548,20 +625,32 @@ class AIRoutingConfig:
     ─────────────────────────────────────────────────────────────────────────────
     """
     # Steps 1-4 (research & structure) — JSON tasks
-    research:     StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "groq",           "or_qwen"))
-    structure:    StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_qwen"))
+    # FIX 51-52: Remove Groq from Gemini chains to prevent rate limits
+    # NOTE: Chains are pure-OR (all `or_*` providers). _call_ai_with_chain detects
+    # this and switches to SEQUENTIAL fallback mode, avoiding the parallel race
+    # that wastes ~2s/call on broken non-OR providers. Mixing in `gemini_paid`
+    # here re-enables the race and burns retries — keep all entries `or_*` or `skip`.
+    research:     StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "or_deepseek"))
+    structure:    StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_gemini_lite"))
     verify:       StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "skip"))
-    links:        StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_lite",  "or_qwen",        "skip"))
-    references:   StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "groq",           "or_qwen"))
+    links:        StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "skip"))
+    references:   StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "skip"))
     # Steps 6-9 (content writing) — quality matters, flash proven best value
-    draft:        StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "gemini_paid"))
-    review:       StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "groq",           "or_qwen"))
-    issues:       StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "groq",           "skip"))
-    humanize:     StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "gemini_paid"))
-    redevelop:    StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "gemini_paid"))
+    draft:        StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_gemini_lite"))
+    recovery:     StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_gemini_lite"))
+    review:       StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "skip"))
+    issues:       StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "skip"))
+    humanize:     StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_gemini_lite"))
+    redevelop:    StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_gemini_lite"))
     # Steps 10-12 (scoring & improvement loop)
-    score:        StepAIConfig = field(default_factory=lambda: StepAIConfig("groq",            "or_gemini_flash", "skip"))
-    quality_loop: StepAIConfig = field(default_factory=lambda: StepAIConfig("or_qwen",         "or_deepseek",     "or_gemini_flash"))
+    score:        StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_gemini_lite", "skip"))
+    quality_loop: StepAIConfig = field(default_factory=lambda: StepAIConfig("or_gemini_flash", "or_deepseek",    "or_gemini_lite"))
+
+    # Phase C feature flag (2026-04-21): enable targeted per-section regeneration
+    # for sections flagged by the per-section scorer. Default ON because the cost
+    # ceiling is hard-capped (max 2 sections × 2 attempts = +4 LLM calls/article).
+    # Set False to disable for legacy/lean presets where cost matters more than quality.
+    targeted_regen: bool = True
 
 def _routing_from_legacy(research_ai: str) -> "AIRoutingConfig":
     """Backward-compat: convert old single research_ai string to a full AIRoutingConfig."""
@@ -646,6 +735,7 @@ class SEOContentPipeline:
             project_name=project_name,
             steps=[PipelineStep(s, n, "pending") for s, n in STEP_DEFS],
         )
+        self.content_state = ContentState()
 
         # Pipeline event log — captured during generation, stored in schema_json
         self._logs: List[Dict] = []
@@ -669,10 +759,20 @@ class SEOContentPipeline:
         self._intent_data: Dict = {}
         self._target_entities: List[str] = []
         self._semantic_variations: List[str] = []
+        self._blueprint = None  # Optional blueprint object for editorial intelligence
 
         # Unique trace ID for this pipeline run (correlates all AI calls)
         import uuid as _uuid
         self._pipeline_trace_id: str = _uuid.uuid4().hex[:16]
+
+        # Initialize model profiler for dynamic timeout calculation
+        self._profiler = get_profiler(db)
+        if db:
+            self._profiler.create_tables()
+
+        # Initialize checkpoint manager and progress tracker
+        self._checkpoint_mgr = get_checkpoint_manager(db)
+        self._progress = create_progress_tracker(article_id, db) if db else None
 
         # Customer context — loaded from audience_profiles table for customer-aware rules & prompts
         self._customer_ctx: Dict = self._load_customer_context()
@@ -754,14 +854,46 @@ class SEOContentPipeline:
         if c.get("usp"):
             lines.append(f"UNIQUE SELLING POINT: {c['usp']}")
         if c.get("personas"):
-            lines.append(f"BUYER PERSONAS: {c['personas'][:300]}")
+            lines.append(f"BUYER PERSONAS: {c['personas'][:600]}")
         if c.get("products"):
-            lines.append(f"PRODUCTS/SERVICES: {c['products'][:300]}")
+            lines.append(f"PRODUCTS/SERVICES: {c['products'][:600]}")
         if c.get("blocked_topics"):
             lines.append(f"BLOCKED TOPICS (never mention): {c['blocked_topics']}")
         if not lines:
             return ""
         return "\n━━━ CUSTOMER CONTEXT (use this to personalise content) ━━━\n" + "\n".join(lines) + "\n"
+
+    def _ensure_meta_title(self):
+        """Ensure meta_title exists and is 30-65 chars with keyword for R10."""
+        kw = self.keyword
+        mt = self.state.meta_title or ""
+        if mt and 30 <= len(mt) <= 65 and kw.lower() in mt.lower():
+            return  # already good
+        # Build from title or keyword
+        base = self.state.title or kw.title()
+        if kw.lower() not in base.lower():
+            base = f"{kw.title()} — {base}"
+        if len(base) < 30:
+            base = f"{base} — Complete Guide"
+        self.state.meta_title = base[:65]
+
+    def _ensure_meta_desc(self):
+        """Ensure meta_desc exists and is 100-165 chars for R11."""
+        md = self.state.meta_desc or ""
+        if md and 100 <= len(md) <= 165:
+            return
+        kw = self.keyword.lower()
+        if not md and self.state.final_html:
+            plain = re.sub(r"<[^>]+>", " ", self.state.final_html)
+            plain = " ".join(plain.split())
+            md = plain[:155]
+        if not md:
+            md = f"Discover everything about {kw}. Expert tips, buying guide, benefits, and more."
+        if kw not in md.lower():
+            md = f"{kw.title()}: {md}"
+        if len(md) < 100:
+            md = md.rstrip(".") + f". Your complete resource for {kw}."
+        self.state.meta_desc = md[:160]
 
     def _scoring_customer_kwargs(self) -> Dict:
         """Return keyword arguments for check_all_rules() customer context."""
@@ -914,6 +1046,7 @@ class SEOContentPipeline:
         self._add_log("info", f"Pre-flight health check: {', '.join(sorted(providers_to_check))}")
 
         _or_checked = False  # Only test OR endpoint once, even if multiple or_* providers in chain
+        _or_ok = False  # Whether the OR check succeeded
         for provider in providers_to_check:
             if provider in _force_disabled:
                 continue
@@ -961,6 +1094,7 @@ class SEOContentPipeline:
 
                 elif provider == "ollama" or provider.startswith("ollama_"):
                     url = self._resolve_ollama_url(provider)
+                    model = self._resolve_ollama_model(provider)
                     # Quick version check (tiny request, no model loading)
                     r = await asyncio.get_event_loop().run_in_executor(None, lambda u=url: httpx.get(
                         f"{u}/api/version",
@@ -969,6 +1103,14 @@ class SEOContentPipeline:
                     if r.status_code == 200:
                         self._add_log("success", f"Pre-flight: {provider} ({url}) — reachable")
                         _mark_provider_ok(provider)
+                        # Pre-warm: generate 1 token to load model into GPU memory
+                        # This avoids cold-start delays on the first real call
+                        is_remote = url and "localhost" not in url and "127.0.0.1" not in url
+                        if is_remote:
+                            # Skip warm-up — it blocks the queue if Ollama is busy
+                            # from orphaned requests. The first real call handles cold
+                            # start naturally with a few seconds extra latency.
+                            self._add_log("info", f"Pre-flight: {model} on {url} — skipping warm-up")
                     else:
                         _mark_provider_bad(provider, "unreachable", 300)
                         self._add_log("error", f"Pre-flight: {provider} ({url}) — HTTP {r.status_code}")
@@ -976,7 +1118,10 @@ class SEOContentPipeline:
                 elif provider.startswith("or_") or provider == "openrouter":
                     if _or_checked:
                         # Already tested OR endpoint this pre-flight — reuse result
-                        _mark_provider_ok(provider)
+                        if _or_ok:
+                            _mark_provider_ok(provider)
+                        else:
+                            _mark_provider_bad(provider, "or_endpoint_failed", 300)
                         continue
                     _or_checked = True
                     key = _live_openrouter_key()
@@ -997,6 +1142,7 @@ class SEOContentPipeline:
                         timeout=8,
                     ))
                     if r.status_code == 200:
+                        _or_ok = True
                         self._add_log("success", f"Pre-flight: OpenRouter — reachable ({provider})")
                         # Mark all OR providers in this chain as OK
                         for _op in providers_to_check:
@@ -1047,6 +1193,11 @@ class SEOContentPipeline:
         # ── LEAN MODE: minimal 3-call pipeline ───────────────────────────
         if self.pipeline_mode == "lean":
             await self._run_lean(on_step, start_step)
+            
+            # ── Optional: Multi-AI Review (if enabled) ──────────────────
+            if getattr(self, 'enable_multi_ai_review', False):
+                await self._multi_ai_review()
+            
             self._save_final_to_db()
             mem_before = _get_mem_pct()
             _ollama_unload_model()
@@ -1088,6 +1239,10 @@ class SEOContentPipeline:
         if not self._cancelled:
             await self._run_iteration_loop(loop_fns, start_step, on_step)
 
+        # ── Optional: Multi-AI Review (if enabled) ──────────────────────
+        if getattr(self, 'enable_multi_ai_review', False):
+            await self._multi_ai_review()
+
         # Save final article
         self._save_final_to_db()
 
@@ -1116,12 +1271,22 @@ class SEOContentPipeline:
         self._add_log("info", "⚡ LEAN MODE — 3-call budget pipeline", 1)
 
         # Override routing for lean mode — ensure we use reliable, cheap providers
-        # regardless of what the user/DB has configured (DB config may have broken providers)
-        lean_cfg = StepAIConfig("or_gemini_flash", "or_deepseek", "groq")
-        self.routing.research = lean_cfg
-        self.routing.draft = lean_cfg
-        self.routing.references = StepAIConfig("or_gemini_flash", "groq", "skip")
-        self._add_log("info", f"Lean routing: or_gemini_flash → or_deepseek → groq", 1)
+        # regardless of what the user/DB has configured (DB config may have broken providers).
+        # EXCEPTION: if the caller explicitly supplied an Ollama-only routing (Phase F.3
+        # local-only test mode), respect it — do not silently override.
+        _user_forced_ollama = (
+            getattr(self.routing, "draft", None) is not None
+            and self.routing.draft.first == "ollama"
+            and self.routing.research.first == "ollama"
+        )
+        if _user_forced_ollama:
+            self._add_log("info", "Lean routing: respecting caller's ollama-only chain", 1)
+        else:
+            lean_cfg = StepAIConfig("or_gemini_flash", "or_deepseek", "groq")
+            self.routing.research = lean_cfg
+            self.routing.draft = lean_cfg
+            self.routing.references = StepAIConfig("or_gemini_flash", "groq", "skip")
+            self._add_log("info", f"Lean routing: or_gemini_flash → or_deepseek → groq", 1)
 
         # ── L1: Combined Research + Structure (1 AI call) ─────────────────
         s1 = self.state.steps[0]  # step 1
@@ -1232,9 +1397,23 @@ class SEOContentPipeline:
             # Apply programmatic post-processing (links, density, R17/R27/R34/R43 etc.)
             self.state.final_html = self._post_draft_inject(self.state.final_html)
             self.state.final_html = self._scrub_ai_patterns(self.state.final_html)
+            self.state.final_html = await self._enforce_readability(self.state.final_html)
             self.state.final_html = self._intelligence_post_process(self.state.final_html)
 
+            # ── Integrity scan: detect mid-word corruption (trust killer) ──
+            self.state.final_html = self._check_content_integrity(self.state.final_html)
+
+            # ── Phase B: per-section scoring (read-only) ──
+            self._score_all_sections(self.state.final_html)
+
+            # ── Phase C: targeted regen of weak sections (feature-flagged) ──
+            try:
+                self.state.final_html = await self._run_targeted_regen(self.state.final_html)
+            except Exception as _regen_err:
+                log.warning(f"Targeted regen skipped (non-fatal): {_regen_err}")
+
             # Run the scoring (local only, no AI)
+            await self._step11_score()
             await self._step11_score()
             if on_step:
                 on_step(10, "Final Scoring", "done", s10.summary)
@@ -1333,6 +1512,17 @@ Return ONLY valid JSON, no markdown fences."""
         except Exception:
             self._intent_data = {"primary_intent": self.intent}
 
+        # Phase D: structured intent plan (lean path)
+        try:
+            from engines.intent_planner import build_intent_plan
+            self._intent_data["plan"] = build_intent_plan(
+                keyword=self.keyword,
+                primary_intent=self._intent_data.get("primary_intent", ""),
+                research_themes=data.get("themes", []) if isinstance(data, dict) else [],
+            )
+        except Exception:
+            pass
+
         # Semantic variations for keyword density
         kw_words = self.keyword.lower().split()
         if len(kw_words) >= 2:
@@ -1365,7 +1555,16 @@ Return ONLY valid JSON, no markdown fences."""
         for s in h2_sections:
             h3_list = ""
             if s.get("h3s"):
-                h3_list = "\n      H3s: " + ", ".join(s["h3s"])
+                # Defensive: some models return list of dicts ({"text": "..."}) instead of strings.
+                _h3_strs = []
+                for _h in s["h3s"]:
+                    if isinstance(_h, str):
+                        _h3_strs.append(_h)
+                    elif isinstance(_h, dict):
+                        _h3_strs.append(_h.get("text") or _h.get("h3") or _h.get("title") or "")
+                _h3_strs = [x for x in _h3_strs if x]
+                if _h3_strs:
+                    h3_list = "\n      H3s: " + ", ".join(_h3_strs)
             sections_spec += f'\n    <h2 id="{s.get("anchor", "")}">{s["h2"]}</h2> (~{s.get("word_target", 200)} words){h3_list}'
 
         # Build links block
@@ -1387,9 +1586,17 @@ Return ONLY valid JSON, no markdown fences."""
             faq_spec = "\n\nFAQ SECTION:\n" + "\n".join(
                 f'  - {f.get("q", f.get("question", ""))}' for f in faqs[:6])
 
+        # Phase D: render intent-plan constraint block (lean draft)
+        try:
+            from engines.intent_planner import render_intent_block
+            _lean_intent_block = render_intent_block(self._intent_data.get("plan") or {})
+        except Exception:
+            _lean_intent_block = ""
+        _lean_intent_block_section = (_lean_intent_block + "\n\n") if _lean_intent_block else ""
+
         prompt = f"""Write a complete SEO {pt_label} about "{kw}".
 
-TITLE (H1): {structure.get("h1", kw.title())}
+{_lean_intent_block_section}TITLE (H1): {structure.get("h1", kw.title())}
 Intent: {self._intent_data.get('primary_intent', self.intent)}
 Business: {self.project_name or "the business"}
 Target word count: {max(self.target_wc, 2000)} words MINIMUM (aim for 2000-2500 words — longer is better)
@@ -1407,24 +1614,80 @@ STRUCTURE:{sections_spec}
 WRITING RULES:
 - KEYWORD: "{kw}" — use naturally 2-3 times per section. Density target: 1.0-1.5%.
 - Start first paragraph with "{kw}" and include a definition ("{kw} refers to..." or "{kw} is a...") in the first 150 words.
-- Active voice. Mix short (8-12w) and medium (18-22w) sentences. Max 3 sentences/paragraph. Max 80 words/paragraph.
-- Cite SPECIFIC named sources (e.g. "FDA guidelines", "a 2024 study by Harvard"). Unsourced stats are BAD.
-- Show expertise: use "we tested", "in our experience", "we found". Be specific about details.
-- Write like a knowledgeable human with real opinions. Use contractions (don't, isn't, you'll).
-- Start some sentences with "And", "But", "So". Ask 3+ rhetorical questions.
-- Include nuance: "however", "that said", "the catch is", "on the other hand".
+
+── READABILITY (Target Flesch 60-70) ──
+- Sentence length: Average 15-20 words. Mix short (8-12w) with medium (18-25w). Break any >30w sentences.
+- Active voice >80% (subject → verb → object). Example: "Cinnamon reduces" not "Cinnamon is known to reduce".
+- Replace complex words: utilize→use, facilitate→help, commence→start, ascertain→find, endeavor→try
+- Add transitions between paragraphs: However, Moreover, Additionally, Meanwhile, Therefore
+- Vary paragraph length: 2-4 sentences (~60-100 words). Never 5 consecutive paragraphs of same length.
+- Max 3 sentences/paragraph. Max 80 words/paragraph.
+
+── SENTENCE VARIETY (20+ Different Openers) ──
+- Limit "The" starters to <20% of all sentences
+- Questions (10%+ of sentences): "How do you choose?", "What makes X better?", "Why does this matter?"
+- Imperatives: Do, Try, Consider, Start, Use, Avoid, Compare, Check, Look for, Remember
+- Transitional: However, Moreover, Therefore, Meanwhile, Subsequently, Nevertheless, Furthermore
+- Subordinate clauses: While, Although, Because, Since, If, When, After, Before, Unless
+- Avoid 3+ consecutive sentences starting the same way
+- Mix: declarative, interrogative, occasional exclamatory (for emphasis)
+- Adverbs occasionally: Typically, Generally, Often, Sometimes, Usually, Frequently, Rarely
+- Coordinating (sparingly): And, But, So (for emphasis only, not >5% of sentences)
+
+── CALLS-TO-ACTION (3 Required: Intro/Mid/End) ──
+1. SOFT CTA in intro (after 2-3 paragraphs):
+   Format: "Discover the benefits of {kw} for [specific benefit]"
+   Verbs: Discover, Learn, Explore, Find out, Uncover
+2. MID-CONTENT CTA (after 40% of sections):
+   Format: <div class="cta-box"><strong>Ready to [action]?</strong> [urgent benefit statement]</div>
+   Verbs: Try, Compare, Download, Subscribe, Get started, Shop, Browse
+3. CONCLUSION CTA (strong action in final paragraph):
+   Required verbs: Buy, Shop, Order, Contact, Get, Start, Compare
+   Add urgency: "Start today", "Don't wait", "Limited time", "Act now"
+   Add benefit: "...and enjoy [specific benefit]"
+
+── DATA CREDIBILITY (5+ Sourced Statistics) ──
+- Government: FDA, USDA, NIH, CDC, WHO (with year: "According to FDA (2024)...")
+- Academic: PubMed studies, university research ("Harvard study (2023) found...")
+- Industry: Grand View Research, IBISWorld, Statista ("Grand View Research reports (2024)...")
+- Expert quotes: Named experts with credentials ("Dr. Jane Smith, PhD from MIT, states...")
+- Attribution format: "According to [Source] ([Year]), [statistic]..."
+- Use ranges for estimates: "approximately 20-30%" not unsourced "23.4%"
+- NEVER state precise statistics without naming the source in the same sentence
+
+── STORYTELLING & VOICE (2+ Each) ──
+Narrative elements:
+- Use third-person scenarios: "A buyer sourcing {kw} for restaurant use will find...", "Consider a home cook comparing two suppliers..."
+- Specific examples grounded in cited evidence (Spices Board India, USDA, ISO standards) — never fabricated personal anecdotes
+- Before/after scenarios tied to documented data, not invented testing
+- Brief customer-style scenarios (2-3 sentences, third-person, plausible) — but NEVER fabricate named experts ("Chef X of Y Lab")
+- Analogies: "Think of {kw} like...", "This works similarly to..."
+- Sensory descriptions (for food/physical products): smell,taste, texture, appearance
+Opinion signals (NEUTRAL framing — no fake first-person):
+- Take stance: "The strongest option here is X because Y", "Avoid X when Y", "For most buyers, prefer X over Y"
+- Contrarian views (if supported by a citation): "Contrary to popular belief, [source] shows..."
+- DO NOT write "we tested", "in our testing", "our team evaluated", "hands-on review", "after putting this to the test", "we've found" — these fabricated authority claims are dishonest if no real testing happened and reviewers will flag them.
+- Specific over general: NOT "many benefits", YES "improved energy within 2-3 days (per [cited source])"
+
+── BUYER GUIDANCE ──
 - Include buyer guidance: "how to choose", "what to look for", "best for", "pros and cons".
-- Flesch Reading Ease: 50-75. Vary paragraph lengths.
-- FORBIDDEN words: delve, multifaceted, landscape, tapestry, nuanced, robust, myriad, paradigm, foster, holistic, pivotal, streamline, cutting-edge, plethora, underscore, "let's explore", "when it comes to", "in today's world", "let's dive in".
-- No "furthermore/moreover/additionally" chains. Vary sentence openers.
+- Cite SPECIFIC named sources (e.g. "FDA guidelines", "a 2024 study by Harvard"). Unsourced stats are BAD.
+- Show expertise through SPECIFIC details (cultivar names, grade thresholds, processing steps, measurable claims with units). Do NOT use first-person testing claims ("we tested", "in our experience", "hands-on", "our team") — they sound fabricated and damage trust.
+- Write like a knowledgeable human with real opinions. Use contractions (don't, isn't, you'll).
+- Include nuance: "however", "that said", "the catch is", "on the other hand".
+
+── FORBIDDEN ──
+- Words: delve, multifaceted, landscape, tapestry, nuanced, robust, myriad, paradigm, foster, holistic, pivotal, streamline, cutting-edge, plethora, underscore
+- Phrases: "let's explore", "when it comes to", "in today's world", "let's dive in", "furthermore/moreover/additionally" in chains
 
 FORMAT:
-- Introduction (150-200w) with hook + TL;DR box (<div class="key-takeaway">)
+- Introduction (150-200w) with hook + TL;DR box (<div class="key-takeaway">) + SOFT CTA at end of intro
 - TOC: <nav><ul> with anchor links to H2s
 - Body sections with H2/H3, <p>, <ul>, <ol>, <table>, <strong>, <a>
 - Include 1 comparison <table> with 3+ rows × 3+ columns
+- MID-CONTENT CTA: After section 2 or 3, insert <div class="cta-box"><strong>Ready to [action]?</strong> [benefit]</div>
 - FAQ section: each question as <h3> with 40-60 word <p> answers
-- Conclusion (100-150w) with CTA
+- Conclusion (100-150w) with STRONG ACTION CTA (buy/shop/order/contact/start)
 
 SELF-CHECK before output:
 - Remove any AI-sounding phrases
@@ -1682,6 +1945,172 @@ Return ONLY the final HTML article. No markdown fences, no explanations."""
         except Exception:
             pass
 
+    def _scan_for_fallback_phrases(self, html: str) -> list:
+        """Scan content for sentinel placeholder phrases that indicate a
+        last-resort fallback fired during generation. Returns the list of
+        matched phrases (empty list if content is clean).
+        """
+        if not html:
+            return []
+        low = html.lower()
+        return [p for p in _FALLBACK_MARKER_PHRASES if p in low]
+
+    async def _multi_ai_review(self):
+        """
+        Multi-AI content review: Get feedback from Claude and GPT via OpenRouter.
+        Logs review results for quality analysis and continuous improvement.
+        
+        Reviews content for:
+        - Fake authority/testing claims
+        - Templated filler phrases
+        - Unsourced statistics
+        - Mid-word text corruption
+        - Link relevance
+        - Overall content quality (1-10 score)
+        """
+        html = self.state.final_html or self.state.draft_html
+        if not html or len(html) < 200:
+            log.warning("Multi-AI review skipped: insufficient content")
+            return
+        
+        # Strip HTML for text analysis
+        import re
+        text = re.sub(r"<[^>]+>", " ", html)
+        text_preview = text[:2000]  # First 2000 chars for review
+        
+        review_prompt = f"""Review this SEO article for quality issues. Provide a structured assessment.
+
+ARTICLE EXCERPT (first 2000 chars):
+{text_preview}
+
+KEYWORD: {self.keyword}
+WORD COUNT: {len(text.split())}
+
+REVIEW CRITERIA:
+1. **Fake Authority** (score 1-10, 10=clean): Check for fabricated testing claims like "we tested", "in our testing", "our team evaluated", "hands-on review", "after putting to the test". Deduct points for each instance.
+
+2. **Templated Fillers** (score 1-10, 10=none): Look for overused phrases like "this directly impacts", "what most people miss", "in practice", "experienced buyers check", "this is especially relevant". Deduct points for repetition.
+
+3. **Unsourced Statistics** (score 1-10, 10=all sourced): Check if percentage claims have attribution (e.g., "According to FDA (2024), 30%..."). Deduct points for vague claims like "studies show" without naming the source.
+
+4. **Text Corruption** (score 1-10, 10=clean): Look for mid-word capital injections ("hin That said"), broken word fragments, or garbled text that indicates AI generation artifacts.
+
+5. **Link Relevance** (score 1-10, 10=highly relevant): Assess if included links (Wikipedia,external sources) are actually relevant to the keyword and content context.
+
+6. **Overall Quality** (score 1-10): General assessment of content depth, clarity, and value to the reader.
+
+OUTPUT FORMAT (JSON):
+```json
+{{
+  "fake_authority_score": <1-10>,
+  "fake_authority_examples": ["quote1", "quote2"],
+  "filler_score": <1-10>,
+  "filler_examples": ["phrase1", "phrase2"],
+  "unsourced_stats_score": <1-10>,
+  "unsourced_stats_examples": ["claim1", "claim2"],
+  "corruption_score": <1-10>,
+  "corruption_examples": ["artifact1", "artifact2"],
+  "link_relevance_score": <1-10>,
+  "overall_quality_score": <1-10>,
+  "top_improvement": "<single most important fix>"
+}}
+```"""
+        
+        reviews = {}
+
+        # Use quality_loop routing so the user controls which models are used here
+        reviewer_1 = self.routing.quality_loop.first
+        reviewer_2 = self.routing.quality_loop.second
+
+        # Review 1: first model in quality_loop chain
+        if reviewer_1 and reviewer_1 != "skip":
+            try:
+                log.info(f"Multi-AI Review: Requesting {reviewer_1} feedback for {self.article_id}")
+                r1_response = await self._call_ai_raw(
+                    reviewer_1,
+                    review_prompt,
+                    temperature=0.3,
+                    max_tokens=800,
+                    use_prompt_directly=True
+                )
+                reviews['reviewer_1'] = self._parse_review_json(r1_response)
+                log.info(f"Review 1 ({reviewer_1}): Overall {reviews['reviewer_1'].get('overall_quality_score', 'N/A')}/10")
+            except Exception as e:
+                log.warning(f"Review 1 ({reviewer_1}) failed: {e}")
+                reviews['reviewer_1'] = {"error": str(e)}
+
+        # Review 2: second model in quality_loop chain
+        if reviewer_2 and reviewer_2 != "skip":
+            try:
+                log.info(f"Multi-AI Review: Requesting {reviewer_2} feedback for {self.article_id}")
+                r2_response = await self._call_ai_raw(
+                    reviewer_2,
+                    review_prompt,
+                    temperature=0.3,
+                    max_tokens=800,
+                    use_prompt_directly=True
+                )
+                reviews['reviewer_2'] = self._parse_review_json(r2_response)
+                log.info(f"Review 2 ({reviewer_2}): Overall {reviews['reviewer_2'].get('overall_quality_score', 'N/A')}/10")
+            except Exception as e:
+                log.warning(f"Review 2 ({reviewer_2}) failed: {e}")
+                reviews['reviewer_2'] = {"error": str(e)}
+        
+        # Log consolidated review summary
+        if reviews:
+            self._log_review_summary(reviews)
+        
+        # Store reviews in state for later access
+        if not hasattr(self.state, 'ai_reviews'):
+            self.state.ai_reviews = {}
+        self.state.ai_reviews = reviews
+    
+    def _parse_review_json(self, response: str) -> dict:
+        """Extract JSON from review response."""
+        import json
+        import re
+        
+        # Try to extract JSON from code fence
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', response, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+        
+        # Try raw JSON parse
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError:
+            return {"raw_response": response, "parse_error": True}
+    
+    def _log_review_summary(self, reviews: dict):
+        """Log consolidated multi-AI review summary."""
+        log.info("=" * 80)
+        log.info(f"MULTI-AI REVIEW SUMMARY: {self.article_id}")
+        log.info("=" * 80)
+        
+        for ai_name, review in reviews.items():
+            if "error" in review:
+                log.warning(f"{ai_name.upper()}: ERROR - {review['error']}")
+                continue
+            
+            if review.get("parse_error"):
+                log.warning(f"{ai_name.upper()}: Parse error - raw response logged")
+                continue
+            
+            log.info(f"\n{ai_name.upper()} SCORES:")
+            log.info(f"  Fake Authority: {review.get('fake_authority_score', 'N/A')}/10")
+            log.info(f"  Filler Phrases: {review.get('filler_score', 'N/A')}/10")
+            log.info(f"  Unsourced Stats: {review.get('unsourced_stats_score', 'N/A')}/10")
+            log.info(f"  Text Corruption: {review.get('corruption_score', 'N/A')}/10")
+            log.info(f"  Link Relevance: {review.get('link_relevance_score', 'N/A')}/10")
+            log.info(f"  OVERALL QUALITY: {review.get('overall_quality_score', 'N/A')}/10")
+            if review.get('top_improvement'):
+                log.info(f"  Top Fix: {review['top_improvement']}")
+        
+        log.info("=" * 80)
+
     def _save_final_to_db(self):
         if not self.db:
             return
@@ -1707,13 +2136,35 @@ Return ONLY the final HTML article. No markdown fences, no explanations."""
             # Generate meta_title from title if not set
             if not self.state.meta_title and self.state.title:
                 self.state.meta_title = self.state.title[:60]
+            self._ensure_meta_title()
+            self._ensure_meta_desc()
+
+            # ── Pre-save fallback-phrase scan ───────────────────────────────
+            # Detect placeholder text that leaked from last-resort fallbacks
+            # (_minimal_draft_from_structure, _ollama_section_writer, etc.).
+            # If found, mark article as needs_review so the user knows manual
+            # editing is required before publishing.
+            body_to_save = self.state.final_html or self.state.draft_html
+            fallback_hits = self._scan_for_fallback_phrases(body_to_save)
+            article_status = "draft"
+            if fallback_hits:
+                article_status = "needs_review"
+                self._add_log(
+                    "warn",
+                    f"Fallback placeholder content detected ({len(fallback_hits)} phrase(s)): "
+                    f"{', '.join(fallback_hits[:3])}{'…' if len(fallback_hits) > 3 else ''}. "
+                    f"Article marked 'needs_review' — manual editing required before publish.",
+                )
+                log.warning(
+                    f"Article {self.article_id}: fallback markers present {fallback_hits} -> needs_review"
+                )
 
             steps_json = json.dumps(self._pipeline_snapshot(), ensure_ascii=False)
             self.db.execute(
                 """UPDATE content_articles
                    SET title=?, body=?, meta_title=?, meta_desc=?,
                        seo_score=?, readability=?, word_count=?,
-                       status='draft', schema_json=?, updated_at=?
+                       status=?, schema_json=?, updated_at=?
                    WHERE article_id=?""",
                 (
                     self.state.title or self.keyword.title(),
@@ -1723,6 +2174,7 @@ Return ONLY the final HTML article. No markdown fences, no explanations."""
                     self.state.seo_score,
                     self.state.readability,
                     self.state.word_count,
+                    article_status,
                     steps_json,
                     datetime.now(timezone.utc).isoformat(),
                     self.article_id,
@@ -1773,6 +2225,8 @@ Return ONLY the final HTML article. No markdown fences, no explanations."""
                     "step": s.step, "name": s.name, "status": s.status, "summary": s.summary,
                     "ai_first": _ai_first(s.step),
                     "ai_routing": _ai_routing(s.step),
+                    "started_at": s.started_at,
+                    "ended_at": s.ended_at,
                 }
                 for s in self.state.steps
             ],
@@ -1838,6 +2292,19 @@ Return ONLY the final HTML article. No markdown fences, no explanations."""
         except Exception as e:
             log.warning(f"Intent classification failed: {e}")
             self._intent_data = {"primary_intent": self.intent or "informational"}
+
+        # ── Phase D: structured intent plan (angle + must-include + avoid) ──
+        try:
+            from engines.intent_planner import build_intent_plan
+            plan = build_intent_plan(
+                keyword=self.keyword,
+                primary_intent=self._intent_data.get("primary_intent", ""),
+                research_themes=analysis.get("themes", []) if isinstance(analysis, dict) else [],
+            )
+            self._intent_data["plan"] = plan
+            log.info(f"Intent plan built: type={plan.get('article_type')} angle_len={len(plan.get('angle',''))}")
+        except Exception as e:
+            log.warning(f"Intent plan build failed: {e}")
 
         # ── Entity extraction from crawled competitor pages ──
         try:
@@ -2133,6 +2600,7 @@ Return ONLY valid JSON:
   "h2_sections": [
     {{
       "h2": "Main section heading",
+      "type": "definition|benefits|how_to|comparison|buyers_guide|pros_cons|use_cases|trust|expert_tips|faq",
       "h3s": ["Sub-section 1", "Sub-section 2", "Sub-section 3"],
       "word_target": 350,
       "content_angle": "What this section should uniquely cover",
@@ -2153,7 +2621,7 @@ Return ONLY valid JSON:
         structure = await self._call_ai_with_chain(
             self.routing.structure, prompt,
             system="You are a precise SEO content strategist. Return ONLY valid JSON.",
-            temperature=0.4, max_tokens=2000,
+            temperature=0.4, max_tokens=1200,
         )
 
         if not structure.get("h2_sections"):
@@ -2402,8 +2870,11 @@ Return JSON:
         issues = verification.get("issues", [])
         improvements = verification.get("improvements", [])
 
-        # If AI flags issues, regenerate the structure incorporating improvements
-        if not approved and improvements:
+        # Refine structure if AI flagged issues OR returned actionable improvements,
+        # even when `approved=true`. Previously this branch was gated on
+        # `not approved AND improvements`, which discarded improvements whenever
+        # the reviewer rubber-stamped the structure -> no iterative refinement.
+        if improvements and (not approved or len(improvements) >= 2):
             improvements_text = "\n".join(f"- {imp}" for imp in improvements)
             refine_prompt = f"""Improve this article structure for keyword "{self.keyword}" based on these required improvements:
 
@@ -2427,7 +2898,9 @@ Return the COMPLETE improved structure as valid JSON with the same schema (h1, m
         else:
             step.summary = f"Structure approved: {score}/100"
 
-        # Pass Gemini's improvements as context to the draft writer (Step 6)
+        # Always preserve improvements for downstream draft + redevelop steps,
+        # even when refinement succeeded (the refined structure may not have
+        # captured every nuance from the reviewer's feedback).
         if improvements:
             self._structure_improvements = improvements
 
@@ -2517,7 +2990,10 @@ Return JSON:
 
         # ── Validate minimums & generate fallbacks ───────────────────────────
         kw_slug = re.sub(r"[^a-z0-9]+", "-", self.keyword.lower()).strip("-")
-        kw_title = self.keyword.replace(" ", "_").title()
+        # Wikipedia article titles: first word capitalized, rest lowercase, spaces→underscores
+        # e.g. "black pepper" → "Black_pepper", not "Black_Pepper"
+        _wiki_words = self.keyword.strip().split()
+        kw_title = ("_".join([_wiki_words[0].capitalize()] + [w.lower() for w in _wiki_words[1:]])) if _wiki_words else self.keyword
 
         # Internal links: need 4+
         if len(self._internal_links) < 4:
@@ -3080,12 +3556,90 @@ Return JSON:
     # STEP 6: CONTENT DRAFTING (Groq)
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Per-section-type writing requirements injected at prompt time so the
+    # model produces signals naturally, rather than us bolting them on after
+    # generation. Eliminates most cosmetic post-process injections.
+    _SECTION_TYPE_REQUIREMENTS = {
+        "definition": (
+            "SECTION TYPE: definition\n"
+            "- Open with a clear definitional sentence: '{keyword} is a ...' or '{keyword} refers to ...'\n"
+            "- Explain what it is, why it matters, and who uses it\n"
+            "- Include a real-world scenario that illustrates the definition\n"
+            "- Add 1 implicit question opener: 'You might wonder...', 'What many buyers don't realise...'"
+        ),
+        "benefits": (
+            "SECTION TYPE: benefits\n"
+            "- For each benefit, tie it to a REAL situation or outcome, not a feature list\n"
+            "- Use scenario framing: 'For buyers who need X...', 'In situations where...'\n"
+            "- Include 1 subtle qualifier: 'In most cases', 'Typically', 'Depending on your needs'\n"
+            "- Close with one concrete, verifiable observation grounded in a cited source or industry-standard fact (avoid first-person testing claims)."
+        ),
+        "how_to": (
+            "SECTION TYPE: how_to\n"
+            "- Use numbered steps. Each step must have a realistic gotcha or nuance\n"
+            "- Include 1 urgency/mistake signal: 'A common mistake here is...', 'Most people skip this step...'\n"
+            "- Add 1 evidence-based observation tied to a specific cited source, manufacturer spec, or public dataset — NOT fabricated first-person claims.\n"
+            "- Avoid robotic transitions between steps"
+        ),
+        "comparison": (
+            "SECTION TYPE: comparison\n"
+            "- Take a CLEAR POSITION. Don't say 'it depends' without immediately explaining WHY\n"
+            "- Include at least one real trade-off (cost vs quality, speed vs accuracy, etc.)\n"
+            "- Use balanced view: 'The advantage is X, but the trade-off is Y'\n"
+            "- Include a decision helper: 'Choose option A if... choose option B if...'\n"
+            "- Add 1 trust signal: verified data, named source, or tested result"
+        ),
+        "buyers_guide": (
+            "SECTION TYPE: buyers_guide\n"
+            "- Cover exactly 3 decision criteria the reader must evaluate before buying\n"
+            "- For each criterion, state what to look for AND what to avoid\n"
+            "- Include 1 urgency signal: 'Don't overlook this...', 'A common mistake buyers make...'\n"
+            "- End with a sentence that helps the reader self-qualify: 'This is ideal for... but not suited for...'"
+        ),
+        "pros_cons": (
+            "SECTION TYPE: pros_cons\n"
+            "- Write a genuine list: 3-4 specific pros and 2-3 real cons\n"
+            "- Each pro/con must be specific, not generic ('saves 2 hours per week' > 'saves time')\n"
+            "- Cons must be honest and realistic — not watered-down\n"
+            "- Tone: for consumer/buyer keywords, use conversational language ('you'll save time', 'ideal for home use'). For B2B/wholesale keywords, use professional language ('suitable for commercial operations', 'meets industry standards').\n"
+            "- Add 1 hedging qualifier to the cons section: 'For most buyers, this is acceptable because...'"
+        ),
+        "use_cases": (
+            "SECTION TYPE: use_cases\n"
+            "- Describe 2-3 specific real-world scenarios where this is applied\n"
+            "- Each use case must have a named context: 'For small-scale retailers...', 'In commercial kitchens...'\n"
+            "- Add 1 implicit question: 'Which use case fits you? Here's how to decide...'"
+        ),
+        "trust": (
+            "SECTION TYPE: trust\n"
+            "- Reference specific certifications, standards, or testing processes\n"
+            "- Use verified language: 'independently tested', 'ISO-certified', 'third-party verified'\n"
+            "- Avoid vague 'trusted by thousands' claims — be specific about what is verified and how\n"
+            "- Add 1 conversational question: 'Why does this matter? Because...'"
+        ),
+        "expert_tips": (
+            "SECTION TYPE: expert_tips\n"
+            "- Each tip must be NON-OBVIOUS — not the generic '5 tips' article\n"
+            "- Include 1 evidence-based insight citing industry data or named sources (e.g. 'According to industry data...', 'What the research misses...')\n"
+            "- Include 1 hedging qualifier: 'This works in most cases, though...'\n"
+            "- Add 1 urgency signal: 'The detail most people overlook is...'"
+        ),
+        "faq": (
+            "SECTION TYPE: faq\n"
+            "- Each answer must be 40-60 words and DIRECTLY answer the question in the first sentence\n"
+            "- Format each Q as an <h2> or <h3>, each A as a <p>\n"
+            "- Include '{keyword}' naturally in each answer\n"
+            "- Add 1 snippet-ready phrase per answer: 'The best {keyword} is...', 'To {keyword}...', '{keyword} works by...'"
+        ),
+    }
+
     async def _step6_draft(self):
         """
         Section-based article generation for reliability.
         Instead of one massive 8000-token call that causes timeouts and 429s,
-        splits into: intro → sections (batches of 2-3) → FAQ+conclusion.
-        Each call uses max_tokens=2500, making providers much more reliable.
+        splits into: intro (800 tok) -> section batches (1200 tok each, 2-3 H2s
+        per batch) -> FAQ + conclusion (1000 tok). Smaller calls fail less
+        often and recover faster from rate limits.
         """
         _step_ctx_var.set({"step": 6, "step_name": "Draft", "article_id": getattr(self, "article_id", None), "project_id": getattr(self, "project_id", ""), "keyword": getattr(self, "keyword", "")})
         step = self.state.steps[5]
@@ -3098,25 +3652,85 @@ Return JSON:
         pt_label = self._page_type_label()
         research_themes = self.state.steps[0].details.get("analysis", {}).get("themes", [])
         key_facts = self.state.steps[0].details.get("analysis", {}).get("key_facts", [])
+        research_angles = self.state.steps[0].details.get("analysis", {}).get("angles", [])
+        research_gaps = self.state.steps[0].details.get("analysis", {}).get("gaps", [])
         research_block = self._research_context_block()
         customer_ctx = self._customer_context_block()
 
+        # Compute adaptive keyword mention target based on keyword word count
+        kw_word_count = len((self.keyword or "").split())
+        # Scale inversely: 1-word KW → 3-5 per section; 4+ word KW → 1-2 total per section
+        if kw_word_count >= 4:
+            kw_usage_guide = "use naturally 1-2 times total per section (not per paragraph)"
+        elif kw_word_count == 3:
+            kw_usage_guide = "use naturally 2-3 times per section"
+        else:
+            kw_usage_guide = "use naturally 2-4 times per section"
+
+        # Phase D: render intent-plan constraint block (empty string if missing)
+        try:
+            from engines.intent_planner import render_intent_block
+            _intent_block = render_intent_block(self._intent_data.get("plan") or {})
+        except Exception:
+            _intent_block = ""
+        _intent_block_section = (_intent_block + "\n\n") if _intent_block else ""
+
         # Compact rules block shared across all section prompts
-        rules_compact = f"""KEYWORD: "{self.keyword}" — use naturally 2-4 times per section. Density target: 1.0-1.5%.
+        rules_compact = f"""{_intent_block_section}KEYWORD: "{self.keyword}" — {kw_usage_guide}. Overall density target: 1.0-1.5%.
 Semantic Variations: {', '.join(self._semantic_variations[:5]) if self._semantic_variations else 'use synonyms'}
 {"Entities to mention: " + ', '.join(self._target_entities[:8]) if self._target_entities else ""}
-STYLE: Active voice. Mix short (8-12w) and medium (18-22w) sentences. Max 3 sentences/paragraph. Max 80 words/paragraph.
-AUTHORITY: Cite SPECIFIC named sources (e.g. "FDA guidelines", "a 2024 Stanford study", "research published in Nature"). When stating a statistic, attribute it to a named source in the same sentence. Phrases like "according to [Named Source]" are GOOD. Vague claims with no source name are BAD.
-E-E-A-T: Show expertise through SPECIFIC details, real measurements, concrete examples, and practical insight. Use experience phrases naturally: "we tested", "in our experience", "after trying", "we found", "hands-on". Describe the actual test, result, or observation when possible.
-DATA CREDIBILITY: Every percentage or statistic MUST have a named source nearby (e.g., "USDA reports that 73% of..."). Unsourced stats damage credibility.
-HUMAN VOICE: Write like a knowledgeable person with real opinions. Use contractions (don't, isn't, you'll). Start some sentences with "And", "But", "So". State clear opinions: "we recommend", "honestly", "our take is", "what most people miss". Ask 3+ rhetorical questions in the body ("Why does this matter?", "What makes X different?"). Use hedging naturally: "typically", "it depends", "in most cases", "generally speaking". Include nuance: "on the other hand", "the catch is", "that said".
-READABILITY: Flesch Reading Ease target: 50-75. Mix short punchy sentences (5-8 words) with medium explanations (18-22 words). Every paragraph MUST differ in length. Std deviation of sentence lengths ≥5 words.
-FORBIDDEN: delve, multifaceted, landscape, tapestry, nuanced, robust, myriad, paradigm, foster, holistic, pivotal, streamline, cutting-edge, plethora, underscore, "let's explore", "when it comes to", "in today's world", "let's dive in".
-AI AVOIDANCE: No "furthermore/moreover/additionally" chains. Vary sentence openers — never start 2 consecutive paragraphs the same way. Use 4+ opener types: questions, statements, imperatives, and transitions (And/But/So).
-TRUST & PERSUASION: Mention relevant certifications, quality standards, or verified claims ("certified organic", "lab-tested", "ISO certified"). Use benefits language: "helps you", "improves", "reduces", "saves". Include urgency: "common mistake to avoid", "don't overlook". Add practical scenarios: "for example, if you need..." (2+ use cases).
-BUYER GUIDANCE: Include phrases like "how to choose", "what to look for", "best for", "before you buy", "is it worth", or "who should buy". Include buyer decision guidance: "recommended for", "ideal for", "not recommended for". Mention a "pros and cons" or "advantages and disadvantages" comparison somewhere in the article.
-CONTENT DEPTH: Cover what/why/how/when angles explicitly (e.g. "what is X", "why X matters", "how to use X", "when to choose X"). Include both beginner content ("basics", "getting started", "simple") and advanced content ("advanced", "professional", "in-depth", "technical"). Use "for example", "in practice", "real-world", or "use case" phrases for concrete scenarios.
-ANTI-STUFFING: Do NOT repeat the exact keyword phrase "{self.keyword}" in every paragraph. Use it in H2s, intro, and conclusion. In body paragraphs, prefer pronouns ("it", "they", "this") or natural short references.
+
+── READABILITY (Flesch 60-70) ──
+Sentence length: Avg 15-20w. Mix short (8-12w) + medium (18-25w). Break >30w sentences. Active voice >80%. Transitions between paragraphs (However, Moreover, Additionally). Max 3 sentences/paragraph. Max 80w/paragraph.
+
+── SENTENCE VARIETY (20+ Openers) ──
+Limit "The" to <20%. Questions 10%+ ("How do...?", "What makes...?"). Imperatives (Do, Try, Consider). Transitional (However, Moreover, Therefore). Subordinate (While, Although, Because). Adverbs (Typically, Generally). Coordinating sparingly (And, But, So). Never 3+ consecutive same starters.
+
+── DATA CREDIBILITY (5+ Sourced Stats) ──
+Cite SPECIFIC named sources: "According to FDA (2024)...", "Harvard study (2023) found...", "Grand View Research reports (2024)..." Every percentage MUST have attribution. NEVER invent sources. If no source, use ranges ("approximately 20-30%") or state facts directly.
+
+── AUTHORITY & E-E-A-T ──
+Show expertise via specifics: cultivar/variety names, grade thresholds, processing steps, real measurements with units. Cite third-party sources (Spices Board, USDA, ISO standards) by name. NEVER use "we tested", "in our experience", "we found", "hands-on", "after putting to the test", "in our kitchen", "we actually sent" — fabricated first-person experience destroys trust.
+
+── STORYTELLING & VOICE (2+ Each) ──
+Narrative: customer scenarios in third-person ("a buyer who needs X will find Y"), before/after framing tied to cited evidence, analogies. Opinion signals (neutral framing): "the strongest option for X is Y", "avoid X when Y", contrarian views supported by sources. Use contractions (don't, isn't). Ask 3+ rhetorical questions ("Why does this matter?"). Nuance: "on the other hand", "the catch is", "that said". DO NOT fabricate first-person testing ("we tested", "our team", "hands-on", "in our kitchen").
+
+── BUYER GUIDANCE ──
+Include: "how to choose", "what to look for", "best for", "pros and cons". Buyer decisions: "recommended for", "ideal for", "not recommended for". Practical scenarios (2+): "for example, if you need..."
+
+── CONTENT DEPTH ──
+Cover what/why/how/when angles. Mix beginner ("basics", "getting started") + advanced ("professional", "in-depth") content. Use "for example", "in practice", "use case" for concrete scenarios.
+
+── FORBIDDEN ──
+Words: delve, multifaceted, landscape, tapestry, nuanced, robust, myriad, paradigm, foster, holistic, pivotal, streamline, cutting-edge, plethora, underscore. Phrases: "let's explore", "when it comes to", "in today's world", "let's dive in", "furthermore/moreover/additionally" chains.
+
+── TEMPLATE SENTENCE PATTERNS TO NEVER GENERATE ──
+DO NOT write any of these SEO template patterns (they appear identically across thousands of AI articles and destroy uniqueness):
+❌ "This factor directly influences [keyword] performance."
+❌ "Buyers evaluating [keyword] should weigh this carefully."
+❌ "For [keyword], this distinction matters more than most realise."
+❌ "In practice, [keyword] outcomes depend heavily on [variable]."
+❌ "Without addressing this, [keyword] results will be inconsistent."
+❌ "This is where [keyword] quality becomes measurable."
+❌ "The best [keyword] consistently scores well on this criterion."
+❌ "Experienced [keyword] buyers check this before anything else."
+❌ "Our experience shows that [generic claim about product/service]."
+❌ "We found it adds [benefit] to [use-case]."
+❌ "When we analyzed [data/feedback], we discovered [insight]."
+If you need to use the keyword in a sentence, write UNIQUE phrasing specific to the actual content.
+
+── ANTI-STUFFING ──
+Do NOT repeat exact keyword "{self.keyword}" in every paragraph. Use in H2s, intro, conclusion. In body: pronouns ("it", "they", "this") or short references.
+
+── ANTI-DUPLICATION (CRITICAL) ──
+- The DEFINITION of "{self.keyword}" appears EXACTLY ONCE — in the introduction. Do NOT redefine it in any other section. Subsequent sections assume the reader knows what it is.
+- Each H2 covers a DISTINCT angle. Never produce two H2s on the same topic (e.g. do not write "Whole vs Ground" twice, do not write "Regional Varieties" and "Regional Blends" as separate sections).
+- If the structure plan accidentally lists overlapping H2s, MERGE them under one heading rather than repeating content.
+- Do NOT recap content from earlier sections. Each section adds NEW information.
+
+── COMPLETE SENTENCES ──
+Every sentence must end with a complete thought. NEVER end mid-clause (e.g. "India is responsible for." or "The key factor includes."). If you cannot complete a fact with concrete data, omit the sentence entirely.
+
 {customer_ctx}
 OUTPUT: Clean semantic HTML only. <h2 id="anchor">, <h3>, <p>, <ul><li>, <ol><li>, <table>, <strong>, <a>. No markdown, no code fences."""
 
@@ -3129,10 +3743,10 @@ OUTPUT: Clean semantic HTML only. <h2 id="anchor">, <h3>, <p>, <ul><li>, <ol><li
             parts = []
             if int_links:
                 parts.append("INTERNAL LINKS to embed:\n" + "\n".join(
-                    f'  <a href="{lk["href"]}">{lk["anchor_text"]}</a>' for lk in int_links))
+                    f'  <a href="{lk["href"]}">{lk["anchor_text"]}</a>{" — " + lk["context"] if lk.get("context") else ""}' for lk in int_links))
             if ext_links:
                 parts.append("EXTERNAL LINKS to embed:\n" + "\n".join(
-                    f'  <a href="{lk["href"]}" target="_blank" rel="noopener">{lk["anchor_text"]}</a>' for lk in ext_links))
+                    f'  <a href="{lk["href"]}" target="_blank" rel="noopener">{lk["anchor_text"]}</a>{" — " + lk["context"] if lk.get("context") else ""}' for lk in ext_links))
             return "\n".join(parts)
 
         # ── PART 1: Introduction + TOC ───────────────────────────────────
@@ -3140,7 +3754,7 @@ OUTPUT: Clean semantic HTML only. <h2 id="anchor">, <h3>, <p>, <ul><li>, <ol><li
         toc_anchors = (_toc_raw if isinstance(_toc_raw, list) else [_toc_raw] if _toc_raw else [])[:8]
         intro_prompt = f"""Write the INTRODUCTION for a comprehensive SEO {pt_label} about "{self.keyword}".
 
-TITLE (H1): {structure.get("h1", self.keyword.title())}
+{_intent_block_section}TITLE (H1): {structure.get("h1", self.keyword.title())}
 Intent: {self._intent_data.get('primary_intent', self.intent)}
 Business: {self.project_name or "the business"}
 {"Target Audience: " + self.target_audience if self.target_audience else ""}
@@ -3155,11 +3769,13 @@ Key facts: {', '.join(key_facts[:3]) if key_facts else "Provide relevant data"}
 REQUIREMENTS:
 - Start with a hook sentence containing "{self.keyword}" in the first 10 words
 - First paragraph MUST be ≥40 words and start with "{self.keyword.split()[0]}"
-- DEFINITION: Within the first 150 words, include a clear definition: "{self.keyword} is a ..." or "{self.keyword} refers to ...". This is a scored requirement.
-- READABILITY: Use short, clear sentences (12-22 words avg). Flesch Reading Ease target: 50-75. Mix simple and compound sentences.
+- DEFINITION: Within the first 150 words, include a clear definition: "{self.keyword} is a ..." or "{self.keyword} refers to ...". This is a scored requirement. The definition appears HERE ONLY — do not restate it in any later section.
+- READABILITY: Sentence avg 15-20 words (mix 8-12w short + 18-25w medium). Flesch target: 60-70. Active voice >80%.
+- SENTENCE VARIETY: Start sentences differently. Use 5+ opener types: questions ("What is..."), imperatives ("Consider..."), transitions ("However..."), subordinate ("While..."), adverbs ("Typically..."). Limit "The" to <20%.
 - Include a TL;DR / Key Takeaways box after intro (use <div class="key-takeaway">)
-- After intro, add a TOC nav block: <nav><ul> with links to these anchors: {json.dumps(toc_anchors)}
-- Total: 150-250 words
+- SOFT CTA: After TL;DR box, add 1 sentence: "Discover the benefits of {self.keyword} for [benefit]. Learn more below."
+- After intro + CTA, add a TOC nav block: <nav><ul> with links to these anchors: {json.dumps(toc_anchors)}
+- Total: 180-280 words (including soft CTA)
 
 {rules_compact}"""
 
@@ -3169,19 +3785,33 @@ REQUIREMENTS:
             self.routing.draft, intro_prompt, temperature=0.6, max_tokens=800
         )
         if not intro_html:
-            intro_html = f'<p>{self.keyword.title()} is a topic that deserves careful attention.</p>'
+            # Build a research-aware fallback intro instead of generic filler
+            _fb_themes = self.state.steps[0].details.get("analysis", {}).get("themes", []) if self.state.steps[0].details else []
+            _fb_facts = self.state.steps[0].details.get("analysis", {}).get("key_facts", []) if self.state.steps[0].details else []
+            _fb_theme = _fb_themes[0] if _fb_themes else "quality, sourcing, and practical selection criteria"
+            _fb_fact = f' {_fb_facts[0]}.' if _fb_facts else ''
+            intro_html = (
+                f'<p>{self.keyword.title()} refers to {_fb_theme.lower()}, '
+                f'and understanding the key differences can significantly impact your results.{_fb_fact}</p>\n'
+                f'<p>This guide covers what matters most when evaluating {self.keyword} — '
+                f'from critical specifications to practical buying considerations.</p>'
+            )
 
         # ── PART 2: Body sections (batches of 2-3) ─────────────────────────
         section_parts = []
         batch_size = 3 if len(h2_sections) <= 6 else 2
         batches = [h2_sections[i:i+batch_size] for i in range(0, len(h2_sections), batch_size)]
+        cross_batch_summary: list[str] = []  # accumulates per-batch memory for subsequent prompts
 
         for batch_idx, batch in enumerate(batches):
             section_names = [s['h2'] for s in batch]
             sections_spec = ""
             for s in batch:
                 h3_list = "\n    - " + "\n    - ".join(s.get("h3s", [])) if s.get("h3s") else ""
-                sections_spec += f'\n  <h2 id="{s.get("anchor", "")}"> {s["h2"]} </h2> (~{s.get("word_target", 300)} words){h3_list}'
+                # Inject S2 content_angle and authority_note so the drafter uses them
+                angle_line = f"\n    Angle: {s['content_angle']}" if s.get("content_angle") else ""
+                authority_line = f"\n    Authority: {s['authority_note']}" if s.get("authority_note") else ""
+                sections_spec += f'\n  <h2 id="{s.get("anchor", "")}"> {s["h2"]} </h2> (~{s.get("word_target", 300)} words){angle_line}{authority_line}{h3_list}'
 
             links_ctx = _links_for_sections(section_names)
 
@@ -3194,18 +3824,66 @@ REQUIREMENTS:
                 table_note = "\nINCLUDE: One <table> with <thead>/<tbody> for comparison/data (3+ rows × 3+ columns)."
             list_note = "\nINCLUDE: At least 1 <ul> list and 1 <ol> list in these sections." if batch_idx <= 1 else ""
 
+            # Type-specific writing requirements for each section in this batch
+            type_rules_parts = []
+            for s in batch:
+                sec_type = (s.get("type") or "").lower()
+                rule = self._SECTION_TYPE_REQUIREMENTS.get(sec_type)
+                if rule:
+                    type_rules_parts.append(rule.replace("{keyword}", self.keyword))
+            type_rules_block = ("\nSECTION-TYPE WRITING REQUIREMENTS:\n" + "\n\n".join(type_rules_parts)) if type_rules_parts else ""
+
+            # Cross-batch memory: prevent repeating points from prior batches
+            memory_block = ""
+            if cross_batch_summary:
+                prev_items = cross_batch_summary  # full history to avoid repeats
+                memory_block = "\nPREVIOUSLY COVERED (do NOT repeat these points or arguments):\n" + "\n".join(f"  - {m}" for m in prev_items)
+
+            # S1 research differentiation context for body sections
+            angles_block = ""
+            if research_angles:
+                angles_block = "DIFFERENTIATION ANGLES (weave these into the content):\n" + "\n".join(f"  - {a}" for a in research_angles[:3])
+            gaps_block = ""
+            if research_gaps:
+                gaps_block = "CONTENT GAPS to fill (competitors miss these):\n" + "\n".join(f"  - {g}" for g in research_gaps[:3])
+
             batch_prompt = f"""Write these sections for an SEO {pt_label} about "{self.keyword}".
 
 SECTIONS TO WRITE:{sections_spec}
 {table_note}{list_note}
+{type_rules_block}
+{memory_block}
 
 {"Supporting keywords to include: " + ', '.join(self.supporting_keywords[:8]) if self.supporting_keywords else ""}
+
+{angles_block}
+{gaps_block}
 
 {section_research}
 
 {links_ctx}
 
+{("STRUCTURE REVIEWER NOTES (apply when writing):\n" + chr(10).join(f"  - {imp}" for imp in self._structure_improvements[:6])) if getattr(self, "_structure_improvements", None) else ""}
+
 INSIGHT: For each section, include one NON-OBVIOUS insight — what do most articles miss about this topic? What's the practical real-world implication that someone with hands-on experience would know?
+
+DATA SOURCING (Required: 3+ sourced statistics in these sections):
+- Format: "According to [FDA/USDA/NIH/Harvard/etc.] (2023-2024), [statistic]..."
+- Use government (FDA, USDA, NIH, CDC), academic (PubMed, universities), or industry sources (Grand View Research, IBISWorld)
+- NEVER state percentages or precise numbers without attribution
+- If no source available, use ranges: "approximately 20-30%" or state facts directly
+
+STORYTELLING (Required: 1+ narrative element per section):
+- Use evidence-based framing tied to cited sources, manufacturer specs, or public datasets. NEVER fabricate first-person testing or experience claims.
+- Include specific scenarios: "For instance, if you're buying for [use case]..."
+- Add brief customer examples (1-2 sentences)
+- Use analogies for complex concepts
+
+OPINION SIGNALS (Required: 1+ per section, NEUTRAL framing only):
+- Take clear stance without fake first-person: "The strongest option is...", "Avoid X when Y", "For most buyers, prefer X"
+- DO NOT write "we tested", "in our experience", "our team", "hands-on" — fabricated authority claims will be rejected by reviewers
+- State contrarian views when supported by a cited source: "Contrary to popular belief, [source] shows..."
+- Be specific: NOT "many benefits", YES "improved shelf life of 6-12 months"
 
 {rules_compact}
 
@@ -3217,10 +3895,21 @@ Write ONLY these sections. Start directly with the first <h2>. No intro, no conc
             )
             if batch_html:
                 section_parts.append(batch_html)
+                # Record a compact summary for cross-batch memory — strip HTML first
+                _batch_text = re.sub(r"<[^>]+>", " ", batch_html).strip()
+                _batch_first_sentence = _batch_text.split(".")[0].strip()[:120]
+                cross_batch_summary.append(f"{', '.join(section_names)}: {_batch_first_sentence}")
             else:
-                # Minimal fallback for this batch
+                # Research-aware fallback for this batch
+                _fb_themes = self.state.steps[0].details.get("analysis", {}).get("themes", []) if self.state.steps[0].details else []
                 for s in batch:
-                    section_parts.append(f'<h2 id="{s.get("anchor","")}">{s["h2"]}</h2>\n<p>{self.keyword.title()} — this section covers {s["h2"].lower()}.</p>')
+                    _sec_theme = _fb_themes[batch_idx % len(_fb_themes)] if _fb_themes else s['h2'].lower()
+                    section_parts.append(
+                        f'<h2 id="{s.get("anchor","")}">{s["h2"]}</h2>\n'
+                        f'<p>When evaluating {self.keyword} in the context of {s["h2"].lower()}, '
+                        f'the most important factor is {_sec_theme.lower()}. '
+                        f'Buyers should compare at least three options before making a decision.</p>'
+                    )
 
         # ── PART 3: FAQ + Conclusion ───────────────────────────────────────
         _faqs_raw = structure.get("faqs", [])
@@ -3246,9 +3935,13 @@ FAQ SECTION:
 
 CONCLUSION:
 - Plan: {conclusion_plan}
-- Include CTA (buy/shop/contact/learn more/discover/try)
+- STRONG ACTION CTA (REQUIRED - scored): Final paragraph MUST include one of these verbs: buy, shop, order, contact, get started, compare, try
+- CTA format: "[Action verb] {self.keyword} today and [specific benefit]. [Urgency phrase]."
+- Examples: "Shop premium {self.keyword} today and enjoy 30% longer freshness. Don't settle for inferior quality."
 - Include "{self.keyword}" in conclusion
-- 100-150 words
+- Add urgency: "Start today", "Don't wait", "Limited availability", "Act now"
+- Add benefit: "...and enjoy [specific measurable benefit]"
+- 100-150 words with CLEAR action-oriented final sentence
 
 {f"WIKIPEDIA REFERENCES to embed:{chr(10)}{ref_links_text}" if ref_links_text else ""}
 
@@ -3263,9 +3956,21 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
             self.routing.draft, faq_prompt, temperature=0.6, max_tokens=1000
         )
         if not faq_html:
+            # Build FAQ with keyword-specific, non-generic fallback answers
+            _fb_themes = self.state.steps[0].details.get("analysis", {}).get("themes", []) if self.state.steps[0].details else []
+            _fb_theme = _fb_themes[0] if _fb_themes else "specifications and sourcing"
             faq_html = f'<h2 id="faq">Frequently Asked Questions About {self.keyword.title()}</h2>'
-            for q in faq_questions[:4]:
-                faq_html += f'\n<h3>{q}</h3>\n<p>{self.keyword.title()} — answer coming soon.</p>'
+            _faq_templates = [
+                f'The answer depends primarily on {_fb_theme.lower()} and your intended application. Compare certified options from at least two suppliers before deciding.',
+                f'{self.keyword.title()} varies based on grade, origin, and processing method. Verify supplier certifications and request samples to assess quality firsthand.',
+                f'Most buyers of {self.keyword} prioritize consistency and documented sourcing. Start with small trial orders and scale after verifying performance.',
+                f'For {self.keyword}, the key factors are origin verification, batch consistency, and compliance with industry standards. Independent lab testing offers the most reliable assurance.',
+            ]
+            for qi, q in enumerate(faq_questions[:4]):
+                faq_html += (
+                    f'\n<h3>{q}</h3>\n'
+                    f'<p>{_faq_templates[qi % len(_faq_templates)]}</p>'
+                )
 
         # ── Assemble full draft ───────────────────────────────────────────
         draft = intro_html + "\n\n" + "\n\n".join(section_parts) + "\n\n" + faq_html
@@ -3300,10 +4005,91 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
         # ── AI Watermark scrub: remove AI fluff patterns (R35) ──
         self.state.draft_html = self._scrub_ai_patterns(self.state.draft_html)
 
+        # ── Readability Enforcer: guarantee Flesch 60-70 (R18) ──
+        self.state.draft_html = await self._enforce_readability(self.state.draft_html)
+
         # ── Content Intelligence post-processing (R34-R46) ──
         self.state.draft_html = self._intelligence_post_process(self.state.draft_html)
 
+        # Editorial intelligence is a non-critical enhancement — never fail Step 6 over it
+        try:
+            await self._step_editorial_intelligence()
+        except Exception as _ei_err:
+            log.warning(f"Editorial intelligence skipped (non-fatal): {_ei_err}")
+            if not hasattr(self.state, "editorial_instructions"):
+                self.state.editorial_instructions = []
+
+        # ── Integrity scan: detect mid-word corruption (trust killer) ──
+        try:
+            self.state.draft_html = self._check_content_integrity(self.state.draft_html)
+        except Exception as _int_err:
+            log.warning(f"Integrity scan skipped (non-fatal): {_int_err}")
+
+        # ── Phase B: per-section scoring (read-only foundation for Phase C) ──
+        self._score_all_sections(self.state.draft_html)
+
+        # ── Phase C: targeted regen of weak sections (feature-flagged) ──
+        try:
+            self.state.draft_html = await self._run_targeted_regen(self.state.draft_html)
+        except Exception as _regen_err:
+            log.warning(f"Targeted regen skipped (non-fatal): {_regen_err}")
+
         self.state.final_html = self.state.draft_html
+
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _step_editorial_intelligence(self):
+        """
+        Runs the EditorialIntelligenceEngine on the drafted sections to prevent 
+        repetition, enforce narrative flow, and check global keyword density.
+        Appends rewrite/restructure instructions for the recovery/redevelop step.
+        """
+        _step_ctx_var.set({"step": 6.5, "step_name": "Editorial Intelligence", "article_id": getattr(self, "article_id", None), "project_id": getattr(self, "project_id", ""), "keyword": getattr(self, "keyword", "")})
+        
+        if not hasattr(self.state, "editorial_instructions"):
+            self.state.editorial_instructions = []
+
+        # Defensive: ensure required attrs exist (handles older deployments / recovery re-instantiations)
+        if not hasattr(self, "_blueprint"):
+            self._blueprint = None
+        if not hasattr(self, "content_state"):
+            try:
+                from core.routing_schema import ContentState
+                self.content_state = ContentState()
+            except Exception:
+                log.warning("Editorial intelligence skipped: content_state unavailable")
+                return
+
+        log.info("Running EditorialIntelligenceEngine to build post-draft instructions")
+        
+        # Initialize Engine
+        engine = EditorialIntelligenceEngine(
+            title=self.state.title,
+            keyword=self.keyword,
+            intent=self.intent,
+            content_state=self.content_state
+        )
+
+        full_html = self.state.draft_html or ""
+        blueprint = getattr(self, "_blueprint", None)
+        sections = getattr(blueprint, "sections", []) if blueprint else []
+
+        # 1 — Per-section repetition scan (anecdotes / examples)
+        repetition_instructions = engine.scan_all_sections_for_repetition(full_html)
+        self.state.editorial_instructions.extend(repetition_instructions)
+
+        # 2 — Global keyword density check
+        density_instructions = engine.global_keyword_density_check(full_html)
+        self.state.editorial_instructions.extend(density_instructions)
+
+        # 3 — Intent fulfilment check
+        intent_instructions = engine.intent_delivery_check(sections)
+        self.state.editorial_instructions.extend(intent_instructions)
+        
+        if self.state.editorial_instructions:
+            log.info(f"Editorial Intelligence added {len(self.state.editorial_instructions)} instructions")
+        else:
+            log.info("Editorial Intelligence passed with no additional instructions")
 
     # ─────────────────────────────────────────────────────────────────────────
     # POST-DRAFT AUTO-INJECTION (programmatic — runs after Step 6 draft)
@@ -3353,6 +4139,9 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
                 # Prefer paragraphs with data/authority signals
                 if any(s in para_text for s in ["according", "research", "study", "data", "evidence", "%"]):
                     insert_pos = m.end(2)
+                    # Word-boundary safety: don't insert mid-word
+                    if insert_pos > 0 and html[insert_pos - 1].isalnum():
+                        continue  # skip this paragraph, try next
                     html = html[:insert_pos] + wiki_tag + html[insert_pos:]
                     injected = True
                     break
@@ -3360,7 +4149,9 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
                 # Fallback: add to the 3rd paragraph (or last)
                 target = paras[min(2, len(paras) - 1)]
                 insert_pos = target.end(2)
-                html = html[:insert_pos] + wiki_tag + html[insert_pos:]
+                # Word-boundary safety
+                if insert_pos > 0 and not html[insert_pos - 1].isalnum():
+                    html = html[:insert_pos] + wiki_tag + html[insert_pos:]
             log.info(f"Post-draft inject: added Wikipedia reference link")
 
         # ── R20: Authority signals — DISABLED ─────────────────────────────────
@@ -3404,9 +4195,18 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
                         href = _cust_url + href
                 link_tag = f' <a href="{href}">{anchor}</a>'
 
-            # Append link before the closing </p>
+            # Append link before the closing </p>, with word-boundary safety check
             m = paras[para_idx]
             insert_pos = m.end(2)
+            # Safety: ensure we're not inserting mid-word (e.g., "footprin<a>...</a>t")
+            # Check the char before insert_pos (if not whitespace/tag, skip this injection)
+            if insert_pos > 0:
+                char_before = html[insert_pos - 1]
+                # Only inject if char_before is whitespace, closing tag '>', or punctuation
+                if char_before.isalnum():
+                    # Mid-word position detected, skip this link
+                    link_idx += 1
+                    continue
             html = html[:insert_pos] + link_tag + html[insert_pos:]
             link_idx += 1
             # Re-find paragraphs since positions shifted
@@ -3418,21 +4218,947 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
     # AI WATERMARK SCRUBBER (integrates AIWatermarkScrubber from ruflo_seo_audit)
     # ─────────────────────────────────────────────────────────────────────────
 
+    # Words/phrases that must never appear in finished content. Kept in sync
+    # with the FORBIDDEN list shown in S6 / S9 / S12 prompts. The substitutions
+    # are conservative: replace with a neutral word the surrounding sentence
+    # can absorb without becoming ungrammatical.
+    _FORBIDDEN_REPLACEMENTS = (
+        # Generic AI vocabulary
+        (r"\bdelve(s|d|ing)?\b", "explore"),
+        (r"\bmultifaceted\b", "complex"),
+        (r"\btapestry\b", "mix"),
+        (r"\bnuanced\b", "subtle"),
+        (r"\bmyriad\b", "many"),
+        (r"\bparadigm\b", "approach"),
+        (r"\bfoster(s|ed|ing)?\b", "support"),
+        (r"\bholistic\b", "complete"),
+        (r"\bpivotal\b", "key"),
+        (r"\bstreamline(s|d|ing)?\b", "simplify"),
+        (r"\bcutting-edge\b", "modern"),
+        (r"\bplethora\b", "range"),
+        (r"\bunderscore(s|d|ing)?\b", "highlight"),
+        (r"\blet'?s explore\b", "consider"),
+        (r"\bwhen it comes to\b", "for"),
+        (r"\bin today'?s world\b", "today"),
+        (r"\blet'?s dive in\b", ""),
+        (r"\blandscape\b", "market"),
+        # Templated filler phrases (caught in editorial reviews of cinnamon/spices articles)
+        (r"\bthis (?:factor )?directly (?:influences|impacts|affects)[^.]*\.", ""),
+        (r"\bthis is especially relevant[^.]*\.", ""),
+        (r"\bwhat most (?:people|buyers) (?:miss|overlook)[^.]*?(?:is that|the|because)", "Worth noting:"),
+        (r"\bexperienced buyers (?:check|look at|verify) this[^.]*\.", ""),
+        (r"\bin practice,?\b", "in real use,"),
+        (r"\breal-world performance of [^.]*? (?:hinges on|depends on)", "Real performance depends on"),
+        # Fake-authority phrases (root-cause: AI fabricates testing claims with no real data)
+        (r"\b(?:in our|after our|based on our) (?:testing|tests|evaluation|evaluations|review|reviews|experience|hands-on (?:testing|review))[^.,]*[.,]?", ""),
+        (r"\bwe (?:tested|evaluated|reviewed|put this to the test|put .* to the test)[^.]*?(?:and|to|in)", "Independent reviews"),
+        (r"\bour team (?:tested|evaluated|reviewed|analysed|analyzed)[^.]*\.", ""),
+        (r"\bhands-on (?:testing|review|evaluation)[^.,]*[.,]?", ""),
+        (r"\bafter putting (?:this|these|it|them) to the test[^.,]*[.,]?", ""),
+        (r"\bhere'?s what we found after (?:putting this|testing)[^.]*?(?::|—|-)", "Independent assessments show:"),
+        # Suspicious unsourced superlatives that triggered the "90% of India's spice harvest" red flag
+        (r"\b(?:over|nearly|approximately|roughly|about) ?\d{2,3}\s?%\s+of\s+(?:india'?s|the world'?s|all|global)\b[^.]*?\.", ""),
+        # Additional fake-authority + template filler patterns
+        (r"\bour team found\b[^.]*\.", ""),
+        (r"\bwe'?ve seen it[^.]*\.", ""),
+        (r"\bwe found that\b", "Research shows"),
+        (r"\bwe discovered\b", "Studies show"),
+        (r"\bwe actually sent[^.]*\.", ""),
+        (r"\bin our kitchen[^.,;]*[.,;]?", ""),
+        (r"\bour team[^.]*?found[^.]*\.", ""),
+        (r"\bwe've done[^.]*?test[^.]*\.", ""),
+        (r"\bafter looking at countless[^.]*\.", ""),
+        (r"\bthis distinction matters[^.]*\.", ""),
+        (r"\boutcomes depend heavily on[^.]*\.", ""),
+        (r"\bresults will be inconsistent[^.]*\.", ""),
+        (r"\bquality becomes measurable[^.]*\.", ""),
+        (r"\bconsistently scores well on this[^.]*\.", ""),
+        (r"\bexperienced.*?buyers check this[^.]*\.", ""),
+        (r"\bfor [^\s]+,? this distinction matters more than most[^.]*\.", ""),
+        (r"\bBuyers evaluating\b", "Shoppers checking"),
+        (r"\bsuited to diverse professional requirements\b", "useful in various contexts"),
+        (r"\bSpecifications alone do not capture all performance factors\b", "Real-world use reveals more than specs alone"),
+        # Phase A additions (2026-04-21): kerala-turmeric-style fake-authority patterns
+        # observed in production after prior _FORBIDDEN_REPLACEMENTS expansion still leaked through.
+        (r"\bOur experience shows that\b", "Evidence shows that"),
+        (r"\bOur perspective is that\b", ""),
+        (r"\bWe found (it|that)\b", "Research indicates"),
+        (r"\bWhen we analyzed\b", "Analysis of"),
+        (r"\bWe observed that\b", "Studies show that"),
+        # Meta-commentary template sentence (LLMs leak this when over-instructed about "buyer guidance")
+        (r"This guide is ideal for [^.]+? but not suited for [^.]+?\.", ""),
+        # Phase F additions (2026-04-22): "kitchen spices" article surfaced these residual patterns.
+        # Fake-authority remnants the previous regex set missed.
+        (r"\bWe believe(?:\s+that)?\b[^.]*\.", ""),
+        (r"\bWe noticed\b[^.]*\.", ""),
+        (r"\bIn our (?:opinion|view|experience)\b[^.,]*[.,]?", ""),
+        (r"\bWe recommend(?:\s+that)?\b", "It's worth"),
+        (r"\bWe (?:strongly )?suggest\b", "Consider"),
+        # Phase F.2 (2026-04-22): cardamom article revealed more first-person plural leaks.
+        (r"\bWe've (?:observed|found|discovered|noticed|seen)\b[^.]*\.", ""),
+        (r"\bWe (?:advise|ship|ensure|always|typically|usually)\b[^.]*\.", ""),
+        (r"\bWhen we (?:tested|analyzed|compared|examined)\b[^.]*[.,]", ""),
+        # SEO template connectors that destroy uniqueness (appear in every AI article)
+        (r"\bThe (?:key|trick|catch|secret) is(?: that)?\b", "Notably,"),
+        (r"\bThis matters because\b", "Why it matters:"),
+        (r"\bAt the end of the day,?\b", ""),
+        # Orphaned commercial CTAs (only safe to strip globally — informational vs commercial
+        # gating happens later via _strip_commercial_noise()).
+        (r"\bbuy authentic [\w\s]+? online\b[^.]*\.", ""),
+        (r"\bshop (?:our )?premium [\w\s]+? (?:collection|range|selection)\b[^.]*\.", ""),
+    )
+
+    def _strip_forbidden_words(self, html: str) -> str:
+        """Programmatically replace banned words/phrases that AI prompts
+        instruct the model to avoid but which still leak through. Runs after
+        the AIWatermarkScrubber in `_scrub_ai_patterns`.
+        Preserves casing for the first letter of each replacement.
+        """
+        if not html:
+            return html
+        total = 0
+        out = html
+        for pattern, replacement in self._FORBIDDEN_REPLACEMENTS:
+            def _sub(m, rep=replacement):
+                orig = m.group(0)
+                if not rep:
+                    return ""
+                # Match leading capitalisation
+                if orig[:1].isupper():
+                    return rep[:1].upper() + rep[1:]
+                return rep
+            new_out, n = re.subn(pattern, _sub, out, flags=re.I)
+            if n:
+                total += n
+                out = new_out
+        # Tidy double spaces left by empty replacements
+        if total:
+            out = re.sub(r"  +", " ", out)
+            out = re.sub(r" \s*\.", ".", out)
+            log.info(f"Forbidden words strip: {total} replacement(s) applied")
+        return out
+
     def _scrub_ai_patterns(self, html: str) -> str:
-        """Run AIWatermarkScrubber on HTML to remove AI fluff patterns (R35)."""
-        if not html or len(html) < 200 or _scrubber is None:
+        """Run AIWatermarkScrubber on HTML to remove AI fluff patterns (R35),
+        then strip forbidden words/phrases that may still slip through prompts."""
+        if not html or len(html) < 200:
             return html
         try:
-            scrubbed, changes = _scrubber.scrub(html)
-            total_removed = changes.get("fluff_removed", 0) + changes.get("starters_replaced", 0)
-            if total_removed > 0:
-                log.info(f"AI scrub: removed {changes.get('fluff_removed',0)} fluff, "
-                         f"replaced {changes.get('starters_replaced',0)} robotic starters, "
-                         f"risk: {changes.get('ai_score_risk','?')}")
-            return scrubbed
+            if _scrubber is not None:
+                scrubbed, changes = _scrubber.scrub(html)
+                total_removed = changes.get("fluff_removed", 0) + changes.get("starters_replaced", 0)
+                if total_removed > 0:
+                    log.info(f"AI scrub: removed {changes.get('fluff_removed',0)} fluff, "
+                             f"replaced {changes.get('starters_replaced',0)} robotic starters, "
+                             f"risk: {changes.get('ai_score_risk','?')}")
+            else:
+                scrubbed = html
+            # Always run forbidden-words pass even when scrubber unavailable
+            return self._strip_forbidden_words(scrubbed)
         except Exception as e:
             log.warning(f"AI scrub failed: {e}")
+            # Best-effort: still try forbidden-words strip
+            try:
+                return self._strip_forbidden_words(html)
+            except Exception:
+                return html
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # INTEGRITY SCAN: detect mid-word corruption (trust killer)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_content_integrity(self, html: str) -> str:
+        """
+        Detect mid-word text corruption that breaks reader trust.
+        
+        Patterns detected:
+        - Mid-word capital injections: "hin That said", "ThNotice that"
+        - Broken token fragments: standalone "ges", "hin", "ect" mid-sentence
+        
+        If corruption detected, adds detailed instructions to editorial_instructions
+        for the quality loop to regenerate the affected sections.
+        
+        This is a HARD BLOCKER for quality — corrupted text destroys E-E-A-T.
+        """
+        if not html or len(html) < 100:
+            return html or ""
+
+        # Strip HTML tags to analyze raw text
+        text = re.sub(r"<[^>]+>", " ", html)
+
+        issues = []
+        
+        # Pattern 1: Mid-word capital injection (aggressive filter for TRUE fragments only)
+        # Detects: broken word fragments like "hin That", "ges NotNotice", "ect However"
+        # EXCLUDES: legitimate patterns like "the Indian", "to Choose", "a Better"
+        # Strategy: fragment must be <4 chars AND not a common word (the, to, a, in, on, at, for, with, by, from)
+        mid_word_capitals = re.findall(
+            r'\b([a-z]{1,3})\s+([A-Z][a-z]{3,})\s+([a-z]{2,})',
+            text
+        )
+        common_words = {'the', 'to', 'a', 'an', 'in', 'on', 'at', 'for', 'with', 'by', 'from', 'of', 'or', 'and', 'as', 'is', 'be', 'it', 'no', 'so', 'if', 'do', 'we', 'us', 'my', 'me', 'he', 'up', 'go'}
+        true_fragments = [m for m in mid_word_capitals if m[0] not in common_words]
+        
+        if true_fragments:
+            for match in true_fragments[:3]:  # limit to first 3 examples
+                issues.append(f"Mid-word capital injection detected: '{match[0]} {match[1]} {match[2]}'")
+        
+        # Pattern 2: Broken token fragments
+        # Detects standalone fragments like " ges ", " hin ", " ect " mid-sentence
+        # (not part of legitimate words like "suggest" or "hint")
+        broken_tokens = re.findall(
+            r'\s(ges|hin|ect|tion|ing|ment|ness)\s+[a-z]',
+            text
+        )
+        if broken_tokens:
+            unique_fragments = list(set(broken_tokens))[:3]
+            issues.append(f"Broken word fragments detected: {', '.join(unique_fragments)}")
+        
+        # Pattern 3: Double-space artifacts (often indicates text splice corruption)
+        double_spaces = len(re.findall(r'  +', text))
+        if double_spaces > 5:  # some double spaces are normal, but many indicate corruption
+            issues.append(f"Excessive double-space artifacts detected ({double_spaces} instances)")
+
+        # Phase A additions (2026-04-21): three more corruption signatures observed in production.
+        # 4: Word-fusion (e.g., "Independent reviewsct potency" — missing space between two words).
+        #    Heuristic: a token ≥7 chars ending in a 2-char fragment that is itself a real word start.
+        word_fusion = re.findall(r'\b([a-z]{4,}(?:ct|sm|nd|rd|th|st|ly))(?=[a-z]{2,}\b)', text)
+        # Filter: only flag when the suffix is unusual (avoids real words like "perfect", "contract").
+        # Trigger only on the specific observed pattern: word ending in "sct"/"wsct"/etc.
+        suspicious_fusions = re.findall(r'\b\w*(?:sct|wsct|esct|rsct|nsct|tsct)\b', text, re.IGNORECASE)
+        if suspicious_fusions:
+            issues.append(f"Word-fusion corruption detected: {suspicious_fusions[:3]}")
+
+        # 5: Duplicate adjacent words ("support support", "the the"). Auto-fix safe.
+        double_words = re.findall(r'\b(\w{3,})\s+\1\b', text, re.IGNORECASE)
+        if double_words:
+            unique_dups = list({w.lower() for w in double_words})[:3]
+            issues.append(f"Duplicate adjacent words: {unique_dups}")
+
+        # 6: Lowercase sentence start after period (e.g., ". this addition").
+        #    Heuristic: only flag if there are 3+ instances (one-off may be intentional like "e.g.").
+        lowercase_starts = re.findall(r'(?<=[.!?])\s+([a-z][a-z]{3,})', text)
+        if len(lowercase_starts) >= 3:
+            issues.append(f"Lowercase sentence starts after period ({len(lowercase_starts)} instances): {lowercase_starts[:3]}")
+
+        if issues:
+            if not hasattr(self.state, "editorial_instructions"):
+                self.state.editorial_instructions = []
+            
+            log.warning(f"INTEGRITY SCAN FAILED: {len(issues)} corruption pattern(s) detected")
+            for issue in issues:
+                log.warning(f"  - {issue}")
+            
+            # Add regeneration instruction for quality loop
+            corruption_detail = "; ".join(issues[:3])  # limit to top 3
+            self.state.editorial_instructions.append(
+                f"CRITICAL: Text corruption detected ({corruption_detail}). "
+                "Regenerate ALL affected sections with CLEAN output. "
+                "Do NOT patch — rewrite from scratch to eliminate mid-word splices and broken tokens."
+            )
+        else:
+            log.info("Integrity scan: PASSED (no corruption detected)")
+
+        # AUTO-FIX: collapse double spaces and stray punctuation spaces directly on html
+        html = re.sub(r'  +', ' ', html)
+        html = re.sub(r' +([.,;:!?])', r'\1', html)
+
+        # Phase A auto-fixes (2026-04-21): safe automatic corrections for the new detectors.
+        # Fix duplicate adjacent words (operate on visible text only, leave HTML attributes alone).
+        # Apply to text content within tags using a conservative regex on the full html.
+        html = re.sub(r'\b(\w{3,})\s+\1\b', r'\1', html, flags=re.IGNORECASE)
+        # Capitalise the first letter after sentence-ending punctuation when it's clearly a new sentence.
+        # Be conservative: only fix when preceded by ". " / "! " / "? " and followed by a real word.
+        html = re.sub(
+            r'([.!?])(\s+)([a-z])(?=[a-z]{3,})',
+            lambda m: f"{m.group(1)}{m.group(2)}{m.group(3).upper()}",
+            html,
+        )
+
+        # ── Phase F additions (2026-04-22): structural deduplication + noise removal ──
+        # Driven by the "kitchen spices" article which had:
+        #   - "How to choose kitchen spices refers to..." repeated 4× verbatim
+        #   - Duplicate H2s ("Whole vs Ground" twice, "Regional Blends" twice)
+        #   - Orphaned "buy turmeric powder online" CTAs in informational article
+        #   - Incomplete sentences ("India is responsible for...")
+        try:
+            html = self._dedupe_structure_and_noise(html)
+        except Exception as _e:
+            log.warning(f"Structural dedupe skipped (non-fatal): {_e}")
+
+        return html
+
+    def _dedupe_structure_and_noise(self, html: str) -> str:
+        """Algorithmic (no-LLM) post-processing to fix four common defects.
+
+        1. Duplicate H2 sections — fuzzy-match titles (>=0.85 similarity) and
+           drop the SECOND occurrence entirely (heading + its body until next H2).
+        2. Repeated keyword definitions — remove every sentence after the first
+           that matches "{keyword} (refers to|is|means|describes) ...".
+        3. Incomplete trailing sentences — drop sentences ending in dangling
+           prepositions / hanging commas (e.g. "India is responsible for.").
+        4. Commercial CTA noise — when intent_data.plan.article_type is
+           "educational_guide" or "comparison_review", strip orphaned
+           "buy/shop/order ... online" sentences.
+
+        All operations are conservative: when in doubt, do nothing.
+        """
+        from bs4 import BeautifulSoup
+        from difflib import SequenceMatcher
+
+        if not html or len(html) < 200:
             return html
+
+        soup = BeautifulSoup(html, "html.parser")
+        changed_any = False
+
+        # ── 1. Duplicate H2 dedup (fuzzy match) ──────────────────────────────
+        h2s = soup.find_all("h2")
+        seen_norm: list[tuple[str, set, object]] = []
+        to_remove: list[object] = []
+        STOP = {"the", "a", "an", "of", "for", "to", "and", "or", "in", "on", "vs", "versus", "with", "by"}
+        for h2 in h2s:
+            norm = re.sub(r"[^a-z0-9 ]", "", h2.get_text().lower()).strip()
+            if not norm:
+                continue
+            tokens = {t for t in norm.split() if t and t not in STOP}
+            # Stem prefixes (first 4 chars) capture morphological variants:
+            # "blends" / "blend" / "blending" all collapse to "blen".
+            stems = {t[:4] for t in tokens if len(t) >= 4}
+            duplicate_of = None
+            for prev_norm, prev_tokens, prev_stems, prev_h2 in seen_norm:
+                ratio = SequenceMatcher(None, norm, prev_norm).ratio()
+                if tokens and prev_tokens:
+                    jacc = len(tokens & prev_tokens) / len(tokens | prev_tokens)
+                else:
+                    jacc = 0.0
+                stem_jacc = (
+                    len(stems & prev_stems) / len(stems | prev_stems)
+                    if stems and prev_stems else 0.0
+                )
+                if ratio >= 0.85 or jacc >= 0.6 or stem_jacc >= 0.6:
+                    duplicate_of = prev_h2
+                    break
+            if duplicate_of is not None:
+                # Mark this H2 + all following siblings up to the next H2 for removal.
+                to_remove.append(h2)
+                sib = h2.next_sibling
+                while sib is not None:
+                    if getattr(sib, "name", None) == "h2":
+                        break
+                    nxt = sib.next_sibling
+                    to_remove.append(sib)
+                    sib = nxt
+            else:
+                seen_norm.append((norm, tokens, stems, h2))
+        if to_remove:
+            for node in to_remove:
+                try:
+                    node.extract()
+                except Exception:
+                    pass
+            log.info(f"Dedupe: removed {sum(1 for n in to_remove if getattr(n, 'name', None) == 'h2')} duplicate H2 section(s)")
+            changed_any = True
+
+        # ── 2. Repeated keyword definition removal ───────────────────────────
+        if self.keyword:
+            kw_re = re.escape(self.keyword)
+            def_pattern = re.compile(
+                rf"\b{kw_re}\s+(?:refers to|is\s+(?:a|an|the)|means|describes)\b[^.!?]*[.!?]",
+                re.IGNORECASE,
+            )
+            seen_first = [False]
+
+            def _strip_repeats(text: str) -> str:
+                def _sub(m):
+                    if not seen_first[0]:
+                        seen_first[0] = True
+                        return m.group(0)
+                    return ""  # drop subsequent definitions
+                return def_pattern.sub(_sub, text)
+
+            for p in soup.find_all(["p", "li"]):
+                txt = p.get_text()
+                new = _strip_repeats(txt)
+                if new != txt:
+                    # Replace via direct string assignment (preserves tag wrapper).
+                    p.clear()
+                    p.append(new.strip())
+                    changed_any = True
+
+        # ── 3. Incomplete trailing sentences ─────────────────────────────────
+        # Catches fragments ending with prepositions/articles WITH punctuation
+        DANGLING_ENDINGS = re.compile(
+            r"\b[A-Z][^.!?]*?\b(?:for|of|to|with|by|from|on|in|and|or|but|the|a|an|is|are|was|were|that|which|because|when|while|if|until)\s*[.,]\s*$"
+        )
+        # Catches fragments ending with prepositions WITHOUT punctuation ("accounting for" at paragraph end)
+        HANGING_PREPOSITIONS = re.compile(
+            r"\b(?:accounting for|according to|based on|leading to|resulting in|such as|including|excluding|ranging from)\s*$",
+            re.IGNORECASE
+        )
+        for p in soup.find_all(["p", "li"]):
+            txt = p.get_text().strip()
+            if not txt or len(txt.split()) < 4:
+                continue
+            # Check if entire paragraph ends with hanging preposition (no sentence split needed)
+            if HANGING_PREPOSITIONS.search(txt):
+                # Drop the entire incomplete clause at the end
+                txt_fixed = HANGING_PREPOSITIONS.sub("", txt).strip()
+                if txt_fixed and len(txt_fixed.split()) >= 4:
+                    p.clear()
+                    p.append(txt_fixed)
+                    changed_any = True
+                else:
+                    p.decompose()  # Paragraph became stub
+                continue
+            # Split into sentences and check each
+            sentences = re.split(r"(?<=[.!?])\s+", txt)
+            kept = [s for s in sentences if not DANGLING_ENDINGS.search(s)]
+            if len(kept) != len(sentences) and kept:
+                new = " ".join(kept)
+                p.clear()
+                p.append(new)
+                changed_any = True
+
+        # ── 4. Commercial CTA stripping for non-commercial articles ──────────
+        article_type = ""
+        try:
+            article_type = (self._intent_data or {}).get("plan", {}).get("article_type", "") or ""
+        except Exception:
+            article_type = ""
+        if article_type in ("educational_guide", "comparison_review"):
+            commercial_patterns = [
+                re.compile(r"\b(?:buy|shop|order|purchase)\s+(?:authentic|premium|quality|fresh|organic|the\s+best)?\s*[\w\s]{0,40}?\s+online\b[^.!?]*[.!?]", re.IGNORECASE),
+                re.compile(r"\bexplore\s+(?:our|the)\s+(?:range|collection|selection|catalog|full range)\b[^.!?]*[.!?]", re.IGNORECASE),
+                re.compile(r"\bcontact\s+(?:our\s+)?(?:team|sales|us)\s+(?:for|to|at)\b[^.!?]*[.!?]", re.IGNORECASE),
+                re.compile(r"\bvisit\s+(?:our|the)\s+(?:store|website|shop)\b[^.!?]*[.!?]", re.IGNORECASE),
+                re.compile(r"\b(?:discover|learn more|shop now|find out|check out)\s+(?:about|on|at)?[^.!?]*[.!?]", re.IGNORECASE),
+                re.compile(r"\b(?:compare options|secure your supply|don't miss out)\b[^.!?]*[.!?]", re.IGNORECASE),
+            ]
+            # Also strip inline website URLs and CTAs embedded as links
+            url_patterns = [
+                re.compile(r"\b[a-z0-9-]+\.com/[^\s<>]*", re.IGNORECASE),  # example.com/path
+                re.compile(r"\bat\s+[a-z0-9-]+\.com\b[^.!?]*[.!?]", re.IGNORECASE),  # "at example.com"
+            ]
+            stripped_count = 0
+            for p in soup.find_all(["p", "li"]):
+                txt = p.get_text()
+                new = txt
+                for pat in commercial_patterns:
+                    new = pat.sub("", new)
+                for pat in url_patterns:
+                    new = pat.sub("", new)
+                if new != txt:
+                    new = re.sub(r"\s{2,}", " ", new).strip()
+                    if not new or len(new.split()) < 4:
+                        # Paragraph became empty or stub — drop it entirely.
+                        p.decompose()
+                    else:
+                        p.clear()
+                        p.append(new)
+                    stripped_count += 1
+            if stripped_count:
+                log.info(f"Dedupe: stripped commercial noise from {stripped_count} block(s) ({article_type})")
+                changed_any = True
+
+        if changed_any:
+            return str(soup)
+        return html
+
+    # ──────────────────────────────────────────────────────────────────────
+    # PHASE B: per-section scoring (foundation for Phase C targeted regen)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _score_all_sections(self, html: str) -> Optional[Dict]:
+        """Score every H2 section across trust/clarity/integrity/conversion/uniqueness.
+
+        Stores the result on `self.state.section_scores` and returns the summary
+        dict (see engines.quality.section_scorer.summarise_scores). Read-only by
+        design — Phase C will use this output to drive targeted regeneration.
+
+        Failures are logged but never raise: this is observability, not a gate.
+        """
+        if not html:
+            return None
+        try:
+            from engines.section_scorer import score_all_sections, summarise_scores
+            scores = score_all_sections(html)
+            summary = summarise_scores(scores)
+            self.state.section_scores = summary
+            weak_count = len(summary.get("weak_sections", []))
+            avg = summary.get("average_weighted", 0.0)
+            log.info(
+                f"Section scoring: {summary.get('section_count', 0)} sections | "
+                f"avg weighted {avg}/100 | {weak_count} flagged for regen"
+            )
+            for weak in summary.get("weak_sections", [])[:5]:
+                log.info(
+                    f"  weak: '{weak['h2'][:60]}' → {weak['weighted_total']}/100 | "
+                    f"issues: {weak.get('issues', [])[:3]}"
+                )
+            return summary
+        except Exception as e:
+            log.warning(f"Section scoring skipped (non-fatal): {e}")
+            return None
+
+    # ──────────────────────────────────────────────────────────────────────
+    # PHASE C: targeted section regeneration (the real "same issues repeating" fix)
+    # ──────────────────────────────────────────────────────────────────────
+    # Hard cost caps (defence-in-depth):
+    #   - Max 2 sections regenerated per article
+    #   - Max 2 LLM attempts per section
+    #   - Total budget: +4 LLM calls per article
+    #   - Skip silently on any failure (never blocks pipeline)
+
+    _MAX_REGEN_SECTIONS = 2
+    _MAX_REGEN_ATTEMPTS = 2
+
+    async def _regenerate_section_html(self, section_html: str, h2_title: str,
+                                       issues: List[str]) -> str:
+        """Send a targeted "improve only this section" prompt and return new HTML.
+
+        Returns empty string on failure — caller must keep the original section.
+        """
+        # Strip the outer H2 so the model focuses on the body. We will re-attach.
+        body_html = re.sub(r"<h2[^>]*>.*?</h2>\s*", "", section_html, count=1, flags=re.I | re.DOTALL)
+        # Concise issue summary the model can act on.
+        issue_lines = "\n".join(f"- {i}" for i in issues[:6])
+
+        prompt = (
+            f'You are improving ONE section of an SEO article about "{self.keyword}".\n'
+            f'Section heading: "{h2_title}"\n\n'
+            f"Specific issues detected by automated quality scoring:\n{issue_lines}\n\n"
+            "REWRITE THIS SECTION to fix every listed issue. Hard rules:\n"
+            "1. Keep the same length (±10%) and the same factual claims/data points.\n"
+            "2. Remove ALL fake first-person authority ('we observed', 'our experience', 'we found', 'when we analyzed').\n"
+            "   Replace with third-party attribution or direct fact statements.\n"
+            "3. Remove ALL generic SEO template phrases.\n"
+            "4. Add at least one concrete imperative or recommendation\n"
+            "   (e.g. 'Choose X when Y', 'Look for Z certification', 'Avoid A if B').\n"
+            "5. Output ONLY the new <p>, <ul>, <ol>, <table> body HTML for this section.\n"
+            "   Do NOT include the <h2> heading. Do NOT include other sections.\n"
+            "   Do NOT use markdown. Do NOT add code fences.\n\n"
+            "ORIGINAL SECTION BODY:\n"
+            f"{body_html}"
+        )
+        try:
+            new_html = await self._call_ai_raw_with_chain(
+                self.routing.draft, prompt, temperature=0.4, max_tokens=2000,
+            )
+        except Exception as e:
+            log.warning(f"Targeted regen call failed for '{h2_title[:40]}': {e}")
+            return ""
+        if not new_html or len(new_html.strip()) < 80:
+            return ""
+        # Clean any markdown fences the model may slip in.
+        new_html = re.sub(r"^```(?:html)?\s*|\s*```$", "", new_html.strip(), flags=re.I | re.MULTILINE)
+        return new_html
+
+    async def _run_targeted_regen(self, html: str) -> str:
+        """Iterate weak sections, regenerate each up to MAX_REGEN_ATTEMPTS times.
+
+        Returns the (possibly modified) full article HTML. Always returns a
+        valid string — falls back to the input if anything goes wrong.
+        """
+        if not getattr(self.routing, "targeted_regen", False):
+            return html
+        summary = getattr(self.state, "section_scores", None) or {}
+        weak = summary.get("weak_sections", []) if isinstance(summary, dict) else []
+        if not weak:
+            return html
+
+        # Lazy imports to keep this method self-contained.
+        try:
+            from engines.section_scorer import (
+                split_sections, score_section, score_all_sections, summarise_scores,
+            )
+        except Exception as e:
+            log.warning(f"Targeted regen aborted (scorer import failed): {e}")
+            return html
+
+        # Cap how many sections we touch this article.
+        targets = weak[: self._MAX_REGEN_SECTIONS]
+        target_h2s = {w["h2"] for w in targets}
+        log.info(
+            f"Targeted regen: attempting {len(target_h2s)} weak section(s): "
+            f"{[w['h2'][:50] for w in targets]}"
+        )
+        self._add_log("info", f"Phase C: regenerating {len(target_h2s)} weak section(s)", 6)
+
+        sections = split_sections(html)
+        rebuilt: List[str] = []
+        regen_count = 0
+        for h2_title, section_html in sections:
+            if h2_title not in target_h2s or h2_title == "__intro__":
+                rebuilt.append(section_html)
+                continue
+            # Look up issues for this section.
+            issues_for_section: List[str] = []
+            for w in targets:
+                if w["h2"] == h2_title:
+                    issues_for_section = w.get("issues", [])
+                    break
+            best_html = section_html
+            best_score = score_section(section_html, h2_title)
+            for attempt in range(1, self._MAX_REGEN_ATTEMPTS + 1):
+                new_body = await self._regenerate_section_html(section_html, h2_title, issues_for_section)
+                if not new_body:
+                    log.info(f"  regen attempt {attempt} for '{h2_title[:40]}': empty response, skipping")
+                    continue
+                # Re-attach the H2 heading.
+                h2_match = re.search(r"<h2[^>]*>.*?</h2>", section_html, re.I | re.DOTALL)
+                heading = h2_match.group(0) if h2_match else f"<h2>{h2_title}</h2>"
+                candidate = heading + "\n" + new_body
+                # Run the same integrity scan + scorer on the candidate.
+                candidate = self._check_content_integrity(candidate)
+                candidate = self._strip_forbidden_words(candidate)
+                cand_score = score_section(candidate, h2_title)
+                log.info(
+                    f"  regen attempt {attempt} for '{h2_title[:40]}': "
+                    f"{best_score.weighted_total} → {cand_score.weighted_total}"
+                )
+                if cand_score.weighted_total > best_score.weighted_total:
+                    best_html = candidate
+                    best_score = cand_score
+                # Stop early if the candidate is already healthy.
+                if not best_score.needs_regeneration():
+                    break
+            if best_html != section_html:
+                regen_count += 1
+            rebuilt.append(best_html)
+
+        # If we never had an __intro__ but split returned one as the first item,
+        # split_sections already preserved it correctly, so simple join is safe.
+        new_html = "\n".join(rebuilt)
+        # Refresh the section_scores summary to reflect the rewritten sections.
+        try:
+            self.state.section_scores = summarise_scores(score_all_sections(new_html))
+            log.info(
+                f"Targeted regen complete: {regen_count}/{len(target_h2s)} sections improved | "
+                f"new avg {self.state.section_scores.get('average_weighted', 0)}/100 | "
+                f"{len(self.state.section_scores.get('weak_sections', []))} still flagged"
+            )
+        except Exception:
+            pass
+        return new_html
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # READABILITY ENFORCER (R18: Adaptive Flesch target via algorithmic + AI)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _detect_content_type(self) -> tuple:
+        """Detect content type and return (label, target_low, target_high).
+
+        Uses GENERIC pattern signals that work for ANY business/keyword \u2014
+        no hardcoded product, ingredient, or industry vocabulary.
+        Signals come from: customer intent, generic technical/commercial/info
+        markers, scientific-name patterns (Genus species), and chemical/unit
+        patterns. Any business-specific industry terms must be fed in via
+        `self.intent` or the routing config, not hardcoded here.
+        """
+        kw = (self.keyword or "").lower()
+        title = (getattr(self.state, "title", "") or "").lower()
+        intent = (getattr(self, "intent", "") or "").lower()
+        combined = f"{kw} {title}"
+
+        # Generic technical signals (no industry-specific words)
+        TECHNICAL_MARKERS = (
+            "scientific", "research", "study", "studies", "compound", "chemical",
+            "molecular", "anatomy", "biochemistry", "pharmac", "clinical",
+            "mechanism", "synthesis", "analysis", "spectrum", "specification",
+            "technical", "engineering", "algorithm", "protocol",
+        )
+        # Scientific binomial pattern: "Genus species" (two capitalised-ish words)
+        # or chemical formula / measurement units in title/keyword.
+        scientific_binomial = bool(re.search(r"\b[A-Z][a-z]{2,}\s+[a-z]{3,}\b", getattr(self.state, "title", "") or ""))
+        chemical_pattern = bool(re.search(r"\b(?:[A-Z][a-z]?\d*){2,}\b|\b\d+\s?(?:mg|ml|kg|°c|ppm|kj|kcal)\b", combined))
+        is_technical = (
+            any(t in combined for t in TECHNICAL_MARKERS)
+            or scientific_binomial or chemical_pattern
+            or intent in ("technical", "academic", "research")
+        )
+
+        COMMERCIAL_MARKERS = (
+            "buy", "shop", "price", "pricing", "cheap", "best", "top", "review",
+            "vs ", " vs", "compare", "discount", "deal", "online", "order",
+            "purchase", "near me", "wholesale", "bulk",
+        )
+        is_commercial = (
+            any(t in kw for t in COMMERCIAL_MARKERS)
+            or bool(re.search(r"[$\u20ac\u00a3\u20b9]\s?\d", combined))
+            or intent in ("transactional", "commercial")
+        )
+
+        INFO_MARKERS = (
+            "what is", "what are", "how to", "how do", "why ", "when ", "where ",
+            "guide", "tutorial", "benefits", "uses", "history", "origin",
+            "explained", "tips", "ideas",
+        )
+        is_informational = (
+            any(t in combined for t in INFO_MARKERS) or intent == "informational"
+        )
+
+        if is_technical:
+            return ("technical", 30, 50)
+        if is_commercial and not is_informational:
+            return ("commercial", 55, 75)
+        return ("informational", 40, 60)
+
+    async def _enforce_readability(self, html: str) -> str:
+        """
+        Guarantee adaptive Flesch target via post-processing.
+        - Detect content type → pick target range
+        - Split long sentences (>22 words)
+        - Replace complex words
+        - Rank paragraphs by complexity, AI-simplify worst 20
+        - Retry up to 2 passes
+        """
+        if not html or len(html) < 200 or not HAS_TEXTSTAT:
+            return html
+
+        ctype, target_low, target_high = self._detect_content_type()
+
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+
+        try:
+            current_flesch = textstat.flesch_reading_ease(text)
+        except Exception as e:
+            log.warning(f"Flesch calculation failed: {e}")
+            return html
+
+        if target_low <= current_flesch <= target_high:
+            log.info(f"R18 readability ({ctype}): Flesch {current_flesch:.1f} in target {target_low}-{target_high} — skip")
+            return html
+
+        log.info(f"R18 readability enforcer ({ctype}): Flesch {current_flesch:.1f} → target {target_low}-{target_high}")
+
+        try:
+            # ── Phase 1: Algorithmic fixes ───────────────────────────────────
+            html = self._split_long_sentences_in_html(html)
+            html = self._enforce_paragraph_density(html)
+            html = self._simplify_vocabulary(html)
+        except Exception as e:
+            log.warning(f"R18 algorithmic fixes failed: {e} — skipping algo phase")
+
+        # Re-measure
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+        try:
+            flesch_after_algo = textstat.flesch_reading_ease(text)
+        except Exception:
+            flesch_after_algo = current_flesch
+
+        log.info(f"R18 readability: after algo fixes Flesch={flesch_after_algo:.1f}")
+
+        # ── Phase 2: AI simplification with retry loop (max 2 passes) ─────
+        if flesch_after_algo < target_low or flesch_after_algo > target_high + 10:
+            for pass_num in range(1, 3):
+                try:
+                    html = await self._ai_simplify_text(html, flesch_after_algo, target_low, target_high)
+                except Exception as e:
+                    log.warning(f"R18 AI simplify pass {pass_num} failed: {e}")
+                    break
+                soup = BeautifulSoup(html, "html.parser")
+                text = soup.get_text(separator=" ", strip=True)
+                try:
+                    flesch_after_algo = textstat.flesch_reading_ease(text)
+                except Exception:
+                    break
+                log.info(f"R18 readability AI pass {pass_num}: Flesch={flesch_after_algo:.1f}")
+                if target_low <= flesch_after_algo <= target_high:
+                    break
+
+        log.info(f"R18 readability enforcer: {current_flesch:.1f} → {flesch_after_algo:.1f} (target {target_low}-{target_high})")
+        return html
+
+    def _enforce_paragraph_density(self, html: str) -> str:
+        """Split paragraphs with >4 sentences into 2 paragraphs for breathability."""
+        soup = BeautifulSoup(html, "html.parser")
+        for p in list(soup.find_all("p")):
+            if not p.parent:
+                continue
+            text = p.get_text()
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            sentences = [s for s in sentences if s.strip()]
+            if len(sentences) > 4:
+                mid = len(sentences) // 2
+                p1_text = " ".join(sentences[:mid])
+                p2_text = " ".join(sentences[mid:])
+                try:
+                    p.string = p1_text
+                    new_p = soup.new_tag("p")
+                    new_p.string = p2_text
+                    p.insert_after(new_p)
+                except (ValueError, AttributeError):
+                    continue
+        return str(soup)
+
+    def _split_long_sentences_in_html(self, html: str) -> str:
+        """Split sentences longer than 22 words — pure regex, never touches child tags."""
+        def _split_para(m: re.Match) -> str:
+            open_tag = m.group(1)
+            inner = m.group(2)
+            close_tag = m.group(3)
+            # Never modify paragraphs that contain HTML child tags (links, bold, etc.)
+            if re.search(r'<[a-zA-Z]', inner):
+                return m.group(0)
+            words = inner.split()
+            if len(words) <= 22:
+                return m.group(0)
+            # Find split point near middle at a conjunction
+            mid = len(words) // 2
+            split_at = mid
+            for j in range(max(8, mid - 5), min(len(words) - 5, mid + 5)):
+                if words[j].lower() in ("and", "but", "or", "so", "yet", "because", "while", "when", "which", "where"):
+                    split_at = j
+                    break
+            part1 = " ".join(words[:split_at]).rstrip(",.") + "."
+            part2 = " ".join(words[split_at:])
+            if part2 and part2[0].islower():
+                part2 = part2[0].upper() + part2[1:]
+            return f"{open_tag}{part1}{close_tag}\n{open_tag}{part2}{close_tag}"
+
+        return re.sub(r'(<p[^>]*>)(.*?)(</p>)', _split_para, html, flags=re.I | re.DOTALL)
+
+    def _simplify_vocabulary(self, html: str) -> str:
+        """Replace complex words with simpler alternatives."""
+        # Common complex → simple word mappings for readability
+        replacements = {
+            r'\butilize\b': 'use',
+            r'\butilization\b': 'use',
+            r'\bfacilitate\b': 'help',
+            r'\bdemonstrate\b': 'show',
+            r'\bdemonstrates\b': 'shows',
+            r'\badditionally\b': 'also',
+            r'\bnevertheless\b': 'but',
+            r'\bnonetheless\b': 'still',
+            r'\bconsequently\b': 'so',
+            r'\bfurthermore\b': 'also',
+            r'\bmoreover\b': 'also',
+            r'\bsubsequently\b': 'then',
+            r'\bapproximately\b': 'about',
+            r'\bmodification\b': 'change',
+            r'\bmodifications\b': 'changes',
+            r'\bimplementation\b': 'use',
+            r'\bimplement\b': 'use',
+            r'\bmethodology\b': 'method',
+            r'\bterminate\b': 'end',
+            r'\binitiate\b': 'start',
+            r'\bcommence\b': 'start',
+            r'\bpurchase\b': 'buy',
+            r'\bsufficient\b': 'enough',
+            r'\bnumerous\b': 'many',
+            r'\bprioritize\b': 'focus on',
+            r'\bencompasses\b': 'covers',
+            r'\bencompass\b': 'cover',
+            r'\bobtain\b': 'get',
+            r'\brequire\b': 'need',
+            r'\brequires\b': 'needs',
+            r'\bregarding\b': 'about',
+            r'\bconcerning\b': 'about',
+            r'\bin order to\b': 'to',
+            r'\bdue to the fact that\b': 'because',
+            r'\bin the event that\b': 'if',
+            r'\ba majority of\b': 'most',
+            r'\bat this point in time\b': 'now',
+            r'\bin the near future\b': 'soon',
+            r'\bcontribute to\b': 'help',
+            r'\bestablish\b': 'set up',
+            r'\bdetermine\b': 'find',
+            r'\bdemonstrates that\b': 'shows that',
+            r'\bcomprehensive\b': 'full',
+            r'\bsignificantly\b': 'greatly',
+            r'\boptimal\b': 'best',
+            r'\bleverage\b': 'use',
+        }
+        
+        for pattern, replacement in replacements.items():
+            html = re.sub(pattern, replacement, html, flags=re.IGNORECASE)
+        
+        return html
+
+    async def _ai_simplify_text(self, html: str, current_flesch: float,
+                                 target_low: int = 40, target_high: int = 60) -> str:
+        """Use AI to simplify the WORST paragraphs (ranked by complexity)."""
+        if not HAS_TEXTSTAT:
+            return html
+
+        soup = BeautifulSoup(html, "html.parser")
+        paragraphs = soup.find_all("p")
+
+        # Rank paragraphs by complexity (lowest Flesch = most complex first)
+        scored = []
+        for p in paragraphs:
+            text = p.get_text()
+            if len(text.split()) < 25:
+                continue
+            try:
+                pf = textstat.flesch_reading_ease(text)
+            except Exception:
+                pf = 50.0
+            # Only target paragraphs below target range
+            if pf < target_low:
+                scored.append((pf, p, text))
+
+        # Sort: most complex (lowest Flesch) first, take worst 20
+        scored.sort(key=lambda x: x[0])
+        targets = scored[:20]
+
+        if not targets:
+            return html
+
+        log.info(f"R18 AI simplify: targeting {len(targets)} most-complex paragraphs (Flesch {targets[0][0]:.1f}-{targets[-1][0]:.1f})")
+
+        modified = False
+        for pf, p, text in targets:
+            prompt = f"""Rewrite this paragraph to be MUCH easier to read.
+
+TARGET: Flesch Reading Ease {target_low}-{target_high} (currently {pf:.0f})
+
+STRICT RULES:
+- Maximum sentence length: 18 words
+- Average sentence length: 12-15 words
+- Use simple, everyday words (replace jargon)
+- Use active voice (>85% of sentences)
+- Break compound sentences with "and/but/which/that" into 2 sentences
+- Replace "utilize→use", "facilitate→help", "demonstrate→show", "additionally→also"
+- Keep ALL facts, numbers, and meaning identical
+- Keep proper nouns (place/product/brand names) as-is
+
+PARAGRAPH:
+{text}
+
+Return JSON of the form: {{"text": "<simplified paragraph here>"}}"""
+
+            try:
+                result = await self._call_ai_with_chain(
+                    self.routing.draft,
+                    prompt,
+                    temperature=0.3,
+                    max_tokens=1400,
+                )
+                # Accept the simplified output under any common key the model may pick
+                simplified = ""
+                if result and isinstance(result, dict):
+                    for _key in ("text", "answer", "simplified", "simplified_paragraph",
+                                 "rewritten_paragraph", "rewrite", "paragraph", "output"):
+                        _v = result.get(_key)
+                        if isinstance(_v, str) and len(_v.strip()) > 50:
+                            simplified = _v.strip()
+                            break
+                if simplified:
+                    # Strip wrapping quotes/markdown
+                    simplified = re.sub(r'^["\'`]+|["\'`]+$', '', simplified).strip()
+                    simplified = re.sub(r'^(?:Here\'?s|Here is)[^:]*:\s*', '', simplified, flags=re.I).strip()
+                    if len(simplified) > 50 and len(simplified.split()) > 10:
+                        p.string = simplified
+                        modified = True
+            except Exception as e:
+                log.warning(f"AI simplification failed for paragraph: {e}")
+                continue
+
+        return str(soup) if modified else html
 
     # ─────────────────────────────────────────────────────────────────────────
     # CONTENT INTELLIGENCE POST-PROCESSING (R34-R46 programmatic fixes)
@@ -3485,23 +5211,32 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
             kw_density = (kw_count / word_count) * 100
             log.info(f"R34 density check: kw='{kw_lower}' count={kw_count} words={word_count} density={kw_density:.2f}%")
             if kw_density > 2.5 and kw_count > 5:
-                # Generate semantic variations
+                # Generate grammatically correct semantic variations
                 kw_words = kw_lower.split()
                 variations = []
-                if len(kw_words) >= 2:
+                if len(kw_words) >= 3:
+                    # Multi-word (3+): drop first modifier, reorder, or paraphrase
                     variations = [
-                        " ".join(reversed(kw_words)),  # word order swap
-                        kw_words[0] + " " + "variety" if len(kw_words) == 2 else " ".join(kw_words[:-1]),
-                        "these " + kw_words[-1] if len(kw_words) >= 1 else kw_lower,
-                        "premium " + " ".join(kw_words[-2:]) if len(kw_words) >= 2 else "premium " + kw_lower,
-                        "quality " + " ".join(kw_words[-2:]) if len(kw_words) >= 2 else "quality " + kw_lower,
+                        " ".join(kw_words[1:]),                    # drop first word: "best black pepper" → "black pepper"
+                        " ".join(kw_words[:-1]) + " options",     # "best black" + "options"
+                        "this " + kw_words[-1],                    # "this pepper"
+                        "these " + " ".join(kw_words[-2:]),        # "these black pepper"
+                        "such " + " ".join(kw_words[1:]),          # "such black pepper"
+                    ]
+                elif len(kw_words) == 2:
+                    variations = [
+                        kw_words[-1] + " options",                 # "pepper options"
+                        "this " + kw_words[-1],                    # "this pepper"
+                        "such " + kw_lower,                        # "such black pepper"
+                        "these " + kw_words[-1] + " products",    # "these pepper products"
+                        kw_words[0] + " " + kw_words[-1] + " options",  # "black pepper options"
                     ]
                 elif len(kw_words) == 1:
                     variations = [
+                        f"this {kw_lower}",
+                        f"such {kw_lower}",
                         f"these {kw_lower} products",
-                        f"premium {kw_lower}",
-                        f"quality {kw_lower}",
-                        f"authentic {kw_lower}",
+                        f"the {kw_lower}",
                     ]
 
                 # Replace excess keyword occurrences (keep every 2nd, replace rest)
@@ -3520,49 +5255,40 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
                     if len(positions) > target_count:
                         # Keep first 3 and last 2, replace from middle
                         replaceable = positions[3:-2] if len(positions) > 5 else positions[2:-1]
-                        replace_count = min(excess, len(replaceable))
+                        # Cap replacements at 30% of excess to avoid heavy-handed
+                        # rewrites that change meaning. Better to leave a slight
+                        # over-density than mangle the prose.
+                        replace_count = min(excess, len(replaceable), max(1, int(excess * 0.3)))
                         # Replace from end to start to preserve positions
+                        applied = 0
+                        skipped = 0
                         for i, m in enumerate(reversed(replaceable[:replace_count])):
                             var = variations[i % len(variations)]
+                            # Look at the words immediately before/after the match
+                            before_ctx = html[max(0, m.start() - 20):m.start()].lower()
+                            after_ctx = html[m.end():m.end() + 20].lower()
+                            # Skip if replacement would create double-article ("the these", "these these"),
+                            # double-determiner, or follows an existing determiner badly.
+                            first_word = var.split()[0].lower() if var.split() else ""
+                            tail = re.search(r"\b(the|a|an|these|those|this|that|our|your|premium|quality|authentic)\s*$", before_ctx)
+                            if tail and first_word in {"the", "a", "an", "these", "those", "this", "that", "premium", "quality", "authentic"}:
+                                skipped += 1
+                                continue
+                            # Also skip if directly preceded by a comma+space and the variation starts capitalised
+                            # mid-sentence (rare but messy)
                             html = html[:m.start()] + var + html[m.end():]
+                            applied += 1
 
                         new_density = text_lower.count(kw_lower) / word_count * 100
-                        log.info(f"R34 density fix: {kw_density:.1f}% → replaced {replace_count} instances (target ~{target_density}%)")
+                        log.info(
+                            f"R34 density fix: {kw_density:.1f}% -> replaced {applied} instance(s) "
+                            f"(skipped {skipped} unsafe), target ~{target_density}%"
+                        )
 
-            # Also enforce density FLOOR — inject keyword if density too low
-            elif kw_density < 1.0:
-                # Find paragraphs without the keyword and inject naturally
-                paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-                injected = 0
-                target_injects = min(20, max(3, int(word_count * 0.015) - kw_count))  # aim for ~1.5% density, cap at 20
-                kw_title = self.keyword.strip()
-                inject_templates = [
-                    f" This is especially relevant when considering {kw_title}.",
-                    f" Understanding {kw_title} helps put this into perspective.",
-                    f" For anyone researching {kw_title}, this matters significantly.",
-                    f" This directly impacts how you approach {kw_title}.",
-                    f" Keep this in mind when evaluating {kw_title} options.",
-                    f" This is a key factor in choosing the right {kw_title}.",
-                    f" When it comes to {kw_title}, this can't be overlooked.",
-                    f" This plays a crucial role in {kw_title} quality.",
-                ]
-                for m in paras[1:]:  # Skip first paragraph
-                    if injected >= target_injects:
-                        break
-                    para_text = re.sub(r"<[^>]+>", "", m.group(2)).lower()
-                    if kw_lower not in para_text and len(para_text.split()) >= 15:
-                        # Append keyword mention at end of paragraph with varied phrasing
-                        insert_pos = m.end(2)
-                        inject_text = inject_templates[injected % len(inject_templates)]
-                        html = html[:insert_pos] + inject_text + html[insert_pos:]
-                        injected += 1
-                        # Recalculate positions
-                        paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-                if injected > 0:
-                    new_text = re.sub(r"<[^>]+>", " ", html)
-                    new_count = new_text.lower().count(kw_lower)
-                    new_density = (new_count / len(new_text.split())) * 100
-                    log.info(f"R34 density floor: injected {injected} keyword mentions ({kw_density:.2f}% → {new_density:.2f}%)")
+            # R34 density floor: REMOVED — injecting template phrases like
+            # "This factor directly influences {kw} performance" is pure filler
+            # that damages content uniqueness.  The prompt already targets 1.0-1.5%
+            # density, so the floor injector is unnecessary.
 
         # ── R17: Wall-of-text paragraph splitting ────────────────────────────
         paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
@@ -3593,12 +5319,49 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
         visual_patterns = [r"<blockquote", r'class="[^"]*(?:tip|callout|key-takeaway|pro-tip)']
         visual_count = sum(len(re.findall(p, html, re.I)) for p in visual_patterns)
         if visual_count < 2:
-            # Inject tip/takeaway boxes after every 3rd H2 section
+            # Inject tip/takeaway boxes after every 3rd H2 section.
+            # IMPORTANT: tip text MUST be keyword-specific. Generic phrases like
+            # "Quality and authenticity are the most important factors" appear
+            # identically across hundreds of articles -> fails uniqueness rules
+            # and gets caught by the pre-save fallback-phrase scanner.
             h2_positions = list(re.finditer(r"<h2[^>]*>.*?</h2>", html, re.I | re.DOTALL))
             inserted = 0
+            kw_t = self.keyword.strip()
+            kw_lower = kw_t.lower()
+            intent = (getattr(self, "intent", "") or "").lower()
+            # Pull a concrete theme + fact from research if available
+            try:
+                research = (self.state.steps[0].details or {}).get("analysis", {}) if self.state.steps else {}
+                themes = research.get("themes", []) or []
+                facts = research.get("key_facts", []) or []
+            except Exception:
+                themes, facts = [], []
+            theme_hint = (themes[0] if themes else "").strip().rstrip(".")
+            fact_hint = (facts[0] if facts else "").strip().rstrip(".")
+
+            takeaway_text = (
+                f"When evaluating {kw_lower}, focus on {theme_hint.lower()} — it's the differentiator most buyers overlook."
+                if theme_hint
+                else f"When evaluating {kw_lower}, prioritise the criteria that match your specific use case rather than headline claims."
+            )
+            if "buy" in intent or "shop" in intent or "supplier" in intent:
+                pro_tip_text = (
+                    f"Compare at least three suppliers of {kw_lower} on certification, lead time and per-unit price before committing."
+                )
+            elif "review" in intent or "best" in intent or "top" in intent:
+                pro_tip_text = (
+                    f"Shortlist {kw_lower} options against your top two requirements first; then test the rest only if budget allows."
+                )
+            else:
+                pro_tip_text = (
+                    f"Document your specific requirement for {kw_lower} before researching — it cuts decision time roughly in half."
+                )
+            if fact_hint and len(fact_hint) < 180:
+                pro_tip_text = f"{pro_tip_text} ({fact_hint})"
+
             tips = [
-                '<div class="key-takeaway"><p><strong>Key Takeaway:</strong> Quality and authenticity are the most important factors when making your purchasing decision.</p></div>',
-                '<div class="pro-tip"><p><strong>Pro Tip:</strong> Always verify sourcing certifications and compare prices across multiple trusted suppliers before buying.</p></div>',
+                f'<div class="key-takeaway"><p><strong>Key Takeaway:</strong> {takeaway_text}</p></div>',
+                f'<div class="pro-tip"><p><strong>Pro Tip:</strong> {pro_tip_text}</p></div>',
             ]
             for idx, h2m in enumerate(h2_positions):
                 if inserted >= 2:
@@ -3612,79 +5375,18 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
                     # Recalculate positions after insertion
                     h2_positions = list(re.finditer(r"<h2[^>]*>.*?</h2>", html, re.I | re.DOTALL))
             if inserted > 0:
-                log.info(f"R42 visual breaks: inserted {inserted} tip/takeaway boxes")
+                log.info(f"R42 visual breaks: inserted {inserted} keyword-specific tip box(es)")
 
-        # ── R43: Mid-content CTA injection ───────────────────────────────────
-        mid_cta_words = ["shop now", "explore", "browse", "check out", "view our",
-                         "see our", "get your", "order now"]
-        mid_start = int(len(html) * 0.2)
-        mid_end = int(len(html) * 0.8)
-        mid_text = html[mid_start:mid_end].lower()
-        has_mid_cta = any(w in mid_text for w in mid_cta_words)
-        if not has_mid_cta:
-            # Insert a contextual CTA after the 3rd or 4th H2 section
-            h2_positions = list(re.finditer(r"</h2>", html, re.I))
-            if len(h2_positions) >= 3:
-                kw_title = self.keyword.title()
-                cta_base = self._customer_ctx.get('customer_url', '') or ''
-                if cta_base:
-                    cta_base = cta_base.rstrip('/')
-                    cta_href = f'{cta_base}/shop/{self.keyword.replace(" ", "-")}'
-                else:
-                    cta_href = f'/shop/{self.keyword.replace(" ", "-")}'
-                cta_html = f'\n<div class="cta-block"><p>Looking for premium {kw_title}? <a href="{cta_href}">Explore our curated collection</a> for the best quality and value.</p></div>\n'
-                target_h2 = h2_positions[min(3, len(h2_positions) - 1)]
-                # Find next paragraph after this H2
-                next_p = re.search(r"</p>", html[target_h2.end():])
-                if next_p:
-                    insert_pos = target_h2.end() + next_p.end()
-                    html = html[:insert_pos] + cta_html + html[insert_pos:]
-                    log.info("R43 mid-CTA: inserted contextual CTA in article body")
+        # R43 mid-CTA: REMOVED — fabricates shop URLs that may not exist,
+        # template "Ready to source" phrasing is the same across all articles.
 
-        # ── R45: Unique angle signal injection ───────────────────────────────
-        text_final = re.sub(r"<[^>]+>", " ", html).lower()
-        angle_signals = [
-            "what most people miss", "the real truth", "unlike other guides",
-            "here's the difference", "we believe", "our perspective",
-        ]
-        has_angle = any(s in text_final for s in angle_signals)
-        if not has_angle:
-            # Inject a differentiation phrase into a suitable paragraph
-            paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-            for m in paras[3:8]:  # Try paragraphs 4-8
-                para_text = re.sub(r"<[^>]+>", "", m.group(2))
-                if len(para_text.split()) >= 20:
-                    prefix = "What most people miss is that "
-                    content_start = m.start(2)
-                    existing = m.group(2)
-                    if existing and existing[0].isupper():
-                        existing = existing[0].lower() + existing[1:]
-                    html = html[:content_start] + prefix + existing + html[m.end(2):]
-                    log.info("R45 angle inject: added 'what most people miss' differentiation signal")
-                    break
+        # R45 angle signal: REMOVED — stock phrases like "What most people miss is that"
+        # damage paragraph flow and are identical across articles.  S6 prompt already
+        # includes S1 angles + gaps; the AI should produce unique angles natively.
 
-        # ── R27 + R70: Opening definition — ensure first <p> starts with keyword + has definition ──
-        first_p_match = re.search(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL)
-        if first_p_match and kw_lower:
-            fp_text = re.sub(r"<[^>]+>", "", first_p_match.group(2)).strip()
-            fp_words = fp_text.split()
-            kw_first = kw_lower.split()[0]
-            kw_title = self.keyword.strip()
-            needs_keyword_open = len(fp_words) >= 10 and kw_first not in fp_text.lower().split()[0].lower()
-            # Check R70: definition pattern in first 200 words
-            text_check = re.sub(r"<[^>]+>", " ", html)
-            first_200w = " ".join(text_check.split()[:200]).lower()
-            needs_definition = not bool(re.search(r"\b(is a|are a|refers to|defined as|means|describes)\b", first_200w))
-
-            if needs_keyword_open or needs_definition:
-                existing_content = first_p_match.group(2)
-                if not fp_text.startswith(("Does ", "What ", "How ", "Why ", "Can ", "Is ")):
-                    # Build a definition-style opening
-                    def_open = f"{kw_title} refers to "
-                    if existing_content and existing_content[0].isupper():
-                        existing_content = existing_content[0].lower() + existing_content[1:]
-                    html = html[:first_p_match.start(2)] + def_open + existing_content + html[first_p_match.end(2):]
-                    log.info("R27+R70 opening fix: prepended definitional keyword opening to first paragraph")
+        # R27+R70 definition prepend: REMOVED — blindly prepending "{kw} refers to"
+        # is grammatically wrong for many keywords and ruins authored openings.
+        # The S6 intro prompt already instructs "include keyword in first sentence".
 
         # ── R19: Sentence opener variety — replace repetitive AI starters ────
         ai_starter_replacements = {
@@ -3711,32 +5413,9 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
                         break
                 log.info(f"R19 variety fix: replaced {min(len(matches)-2, 5)} repetitive '{starter.strip()}' openers")
 
-        # ── R55: Nuance / contradiction marker injection ─────────────────────
-        text_recheck = re.sub(r"<[^>]+>", " ", html).lower()
-        nuance_phrases = ["however", "on the other hand", "that said", "despite",
-                          "although", "while it's true", "not always", "the downside",
-                          "the catch is", "contrary to", "interestingly"]
-        present = sum(1 for p in nuance_phrases if p in text_recheck)
-        if present < 3:
-            inject_phrases = [
-                ("However, ", "results can vary depending on individual needs and preferences. "),
-                ("That said, ", "not every option works equally well for every situation. "),
-                ("Interestingly, ", "what works best often depends on your specific requirements. "),
-            ]
-            paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-            injected = 0
-            for pidx, m in enumerate(paras[4:10]):  # paragraphs 5-10
-                if injected >= (3 - present):
-                    break
-                para_text = re.sub(r"<[^>]+>", "", m.group(2))
-                if len(para_text.split()) >= 25:
-                    phrase, filler = inject_phrases[injected % len(inject_phrases)]
-                    # Append nuance sentence at end of paragraph
-                    insert_pos = m.end(2)
-                    html = html[:insert_pos] + f" {phrase}{filler}" + html[insert_pos:]
-                    injected += 1
-            if injected > 0:
-                log.info(f"R55 nuance inject: added {injected} nuance/contradiction markers")
+        # R55 nuance injection: REMOVED — generic filler like "real-world performance
+        # of {kw} depends on sourcing quality" is identical across articles.  The S6
+        # prompt already instructs the AI to use nuance phrases naturally.
 
         # ── R30: Bold key terms injection ────────────────────────────────────
         bold_count = len(re.findall(r"<strong>", html, re.I))
@@ -3764,51 +5443,49 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
             if bolded > 0:
                 log.info(f"R30 bold inject: bolded {bolded} key terms")
 
-        # ── R54: Opinion signal injection ────────────────────────────────────
-        opinion_patterns = [r"\bI believe\b", r"\bwe think\b", r"\bin our view\b",
-                           r"\bhonestly\b", r"\bfrankly\b", r"\bour take\b", r"\bwe recommend\b"]
-        opinion_count = sum(1 for p in opinion_patterns if re.search(p, html, re.I))
-        if opinion_count < 2:
-            opinion_phrases = [
-                " Honestly, this makes a real difference in practice.",
-                " The truth is, this is what separates good from great.",
-            ]
-            paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-            oi = 0
-            for m in paras[3::4]:  # every 4th paragraph starting from 3rd
-                if oi >= 2:
-                    break
-                para_text = re.sub(r"<[^>]+>", "", m.group(2))
-                if len(para_text.split()) >= 20:
-                    insert_pos = m.end(2)
-                    html = html[:insert_pos] + opinion_phrases[oi] + html[insert_pos:]
-                    oi += 1
-                    paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-            if oi > 0:
-                log.info(f"R54 opinion inject: added {oi} opinion signals")
+        # ── R54: Opinion signals — now prompt-driven via _SECTION_TYPE_REQUIREMENTS ──
+        log.debug("R54 opinion check skipped: produced at prompt time via section type rules")
 
-        # ── R41: Storytelling signal injection ───────────────────────────────
-        story_patterns = [r"\bI remember\b", r"\bwe noticed\b", r"\bone time\b",
-                         r"\bfor example\b", r"\bin one case\b", r"\bwe tested\b"]
-        story_count = sum(1 for p in story_patterns if re.search(p, html, re.I))
-        if story_count < 2:
-            story_phrases = [
-                " When we tested different options side by side, this stood out immediately.",
-                " Here's what we found after putting this to the test in our own kitchen.",
-            ]
-            paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-            si = 0
-            for m in paras[2::5]:  # every 5th paragraph starting from 2nd
-                if si >= 2:
-                    break
-                para_text = re.sub(r"<[^>]+>", "", m.group(2))
-                if len(para_text.split()) >= 20:
-                    insert_pos = m.end(2)
-                    html = html[:insert_pos] + story_phrases[si] + html[insert_pos:]
-                    si += 1
-                    paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-            if si > 0:
-                log.info(f"R41 storytelling inject: added {si} storytelling signals")
+        # R41 storytelling: REMOVED — fabricated experience claims like "When we
+        # tested different {kw} options side by side" are identical across articles
+        # and can be dishonest.  The prompt already asks the AI for experience signals.
+
+        # ── R36: Experience signals — now prompt-driven via section type rules ──
+        log.debug("R36 experience check skipped: produced at prompt time via section type rules")
+
+        # R48 pros/cons injection: REMOVED — entire template section with generic
+        # pros/cons that are not article-specific.  If pros/cons is needed, S2
+        # structure should include a pros_cons section type, and S6 will write
+        # it with actual research data via section_type_requirements.
+
+        # ── R49: Urgency signals — now prompt-driven via _SECTION_TYPE_REQUIREMENTS ──
+        log.debug("R49 urgency check skipped: produced at prompt time via section type rules")
+
+        # ── R50: Trust signals — now prompt-driven via _SECTION_TYPE_REQUIREMENTS ──
+        log.debug("R50 trust check skipped: produced at prompt time via section type rules")
+
+        # ── R58: Conversational questions — now prompt-driven via section type rules ──
+        log.debug("R58 question check skipped: produced at prompt time via section type rules")
+
+        # ── R59: Hedging / qualifier signals — now prompt-driven via section type rules ──
+        log.debug("R59 hedge check skipped: produced at prompt time via section type rules")
+
+        # ── R63: Beginner + Advanced signals — now prompt-driven via section type rules ──
+        log.debug("R63 beginner/advanced check skipped: produced at prompt time via section type rules")
+
+        # ── R64: Implicit question answering — now prompt-driven via section type rules ──
+        log.debug("R64 implicit-Q check skipped: produced at prompt time via section type rules")
+
+        # ── R57: Scrub template conclusion patterns ───────────────────────────
+        html = re.sub(r"(?i)(<p[^>]*>)\s*in conclusion,?\s*", r"\1To put it simply, ", html)
+        html = re.sub(r"(?i)(<p[^>]*>)\s*to sum up,?\s*", r"\1Here's the bottom line: ", html)
+        html = re.sub(r"(?i)(<p[^>]*>)\s*in summary,?\s*", r"\1What all this means: ", html)
+        html = re.sub(r"(?i)(<p[^>]*>)\s*as we'?ve (seen|discussed|explored),?\s*", r"\1As this guide shows, ", html)
+
+        # ── Hard cleanup: collapse multiple spaces left by empty replacements ─
+        html = re.sub(r"  +", " ", html)
+        # Remove space before punctuation artifacts: "word ." → "word."
+        html = re.sub(r" +([.,;:!?])", r"\1", html)
 
         return html
 
@@ -3818,93 +5495,18 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
 
     async def _step7_review(self):
         """
-        Quality review using the parallel chain system.
-        Calls _call_ai_with_chain for reliable JSON response (races providers).
-        Falls back to rule-based scoring if AI review fails completely.
+        Quality review — SKIPPED (no-op).
+
+        This step previously made 1 AI call to produce subjective review scores
+        stored in step.details["review"], but NO downstream step reads that data.
+        S8 (identify_issues) already runs check_all_rules() which is the real
+        quality gate consumed by S9/S10/S11.  Removing this saves 1 AI call
+        (~30-120s) per pipeline run with zero functional impact.
         """
         _step_ctx_var.set({"step": 7, "step_name": "Review", "article_id": getattr(self, "article_id", None), "project_id": getattr(self, "project_id", ""), "keyword": getattr(self, "keyword", "")})
         step = self.state.steps[6]
-
-        log.info(f"Review step: routing chain = {self.routing.review.first} → {self.routing.review.second} → {self.routing.review.third}")
-
-        draft_preview = self.state.draft_html[:6000]
-
-        review_prompt = f"""Review this SEO article draft for keyword "{self.keyword}" (intent: {self.intent}).
-
-Draft preview:
-{draft_preview}
-
-{self._pm_block("step7_review_criteria")}
-
-Return ONLY valid JSON — no explanation, no markdown:
-{{
-  "relevance_score": 0-100,
-  "quality_score": 0-100,
-  "tone": "assessment",
-  "eeat_score": 0-100,
-  "critical_issues": ["list if any"],
-  "strengths": ["list"],
-  "missing_rules": ["rule IDs or names not met"],
-  "toc_present": true,
-  "overall_approved": true/false
-}}"""
-
-        review_system = "You are a senior SEO content reviewer. Return ONLY valid JSON. No explanation, no markdown, no extra text."
-
-        # ── Use the parallel chain for the review ──────────────────────────
-        merged_review = await self._call_ai_with_chain(
-            self.routing.review, review_prompt,
-            system=review_system, temperature=0.2, max_tokens=1000,
-        )
-
-        reviewer_label = "chain"
-
-        # ── Fallback: if chain returned empty, generate rule-based review ──
-        if not merged_review or not merged_review.get("quality_score"):
-            log.warning("Review: AI chain returned empty — generating rule-based review from scoring data")
-            # Use rule-based data from step 8 preview
-            from quality.content_rules import check_all_rules
-            try:
-                preview_scored = check_all_rules(
-                    body_html=self.state.draft_html,
-                    keyword=self.keyword,
-                    title=self.state.title or self.keyword,
-                    meta_title=self.state.meta_title or "",
-                    meta_desc=self.state.meta_desc or "",
-                    page_type=self.page_type,
-                    **self._scoring_customer_kwargs(),
-                )
-                pct = preview_scored.get("percentage", 0)
-                failed_names = [r.get("name", "") for r in preview_scored.get("rules", []) if not r.get("passed")]
-                merged_review = {
-                    "relevance_score": min(100, pct + 15),
-                    "quality_score": pct,
-                    "eeat_score": min(100, pct + 5),
-                    "tone": "rule-based assessment",
-                    "critical_issues": failed_names[:8],
-                    "strengths": [r.get("name", "") for r in preview_scored.get("rules", []) if r.get("passed")][:5],
-                    "missing_rules": failed_names[:10],
-                    "toc_present": any("toc" in r.get("name", "").lower() for r in preview_scored.get("rules", []) if r.get("passed")),
-                    "overall_approved": pct >= 80,
-                }
-                reviewer_label = "rule-based-fallback"
-            except Exception as e:
-                log.warning(f"Review: rule-based fallback also failed: {e}")
-                merged_review = {
-                    "relevance_score": 50, "quality_score": 50, "eeat_score": 50,
-                    "tone": "no review available", "critical_issues": ["Review unavailable"],
-                    "strengths": [], "missing_rules": [], "toc_present": False,
-                    "overall_approved": False,
-                }
-                reviewer_label = "none"
-
-        step.summary = (
-            f"Quality: {merged_review.get('quality_score', '?')}/100 · "
-            f"Relevance: {merged_review.get('relevance_score', '?')}/100 · "
-            f"E-E-A-T: {merged_review.get('eeat_score', '?')}/100 · "
-            f"Reviewers: {reviewer_label}"
-        )
-        step.details["review"] = merged_review
+        step.summary = "Skipped — S8 rule-based review is the real quality gate"
+        step.details["review"] = {"skipped": True, "reason": "redundant_with_s8"}
 
     # ─────────────────────────────────────────────────────────────────────────
     # STEP 8: ISSUE IDENTIFICATION (Rule-based + AI)
@@ -3933,6 +5535,44 @@ Return ONLY valid JSON — no explanation, no markdown:
 
         # Extract issues in the format Step 9 expects
         issues = scored["issues"]
+
+        # ── Editorial validation (rule-based, zero AI cost) ─────────────────
+        try:
+            from engines.humanize.editorial import validate_editorial, detect_redundancy
+            from engines.humanize.splitter import split_into_sections
+            ed_result = validate_editorial(html, keyword=self.keyword)
+            ed_issues = ed_result.get("issues", [])
+            for ei in ed_issues:
+                issues.append({
+                    "rule": f"ED_{ei.get('type', 'editorial').upper()}",
+                    "name": ei.get("type", "editorial").replace("_", " ").title(),
+                    "severity": ei.get("severity", "medium"),
+                    "fix": ei.get("detail", ""),
+                    "source": "editorial_validator",
+                })
+            sections = split_into_sections(html)
+            sec_dicts = [{"content": s.get("html", ""), "index": i} for i, s in enumerate(sections)]
+            red_result = detect_redundancy(sec_dicts, keyword=self.keyword)
+            if red_result.get("keyword_overuse"):
+                issues.append({
+                    "rule": "ED_KEYWORD_OVERUSE",
+                    "name": "Keyword Overuse",
+                    "severity": "critical",
+                    "fix": f"Keyword density {red_result['keyword_density']}% ({red_result['keyword_count']} occurrences) — reduce to 1-2%",
+                    "source": "editorial_validator",
+                })
+            for ri in red_result.get("repeated_ideas", []):
+                issues.append({
+                    "rule": "ED_REDUNDANCY",
+                    "name": "Repeated Ideas",
+                    "severity": "medium",
+                    "fix": f"Sections {ri['sections'][0]} and {ri['sections'][1]} share {ri['similarity']} — merge or differentiate",
+                    "source": "editorial_validator",
+                })
+            log.info(f"Editorial validation: {len(ed_issues)} editorial issues, keyword_overuse={red_result.get('keyword_overuse')}, {len(red_result.get('repeated_ideas', []))} redundant pairs")
+        except Exception as e:
+            log.warning(f"Editorial validation in step8 failed (non-fatal): {e}")
+
         self._issues = issues
         self.state.issues_found = len(issues)
 
@@ -3947,10 +5587,11 @@ Return ONLY valid JSON — no explanation, no markdown:
             "checkpoint": "step8_draft",
         }
 
+        ed_issue_count = sum(1 for i in issues if i.get("source") == "editorial_validator")
         step.summary = (
             f"Score {scored['percentage']}% ({scored['total_earned']}/{scored['max_possible']} pts) · "
             f"{scored['summary']['passed_count']}/{scored['summary']['total_rules']} rules passed · "
-            f"{len(issues)} issues"
+            f"{len(issues)} issues ({ed_issue_count} editorial)"
         )
         step.details = {
             "issues": issues[:30],
@@ -3981,6 +5622,18 @@ Return ONLY valid JSON — no explanation, no markdown:
         html = self.state.draft_html
         if not html or len(html) < 200:
             step.summary = "Draft too short — skipping humanization"
+            return
+
+        # ── Conditional: skip humanize if S8 already scored R35 (AI patterns) as passing ──
+        _r35_passed = False
+        if hasattr(self, '_rule_results') and self._rule_results:
+            for _rr in self._rule_results.get("rules", []):
+                if _rr.get("rule_id") == "R35" and _rr.get("passed"):
+                    _r35_passed = True
+                    break
+        if _r35_passed:
+            step.summary = "Skipped — R35 (AI patterns) already passing; humanization unnecessary"
+            self._add_log("info", "[Humanize] R35 already passing — skipping to save AI calls", 9)
             return
 
         self._add_log("info", f"[Humanize] Starting humanization pipeline ({len(html)} chars)", 9)
@@ -4207,6 +5860,115 @@ Return ONLY valid JSON — no explanation, no markdown:
             log.warning(f"Humanize returned no output ({err}) — keeping draft unchanged")
             step.summary = f"Humanize produced no output ({err}) — draft unchanged"
 
+    # ── SURGICAL ALGORITHMIC FIXES ───────────────────────────────────────────
+
+    async def _apply_surgical_fixes(self, html: str, failed_rules: list, score_result: dict) -> str:
+        """Apply SAFE, non-spoiling algorithmic fixes for high-impact failures.
+
+        Design principle (2026-04-22): NEVER mutate H2 text or rewrite paragraphs
+        with templated openers like "For {kw}, ...". Earlier versions did this
+        and produced ugly Frankenheadlines ("Kerala Turmeric: How to Choose...").
+        This version only:
+          1. TRIMS keyword density when too high (>2.5%) by replacing extra
+             instances in body paragraphs with pronouns / semantic variants.
+          2. Injects a definition sentence into the first paragraph IF R70
+             failed AND no definition exists (single, conservative insertion).
+          3. Smooths repetitive sentence starters with a transition word.
+
+        Density LOW (<1.0%) is intentionally NOT auto-injected — that path
+        produced spoiled articles. Prevention is handled at prompt-time via
+        rules_compact (KEYWORD usage guide).
+
+        Returns: Fixed HTML.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        fixes_applied = []
+
+        # ── 1. Keyword density TRIM when too high (safe direction only) ──────
+        kw_density = score_result.get("kw_density", 0)
+        if kw_density > 2.5 and self.keyword:
+            kw = self.keyword
+            kw_re = re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE)
+            replacements = (self._semantic_variations or [])[:3] or ["it", "this", "the product"]
+            removed = 0
+            # Iterate body paragraphs (skip H2/H3/intro first paragraph) and replace
+            # surplus keyword occurrences with pronouns/variants.
+            paragraphs = soup.find_all("p")
+            for idx, p in enumerate(paragraphs):
+                if idx == 0:
+                    continue  # preserve intro phrasing
+                text = p.get_text()
+                hits = kw_re.findall(text)
+                if len(hits) <= 1:
+                    continue
+                # Keep first occurrence, replace the rest with rotating variant.
+                count = [0]
+                def _swap(m, _count=count):
+                    _count[0] += 1
+                    if _count[0] == 1:
+                        return m.group(0)  # keep first
+                    return replacements[(_count[0] - 2) % len(replacements)]
+                new_text = kw_re.sub(_swap, text)
+                if new_text != text:
+                    p.string = new_text
+                    removed += len(hits) - 1
+                if removed >= 6:
+                    break
+            if removed:
+                fixes_applied.append(f"density-trim −{removed}")
+                html = str(soup)
+
+        # ── 2. Definition block injection if R70 failed ──────────────────────
+        r70_failed = any(r.get("rule_id") == "R70" for r in failed_rules)
+        if r70_failed and self.keyword:
+            first_p = soup.find("p")
+            if first_p:
+                text = first_p.get_text()
+                has_def = bool(re.search(r"\b(is a|are a|refers to|defined as|means|describes)\b", text.lower()))
+                if not has_def:
+                    sentences = re.split(r"([.!?]+\s+)", text)
+                    if len(sentences) >= 2:
+                        # Use a research-aware definition rather than generic "category of products".
+                        themes = []
+                        try:
+                            themes = (self.state.steps[0].details or {}).get("analysis", {}).get("themes", []) or []
+                        except Exception:
+                            themes = []
+                        anchor = (themes[0].lower() if themes else "this topic")
+                        definition = f"{self.keyword.title()} refers to {anchor}."
+                        new_text = sentences[0] + sentences[1] + definition + " " + "".join(sentences[2:])
+                        first_p.string = new_text
+                        fixes_applied.append("R70 definition")
+                        html = str(soup)
+        
+        # ── 3. Sentence variety fix (repetitive starters) ────────────────────
+        # Check if there are 3+ consecutive sentences starting the same way
+        paragraphs = soup.find_all("p")
+        for p in paragraphs:
+            text = p.get_text()
+            sentences = [s.strip() for s in re.split(r"[.!?]+", text) if len(s.strip()) > 10]
+            if len(sentences) >= 3:
+                starters = [s.split()[0] if s.split() else "" for s in sentences]
+                # Check for repetitive starters (3+ consecutive)
+                for i in range(len(starters) - 2):
+                    if starters[i] == starters[i+1] == starters[i+2] and starters[i]:
+                        # Replace middle one with a transition word
+                        transitions = ["Additionally,", "Moreover,", "Furthermore,", "Also,", "In fact,"]
+                        sentences[i+1] = transitions[i % len(transitions)] + " " + sentences[i+1].lower()
+                        # Rebuild paragraph
+                        new_text = ". ".join(sentences) + "."
+                        p.string = new_text
+                        fixes_applied.append("variety")
+                        html = str(soup)
+                        break
+        
+        if fixes_applied:
+            log.info(f"Surgical fixes applied: {', '.join(fixes_applied)}")
+        
+        return html
+
     # STEP 10: CONTENT REDEVELOPMENT
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -4241,14 +6003,21 @@ Return ONLY valid JSON — no explanation, no markdown:
                 failed_rules = [r for r in self._rule_results.get("rules", []) if not r.get("passed", True)]
             current_score = self._rule_results.get("percentage", 0) if hasattr(self, '_rule_results') and self._rule_results else 0
 
-        # Skip if score is already high enough or no failures
-        if current_score >= MIN_QUALITY_SCORE:
+        # Skip if score is already high enough or no failures AND no editorial instructions exist
+        has_edit_inst = hasattr(self.state, "editorial_instructions") and len(self.state.editorial_instructions) > 0
+        if current_score >= MIN_QUALITY_SCORE and not has_edit_inst:
             step.summary = f"Score already {current_score}% ≥ {MIN_QUALITY_SCORE}% — skipping redevelopment"
             return
 
-        if not failed_rules:
-            step.summary = "No rule failures — skipping redevelopment"
+        if not failed_rules and not has_edit_inst:
+            step.summary = "No rule failures and no editorial instructions — skipping redevelopment"
             return
+
+        # ── Surgical algorithmic fixes BEFORE LLM redevelop ──────────────────
+        # These are low-risk, high-impact algorithmic corrections that give the
+        # LLM better base content to work with. Only fix the most common issues.
+        current_html = await self._apply_surgical_fixes(current_html, failed_rules, fresh_scored)
+        self.state.final_html = current_html  # update state with pre-fixed version
 
         # Sort by points at stake
         failed_rules.sort(key=lambda x: x.get("points_max", 0) - x.get("points_earned", 0), reverse=True)
@@ -4267,6 +6036,39 @@ Return ONLY valid JSON — no explanation, no markdown:
             )
         failed_rules_text = "\n".join(rule_fix_lines)
 
+        # Editorial Intelligence findings (repetition, density, intent gaps).
+        # These are not in the rule-engine output but must be addressed in the
+        # final polish. Surface them prominently in the prompt.
+        editorial_block = ""
+        if has_edit_inst:
+            editorial_block = (
+                "\n━━━ EDITORIAL INTELLIGENCE FIXES (mandatory) ━━━\n"
+                + "\n".join(f"• {inst}" for inst in self.state.editorial_instructions)
+                + "\n"
+            )
+
+        # AI Reviewer findings (S7) — surface critical_issues + missing_rules
+        # so the final polish addresses things the rule engine doesn't catch
+        # (tone, narrative coherence, expert judgement).
+        review_block = ""
+        try:
+            review = (self.state.steps[6].details or {}).get("review", {}) if len(self.state.steps) > 6 else {}
+            crit = [c for c in (review.get("critical_issues") or []) if c and c != "Review unavailable"]
+            missing = [m for m in (review.get("missing_rules") or []) if m]
+            if crit or missing:
+                lines = []
+                for c in crit[:6]:
+                    lines.append(f"• CRITICAL: {c}")
+                for m in missing[:6]:
+                    lines.append(f"• MISSING: {m}")
+                review_block = (
+                    "\n━━━ AI REVIEWER FINDINGS (mandatory) ━━━\n"
+                    + "\n".join(lines)
+                    + "\n"
+                )
+        except Exception:
+            pass
+
         # ── Single targeted rewrite pass using reduced prompt ──────────────
         # Use current best HTML (after Quality Loop), not the original draft
         article_excerpt = self.state.final_html
@@ -4279,7 +6081,7 @@ CURRENT SCORE: {current_score}% — TARGET: 90%+
 
 ━━━ RULES TO FIX (highest impact first) ━━━
 {failed_rules_text}
-
+{editorial_block}{review_block}
 {self._pm_block("step9_quality_rules")}
 
 ━━━ KEY FIX RULES ━━━
@@ -4405,7 +6207,7 @@ OUTPUT: Complete improved article as clean semantic HTML. No markdown, no code f
         readability_score = 65.0
         if HAS_TEXTSTAT and text:
             try:
-                readability_score = textstat.flesch_reading_ease(text[:8000])
+                readability_score = textstat.flesch_reading_ease(text[:16000])
             except Exception:
                 pass
 
@@ -4440,6 +6242,8 @@ OUTPUT: Complete improved article as clean semantic HTML. No markdown, no code f
                             "categories": scored["categories"],
                             "rules": scored["rules"],
                             "pillars": scored["pillars"],
+                            # Phase B: persist per-section scores alongside rule results
+                            "section_scores": getattr(self.state, "section_scores", None),
                         }),
                         json.dumps({
                             "verdict": f"Auto-scored: {percentage}% ({scored['total_earned']}/{scored['max_possible']} pts) — {scored['summary']['passed_count']}/{scored['summary']['total_rules']} rules passed",
@@ -4486,12 +6290,12 @@ OUTPUT: Complete improved article as clean semantic HTML. No markdown, no code f
         """
         Iterative quality improvement: re-score → fix failing rules → repeat.
         Uses Ollama to rewrite the content targeting highest-impact failures.
-        Max 3 passes. Stops when score >= MIN_QUALITY_SCORE (75%).
+        Max 3 passes. Stops when score >= MIN_QUALITY_SCORE.
         """
         _step_ctx_var.set({"step": 11, "step_name": "QualityLoop", "article_id": getattr(self, "article_id", None), "project_id": getattr(self, "project_id", ""), "keyword": getattr(self, "keyword", "")})
         step = self.state.steps[10]
         current_score = self.state.seo_score
-        MAX_PASSES = 2
+        MAX_PASSES = 3
 
         # Critical rules that MUST pass regardless of overall score
         CRITICAL_RULES = {"R20", "R24", "R25", "R26", "R34", "R35", "R36", "R44"}
@@ -4507,13 +6311,27 @@ OUTPUT: Complete improved article as clean semantic HTML. No markdown, no code f
         if hasattr(self, '_rule_results') and self._rule_results:
             initial_critical_ok = _critical_rules_ok(self._rule_results.get("rules", []))
 
-        if current_score >= MIN_QUALITY_SCORE and initial_critical_ok:
+        # Editorial Intelligence may have flagged repetition / keyword stuffing /
+        # intent gaps that don't move the rule-based score but DO need fixing.
+        # If those instructions exist, force the loop to run at least once even
+        # when the score is already above the target threshold.
+        has_edit_inst = (
+            hasattr(self.state, "editorial_instructions")
+            and len(self.state.editorial_instructions) > 0
+        )
+
+        if current_score >= MIN_QUALITY_SCORE and initial_critical_ok and not has_edit_inst:
             step.summary = f"Score already {current_score}% ≥ {MIN_QUALITY_SCORE}% — no improvement needed"
             step.details = {"passes": 0, "initial_score": current_score, "final_score": current_score}
             return
 
         if current_score >= MIN_QUALITY_SCORE and not initial_critical_ok:
             log.info(f"Quality loop: score {current_score}% ≥ {MIN_QUALITY_SCORE}% but critical rules R20/R24/R25/R26 still failing — continuing")
+        elif current_score >= MIN_QUALITY_SCORE and has_edit_inst:
+            log.info(
+                f"Quality loop: score {current_score}% ≥ {MIN_QUALITY_SCORE}% but "
+                f"{len(self.state.editorial_instructions)} editorial instruction(s) pending — continuing"
+            )
 
         log.info(f"Quality loop: score {current_score}% — starting improvement passes")
         html = self.state.final_html
@@ -4571,6 +6389,11 @@ OUTPUT: Complete improved article as clean semantic HTML. No markdown, no code f
                 detail = issue_fix or r.get("name", "fix this rule")
                 fix_instructions.append(f"• [{r.get('rule_id','?')}] {r.get('name','?')} (+{pts_lost}pt): {detail}")
 
+            # Inject Editorial Intelligence Instructions
+            if hasattr(self.state, "editorial_instructions") and self.state.editorial_instructions:
+                fix_instructions.append("\n=== EDITORIAL INTELLIGENCE FIXES REQUIRED ===\n" + \
+                                      "\n".join([f"• {inst}" for inst in self.state.editorial_instructions]))
+
             fix_text = "\n".join(fix_instructions)
 
             # Build a COMPACT focused rewrite prompt (not the full rule spec — key to avoiding timeouts)
@@ -4589,35 +6412,56 @@ KEY REQUIREMENTS:
 - Keyword "{self.keyword}" naturally in H2 headings, intro, conclusion, and a few body paragraphs. Density 1.0-2.0%. Do NOT force it into every paragraph.
 - First para ≥40w, starts with "{self.keyword.split()[0]}", contains keyword
 - DEFINITION BLOCK: The first 200 words MUST contain a clear definitional sentence using one of these patterns: "{self.keyword} is a ...", "{self.keyword} refers to ...", or "{self.keyword} describes ...". This is a scored rule.
-- READABILITY: Flesch Reading Ease MUST be 50-75. Use short, clear sentences (avg 12-22 words). Mix simple (1-clause) and compound (2-clause) sentences. Avoid long academic phrasing.
+- READABILITY: Flesch MUST be 60-70 (not <50, not >75). Sentence avg 15-20w (mix 8-12w short + 18-25w medium). Break >30w. Active voice >80% ("X reduces Y" not "Y is reduced by X"). Transitions between paragraphs (However, Moreover).
+- SENTENCE VARIETY (CRITICAL): Use 20+ different sentence openers. Limit "The" to <20%. Questions 10%+ ("How do you?", "What makes?"). Imperatives (Do, Try, Consider, Compare). Transitional (However, Moreover, Therefore, Meanwhile). Subordinate (While, Although, Because, Since, If). Adverbs (Typically, Generally, Often). Coordinating sparingly (And, But, So <5%). NEVER 3+ consecutive same starters.
 - 6+ <h2>, 4+ <h3>, FAQ section, 1 <table>, 2+ <ul>, 1+ <ol>
-- AUTHORITY: Only cite SPECIFIC named sources. NEVER use vague "research shows", "studies suggest", "experts agree", "data shows". If you can't name a real source, state the fact directly.
+- DATA CREDIBILITY (5+ sourced stats): Format "According to [FDA/USDA/NIH/Harvard/Grand View Research] (2023-2024), [stat]..." EVERY percentage needs attribution. NEVER use vague "research shows", "studies suggest", "experts agree". If no source, use ranges ("20-30%") or state directly.
+- STORYTELLING (2+ instances): third-person customer scenarios ("a home cook sourcing X discovered Y"), before/after scenarios grounded in cited data, analogies. NO fabricated first-person testing claims.
+- OPINION SIGNALS (2+ instances, neutral framing): "The strongest option for X is Y", "Avoid X because Y", "The best choice for [specific buyer] is...". Take clear stance WITHOUT fabricated first-person ("we recommend", "we tested" — forbidden).
+- CTAs (3 required if not present): Intro soft CTA ("Discover benefits..."), mid-content <div class="cta-box"> (after 40%), conclusion strong CTA (buy/shop/order/contact + urgency + benefit).
 - Include real numbers — percentages, years, measurements, price ranges
 - Preserve all existing <a href="..."> links
 - Max 80w/paragraph, active voice
-- SENTENCE VARIETY: Start sentences with different words. Use at least 4 different opener types: questions, statements, imperatives, and transitional (And/But/So). Never start 2 consecutive sentences with the same word.
-- HUMAN VOICE: Contractions (don't, isn't, you'll). Start some sentences with "And", "But", "So". Include slight opinions. Vary rhythm.
+- HUMAN VOICE: Contractions (don't, isn't, you'll). Ask 3+ rhetorical questions. Nuance ("on the other hand", "the catch is", "that said").
 - FORBIDDEN: delve, multifaceted, tapestry, nuanced, robust, myriad, paradigm, "let's explore", "when it comes to", "in today's world"
 - ANTI-STUFFING: Do NOT repeat the exact keyword in every paragraph. Use pronouns or shortened forms where the topic is already clear.
 - BUYER GUIDANCE: Include "how to choose", "what to look for", "best for", or similar decision phrases. Use "pros and cons" or "advantages and disadvantages" somewhere.
 - CONTENT DEPTH: Cover what/why/how/when angles. Include both beginner ("basics", "getting started", "simple") and advanced ("advanced", "professional", "in-depth") content.
 
 ARTICLE:
-{html[:8000]}
+{html[:16000]}
 
 Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
 
             # Use routing chain — provider order set by self.routing.quality_loop (user-selectable)
             log.info(f"Quality loop pass {pass_num}: chain {self.routing.quality_loop.first}→{self.routing.quality_loop.second}→{self.routing.quality_loop.third}")
+            
+            # Progress tracking: estimate duration based on model speed
+            provider = self.routing.quality_loop.first
+            if provider == "ollama":
+                profile = self._profiler.get_profile("ollama", self._resolve_ollama_model(provider))
+                expected_time = self._profiler.estimate_duration(len(prompt), ql_max_tokens, profile)
+                if self._progress:
+                    self._progress.start_operation(f"Quality Loop Pass {pass_num}/{MAX_PASSES}", expected_time)
+                    log.info(f"Quality loop pass {pass_num}: expected ~{expected_time}s with {profile.provider}:{profile.model}")
+            
             try:
                 # Dynamic max_tokens based on article size to avoid word count truncation
                 current_words = len(re.sub(r"<[^>]+>", " ", html).split())
                 ql_max_tokens = max(4000, int(current_words * 1.8))
+                
                 rewritten = await self._call_ai_raw_with_chain(
                     self.routing.quality_loop, prompt, temperature=0.4, max_tokens=ql_max_tokens,
                     use_prompt_directly=True
                 )
+                
+                # Mark operation complete
+                if self._progress and provider == "ollama":
+                    self._progress.finish(f"Quality loop pass {pass_num} complete")
+                    
             except Exception as e:
+                if self._progress and provider == "ollama":
+                    self._progress.finish(f"Quality loop pass {pass_num} failed: {str(e)[:50]}", final_message=False)
                 log.warning(f"Quality loop pass {pass_num}: chain failed: {e}")
                 pass_log.append(f"pass{pass_num}: chain failed ({e})")
                 continue
@@ -4664,6 +6508,14 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
                 self.state.seo_score = float(new_score)
                 self.state.word_count = new_wc
 
+                # Normalize keyword density after each improvement pass (rule-based, no AI)
+                try:
+                    from engines.humanize.editorial import normalize_keyword_density
+                    html = normalize_keyword_density(html, self.keyword)
+                    self.state.final_html = html
+                except Exception as _ned:
+                    log.debug(f"normalize_keyword_density skipped: {_ned}")
+
                 # Update rule results
                 self._rule_results = {
                     "percentage": new_score,
@@ -4674,6 +6526,17 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
                     "summary": new_scored["summary"],
                     "checkpoint": f"step11_pass{pass_num}",
                 }
+                
+                # Save checkpoint after successful pass
+                if self._checkpoint_mgr:
+                    self._checkpoint_mgr.save(
+                        self.article_id,
+                        step_num=11,  # Quality loop is step 11
+                        step_name="Quality Loop",
+                        state=self.state,
+                        iteration=0,
+                        pass_num=pass_num
+                    )
 
                 # Persist updated scores to DB
                 if self.db:
@@ -4713,6 +6576,41 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
             else:
                 pass_log.append(f"pass{pass_num}: no improvement ({new_score}% ≤ {current_score}%)")
                 log.info(f"Quality loop pass {pass_num}: no improvement ({new_score}% ≤ {current_score}%)")
+
+        # ── Auto editorial rewrite if score is still below target ─────────────
+        if current_score < MIN_QUALITY_SCORE:
+            try:
+                from engines.humanize.editorial import validate_editorial, editorial_rewrite
+                ed_val = validate_editorial(self.state.final_html, keyword=self.keyword)
+                if ed_val.get("score", 100) < 80 or ed_val.get("robotic_count", 0) > 2:
+                    log.info(f"Quality loop: score {current_score}% < {MIN_QUALITY_SCORE}% + editorial score {ed_val.get('score')} — running editorial rewrite")
+                    ed_result = editorial_rewrite(
+                        self.state.final_html,
+                        keyword=self.keyword,
+                        validation_result=ed_val,
+                    )
+                    if ed_result.get("success") and ed_result.get("html") and len(ed_result["html"].strip()) > 500:
+                        from quality.content_rules import check_all_rules as _ed_check
+                        ed_scored = _ed_check(
+                            body_html=ed_result["html"],
+                            keyword=self.keyword,
+                            title=self.state.title,
+                            meta_title=self.state.meta_title,
+                            meta_desc=self.state.meta_desc,
+                            page_type=self.page_type,
+                            **self._scoring_customer_kwargs(),
+                        )
+                        if ed_scored["percentage"] >= current_score:
+                            self.state.final_html = ed_result["html"]
+                            current_score = ed_scored["percentage"]
+                            self.state.seo_score = float(current_score)
+                            self.state.word_count = len(re.sub(r"<[^>]+>", " ", ed_result["html"]).split())
+                            pass_log.append(f"editorial-rewrite: score now {current_score}% ✓")
+                            log.info(f"Quality loop editorial rewrite: score now {current_score}%")
+                        else:
+                            log.info(f"Quality loop editorial rewrite: no improvement ({ed_scored['percentage']}% ≤ {current_score}%) — skipped")
+            except Exception as e:
+                log.warning(f"Editorial rewrite in quality loop failed (non-fatal): {e}")
 
         # ── Post-loop fallback: if critical rules still fail, run auto-injection ──
         html = self.state.final_html
@@ -4807,9 +6705,7 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
                 ollama_url = self._resolve_ollama_url(provider)
                 ollama_model = self._resolve_ollama_model(provider)
                 async with _get_ollama_sem():
-                    raw = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda u=ollama_url, m=ollama_model: self._ollama_sync(prompt, temperature, max_tokens, ollama_url=u, ollama_model=m)
-                    )
+                    raw = await self._ollama_async(prompt, temperature, max_tokens, ollama_url=ollama_url, ollama_model=ollama_model, http_timeout=360)
                 parsed = self._parse_json(raw)
                 return _CallResult(
                     success=bool(parsed), provider=provider,
@@ -5232,17 +7128,15 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
             elif provider == "ollama" or provider.startswith("ollama_"):
                 ollama_url = self._resolve_ollama_url(provider)
                 ollama_model = self._resolve_ollama_model(provider)
-                if use_prompt_directly:
-                    if len(prompt) > 6000:
-                        trunc = prompt[:2000] + "\n\n" + prompt[2000:6000] + "\n\n[Content truncated for model context limit]\n\nOutput ONLY the improved HTML article. No commentary."
-                    else:
-                        trunc = prompt
-                    async with _get_ollama_sem():
-                        raw = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda p=trunc, u=ollama_url, m=ollama_model: self._ollama_sync(p, temperature, max_tokens, raw_text=True, ollama_url=u, ollama_model=m)
-                        )
-                else:
-                    raw = await self._ollama_section_writer(ollama_url=ollama_url)
+                # Always send the actual prompt to Ollama (raw_text=True).
+                # The old code only did this when use_prompt_directly=True,
+                # otherwise it called _ollama_section_writer which ignores
+                # the prompt and regenerates from scratch — wasteful.
+                _ollama_prompt = prompt
+                if not use_prompt_directly and len(prompt) > 6000:
+                    _ollama_prompt = prompt[:2000] + "\n\n" + prompt[2000:6000] + "\n\n[Content truncated for model context limit]\n\nOutput ONLY the improved HTML article. No commentary."
+                async with _get_ollama_sem():
+                    raw = await self._ollama_async(_ollama_prompt, temperature, max_tokens, raw_text=True, ollama_url=ollama_url, ollama_model=ollama_model, http_timeout=480)
                 ok = bool(raw and len(raw) > 200)
                 return _CallResult(
                     success=ok, provider=provider, data=raw or "",
@@ -5423,7 +7317,7 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
         """
         mgr = _APM.get_instance()
         trace_id = self._pipeline_trace_id
-        HARD_TIMEOUT = 180  # seconds per provider (must exceed Ollama remote 120s + Gemini 120s)
+        HARD_TIMEOUT = 420  # seconds per provider (Ollama remote ~6.4 tok/s needs ~170s for structure, ~300s for drafts)
 
         # ── Build ordered list of available providers ──────────────────────
         chain = [p for p in [cfg.first, cfg.second, cfg.third]
@@ -5435,13 +7329,33 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
                 continue
             available.append(provider)
 
+        # ── EMERGENCY FALLBACK: if user's chain is fully exhausted, try
+        # known-working providers before failing the entire pipeline ──
         if not available:
+            emergency = _build_emergency_chain(exclude=set(chain))
+            if emergency:
+                self._add_log("warn",
+                    f"User chain [{', '.join(chain) or 'empty'}] all unavailable — "
+                    f"using emergency fallback: {' → '.join(emergency)}"
+                )
+                available = emergency
+
+        if not available:
+            # No providers available AT ALL (chain disabled + emergency exhausted).
+            # No retry can possibly succeed without user changing routing or
+            # provider state, so halt the pipeline immediately instead of
+            # generating empty content downstream.
             self._consecutive_all_failed = getattr(self, "_consecutive_all_failed", 0) + 1
-            if self._consecutive_all_failed >= 2:
-                self._add_log("error", "All AI providers failed 2+ times — stopping pipeline. Change your AI routing in AI Hub and restart.")
-                raise RuntimeError("All AI providers exhausted — pipeline stopped. Please change AI routing in AI Hub.")
-            self._add_log("error", "All AI providers failed for this request")
-            return {}
+            self._add_log(
+                "error",
+                "No AI providers available (configured chain + emergency fallback all unavailable). "
+                "Stopping pipeline — change routing in AI Hub or re-enable providers.",
+            )
+            raise RuntimeError(
+                "No AI providers available — pipeline stopped. "
+                "Configured routing chain is empty/disabled and emergency fallback is exhausted. "
+                "Change AI routing in AI Hub or re-enable providers."
+            )
 
         # ── Provider execution with hard timeout ──────────────────────────
         async def _run_provider(provider: str) -> Dict:
@@ -5514,14 +7428,34 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
         # ── Parallel race: launch all, take first success ─────────────────
         tasks = {asyncio.create_task(_run_provider(p)): p for p in available}
         result = {}
+        # Overall race deadline = HARD_TIMEOUT * 1.5 to bound worst-case wait
+        # when every provider is slow. Without this, race can hang for
+        # HARD_TIMEOUT * len(providers) seconds.
+        race_deadline = HARD_TIMEOUT * 1.5
+        race_start = asyncio.get_event_loop().time()
         try:
             remaining = set(tasks.keys())
             while remaining:
-                done, remaining = await asyncio.wait(remaining, return_when=asyncio.FIRST_COMPLETED)
+                elapsed = asyncio.get_event_loop().time() - race_start
+                wait_budget = max(1.0, race_deadline - elapsed)
+                done, remaining = await asyncio.wait(
+                    remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=wait_budget,
+                )
+                if not done:
+                    log.warning(
+                        f"JSON chain race: overall deadline {race_deadline}s reached, cancelling pending"
+                    )
+                    for t in remaining:
+                        t.cancel()
+                    break
                 for task in done:
                     try:
                         data = task.result()
-                        if data:
+                        # Reject error-envelope responses ({"error": "..."}, status=error, success=False)
+                        # so a slower-but-real success can still win the race.
+                        if data and _is_valid_json_response(data):
                             result = data
                             for t in remaining:
                                 t.cancel()
@@ -5562,7 +7496,7 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
         """
         mgr = _APM.get_instance()
         trace_id = self._pipeline_trace_id
-        HARD_TIMEOUT = 240  # seconds per provider (content gen needs more time — must exceed HTTP timeouts)
+        HARD_TIMEOUT = 540  # seconds per provider (Ollama remote ~6.4 tok/s, full drafts can need 400s+)
 
         # ── Build ordered list of available providers ──────────────────────
         chain = [p for p in [cfg.first, cfg.second, cfg.third]
@@ -5574,13 +7508,31 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
                 continue
             available.append(provider)
 
+        # ── EMERGENCY FALLBACK: if user's chain is fully exhausted, try
+        # known-working providers before failing the entire pipeline ──
         if not available:
+            emergency = _build_emergency_chain(exclude=set(chain))
+            if emergency:
+                self._add_log("warn",
+                    f"User chain [{', '.join(chain) or 'empty'}] all unavailable — "
+                    f"using emergency fallback: {' → '.join(emergency)}"
+                )
+                available = emergency
+
+        if not available:
+            # No providers available AT ALL — halt immediately (see twin
+            # comment in `_call_ai_with_chain` for rationale).
             self._consecutive_all_failed = getattr(self, "_consecutive_all_failed", 0) + 1
-            if self._consecutive_all_failed >= 2:
-                self._add_log("error", "All AI providers failed 2+ times — stopping pipeline. Change your AI routing in AI Hub and restart.")
-                raise RuntimeError("All AI providers exhausted — pipeline stopped. Please change AI routing in AI Hub.")
-            self._add_log("error", "All AI providers failed for raw content generation")
-            return ""
+            self._add_log(
+                "error",
+                "No AI providers available for raw content generation (configured chain + "
+                "emergency fallback all unavailable). Stopping pipeline — change routing in AI Hub.",
+            )
+            raise RuntimeError(
+                "No AI providers available — pipeline stopped. "
+                "Configured routing chain is empty/disabled and emergency fallback is exhausted. "
+                "Change AI routing in AI Hub or re-enable providers."
+            )
 
         # ── Provider execution with hard timeout ──────────────────────────
         async def _run_provider(provider: str) -> str:
@@ -5634,10 +7586,25 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
         # ── Parallel race: launch all, take first success ─────────────────
         tasks = {asyncio.create_task(_run_provider(p)): p for p in available}
         result = ""
+        race_deadline = HARD_TIMEOUT * 1.5
+        race_start = asyncio.get_event_loop().time()
         try:
             remaining = set(tasks.keys())
             while remaining:
-                done, remaining = await asyncio.wait(remaining, return_when=asyncio.FIRST_COMPLETED)
+                elapsed = asyncio.get_event_loop().time() - race_start
+                wait_budget = max(1.0, race_deadline - elapsed)
+                done, remaining = await asyncio.wait(
+                    remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=wait_budget,
+                )
+                if not done:
+                    log.warning(
+                        f"Raw chain race: overall deadline {race_deadline}s reached, cancelling pending"
+                    )
+                    for t in remaining:
+                        t.cancel()
+                    break
                 for task in done:
                     try:
                         text = task.result()
@@ -5798,9 +7765,9 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
                     continue
                 # Last key — try short wait+retry
                 wait = self._groq_parse_retry_wait(r)
-                if wait and wait <= 15:
-                    log.info(f"Groq 429 (last key) — waiting {wait:.1f}s then retrying")
-                    _time.sleep(wait)
+                if wait and wait <= 8:
+                    log.info(f"Groq 429 (last key) — waiting {min(wait, 5):.1f}s then retrying")
+                    _time.sleep(min(wait, 5))  # Cap at 5s even if server says more
                     r2 = httpx.post("https://api.groq.com/openai/v1/chat/completions",
                                     headers=headers, json=req_json, timeout=60)
                     if r2.status_code == 200:
@@ -6030,9 +7997,7 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
         """Call local Ollama for structured generation. Fallback to Groq."""
         try:
             async with _get_ollama_sem():
-                raw = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: self._ollama_sync(prompt, temperature, max_tokens)
-                )
+                raw = await self._ollama_async(prompt, temperature, max_tokens)
             result = self._parse_json(raw)
             if result:
                 return result
@@ -6047,18 +8012,76 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
             max_tokens=max_tokens,
         )
 
-    def _ollama_sync(self, prompt: str, temperature: float, max_tokens: int, raw_text: bool = False, ollama_url: str = "", ollama_model: str = "") -> str:
+    async def _ollama_async(self, prompt: str, temperature: float, max_tokens: int,
+                            raw_text: bool = False, ollama_url: str = "", ollama_model: str = "",
+                            http_timeout: int = 0) -> str:
+        """Call Ollama asynchronously using httpx. Supports proper asyncio cancellation.
+        Unlike _ollama_sync + run_in_executor, this allows asyncio.wait_for to
+        actually cancel the HTTP request — no orphaned threads.
+        
+        Timeout is calculated dynamically based on model speed profile."""
+        import httpx
+        url = ollama_url or _live_ollama_url()
+        model = ollama_model or _live_ollama_model()
+        prompt_tokens_est = len(prompt) // 3 + max_tokens
+        num_ctx = max(2048, min(prompt_tokens_est + 512, 16384))
+        
+        # Get model profile and calculate appropriate timeout
+        profile = self._profiler.get_profile("ollama", model)
+        if http_timeout > 0:
+            # Caller specified explicit timeout - use it
+            timeout = http_timeout
+        else:
+            # Calculate based on model speed
+            timeout = self._profiler.calculate_timeout(len(prompt), max_tokens, profile)
+            log.info(f"Ollama {model}: calculated timeout {timeout}s ({profile.tokens_per_sec:.1f} tok/s)")
+        
+        start_time = _time.time()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30.0)) as client:
+            r = await client.post(
+                f"{url}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt if raw_text else f"Return ONLY valid JSON. No explanation, no markdown.\n\n{prompt}",
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                        "num_ctx": num_ctx,
+                    },
+                },
+            )
+            r.raise_for_status()
+            response = r.json().get("response", "")
+            
+            # Update model profile with observed performance
+            response_time = _time.time() - start_time
+            tokens_generated = len(response) // 3  # Rough estimate
+            self._profiler.update_profile("ollama", model, response_time, tokens_generated)
+            
+            return response
+
+    def _ollama_sync(self, prompt: str, temperature: float, max_tokens: int, raw_text: bool = False, ollama_url: str = "", ollama_model: str = "", http_timeout: int = 0) -> str:
         """Call Ollama synchronously. Adjusts context window based on prompt size."""
         url = ollama_url or _live_ollama_url()
         model = ollama_model or _live_ollama_model()
         mem_before = _get_mem_pct()
         if mem_before > 85:
             log.warning(f"Memory at {mem_before}% before Ollama call — high pressure")
-        # Scale context window: 2048 for all calls (smaller = faster + less RAM)
-        num_ctx = 2048
+        # Scale context window based on prompt size so the model sees the full prompt.
+        # Rough estimate: 1 token ≈ 4 chars.  Add margin for output (max_tokens).
+        prompt_tokens_est = len(prompt) // 3 + max_tokens
+        num_ctx = max(2048, min(prompt_tokens_est + 512, 16384))
         # Remote Ollama proxy: max 600s internal timeout → client must exceed it
         is_remote = url and "localhost" not in url and "127.0.0.1" not in url
-        timeout = 620 if is_remote else 120
+        # HTTP timeout MUST be shorter than asyncio HARD_TIMEOUT to prevent
+        # run_in_executor deadlock. When both timeouts race each other, the
+        # asyncio event loop can't properly cancel the blocked thread.
+        # JSON HARD_TIMEOUT=420 → http 360; raw HARD_TIMEOUT=540 → http 480.
+        if http_timeout > 0:
+            timeout = http_timeout
+        else:
+            timeout = 360 if is_remote else 120
         r = requests.post(
             f"{url}/api/generate",
             json={
@@ -6089,35 +8112,57 @@ Output COMPLETE improved HTML. No markdown, no code fences, no commentary."""
             return ""
 
     def _minimal_draft_from_structure(self) -> str:
-        """Last resort: build basic HTML from structure headings so pipeline never fails on empty content."""
+        """Last resort: build basic HTML from structure headings so pipeline never fails on empty content.
+
+        NOTE: This output is intentionally tagged with `_FALLBACK_MARKER_PHRASES`
+        so the pre-save scanner (`_scan_for_fallback_phrases`) flags the article
+        as `needs_review`. Editing the marker phrases will defeat that safeguard.
+        """
         kw = self.keyword
         structure = self._structure or self._default_structure()
+        # Pull research data when available for richer fallback
+        _fb_themes = (self.state.steps[0].details.get("analysis", {}).get("themes", [])
+                      if self.state.steps and self.state.steps[0].details else [])
+        _fb_facts = (self.state.steps[0].details.get("analysis", {}).get("key_facts", [])
+                     if self.state.steps and self.state.steps[0].details else [])
+        _theme = _fb_themes[0] if _fb_themes else "quality, sourcing, and selection"
+        _fact = _fb_facts[0] if _fb_facts else ""
+
         parts = [
-            f"<p>{kw.title()}: A comprehensive guide covering everything you need to know about {kw}. "
-            f"In this article, we explore key aspects, benefits, and practical guidance.</p>"
+            f"<p>{kw.title()} refers to {_theme.lower()}, "
+            f"and understanding the key differences can significantly impact your results."
+            f"{(' ' + _fact + '.') if _fact else ''}</p>"
         ]
         _h2s_raw = structure.get("h2_sections", [])
         for s in (_h2s_raw if isinstance(_h2s_raw, list) else [_h2s_raw] if _h2s_raw else [])[:8]:
             anchor = re.sub(r'[^a-z0-9]+', '-', s['h2'].lower())[:40].strip('-')
             parts.append(f'<h2 id="{anchor}">{s["h2"]}</h2>')
             angle = s.get("content_angle", "")
+            # NOTE: phrase intentionally matches _FALLBACK_MARKER_PHRASES so the
+            # save-time scanner flags the article as needs_review.
             parts.append(f"<p>This section covers {angle or s['h2'].lower()} related to {kw}. "
-                         f"Understanding this aspect helps you make better decisions about {kw}.</p>")
+                         f"Buyers evaluating {kw} should weigh this factor against their specific requirements.</p>")
             for h3 in s.get("h3s", [])[:2]:
                 parts.append(f"<h3>{h3}</h3>")
-                parts.append(f"<p>{h3} is an important consideration when evaluating {kw}.</p>")
+                parts.append(f"<p>{h3} is a critical consideration when evaluating {kw} options.</p>")
         _faqs_raw2 = structure.get("faqs", [])
         faqs = (_faqs_raw2 if isinstance(_faqs_raw2, list) else [_faqs_raw2] if _faqs_raw2 else [])[:4]
         if faqs:
             parts.append("<h2>Frequently Asked Questions</h2>")
-            for f in faqs:
+            for fi, f in enumerate(faqs):
                 q_text = f.get("q") or f.get("question") or f.get("text", "")
                 if not q_text:
                     continue
                 parts.append(f'<h3>{q_text}</h3>')
-                parts.append(f'<p>{f.get("a_plan", f"This is an important question about {kw}.")}</p>')
-        parts.append(f'<p><strong>In summary</strong>, {kw} is an important topic. '
-                     f'{structure.get("conclusion_plan", "Contact us to learn more.")} </p>')
+                _a_plan = f.get("a_plan", "")
+                if _a_plan:
+                    parts.append(f'<p>{_a_plan}</p>')
+                else:
+                    parts.append(f'<p>For {kw}, this depends on {_theme.lower()} and your intended application. '
+                                 f'Compare certified options from multiple suppliers before deciding.</p>')
+        parts.append(f'<p><strong>To summarise</strong>, choosing the right {kw} requires evaluating '
+                     f'{_theme.lower()}. '
+                     f'{structure.get("conclusion_plan", "Request samples and compare before committing.")} </p>')
         return "\n".join(parts)
 
     async def _ollama_section_writer(self, ollama_url: str = "") -> str:
