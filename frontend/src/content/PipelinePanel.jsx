@@ -4,19 +4,20 @@ import { T, api, Badge } from "../App"
 import { AI_PROVIDERS_BASE, _buildProviders } from "./NewArticleModal"
 import { usePipelineQuery } from "../hooks/usePipelineQuery"
 
-// ── Step definitions for the 11-step pipeline ─────────────────────────────────
+// ── Step definitions for the 12-step v2 pipeline ─────────────────────────────
 export const STEP_DEFS = [
-  { n: 1,  label: "Research",       icon: "🔍", desc: "Crawling competitor pages & Wikipedia" },
-  { n: 2,  label: "Structure",      icon: "📐", desc: "Building headings, FAQ & outline" },
-  { n: 3,  label: "Verify",         icon: "✅", desc: "Verifying structure relevance" },
-  { n: 4,  label: "Internal Links", icon: "🔗", desc: "Planning internal link strategy" },
-  { n: 5,  label: "References",     icon: "📚", desc: "Adding Wikipedia references" },
-  { n: 6,  label: "Draft",          icon: "✍️", desc: "Writing full article content" },
-  { n: 7,  label: "Review",         icon: "🔎", desc: "AI quality review" },
-  { n: 8,  label: "Issues",         icon: "🛠",  desc: "Running 53-rule compliance checks" },
-  { n: 9,  label: "Redevelop",      icon: "🚀", desc: "Rewriting to fix all issues" },
-  { n: 10, label: "Score",          icon: "📊", desc: "53-rule quality scoring" },
-  { n: 11, label: "Quality Loop",   icon: "🔄", desc: "Iterating until score ≥ 75%" },
+  { n: 1,  label: "Research",         icon: "🔍", desc: "Crawling competitor pages & Wikipedia" },
+  { n: 2,  label: "Structure",        icon: "📐", desc: "Building headings, FAQ & outline" },
+  { n: 3,  label: "Blueprint",        icon: "📋", desc: "Assembling 3-layer content blueprint" },
+  { n: 4,  label: "Internal Links",   icon: "🔗", desc: "Planning internal link strategy" },
+  { n: 5,  label: "References",       icon: "📚", desc: "Wikipedia & web research with confidence scoring" },
+  { n: 6,  label: "Draft",            icon: "✍️", desc: "Blueprint-controlled section generation" },
+  { n: 7,  label: "Validate & Score", icon: "📊", desc: "Article + section-level quality scoring" },
+  { n: 8,  label: "Recovery",         icon: "🔧", desc: "Section-level targeted fixes" },
+  { n: 9,  label: "Humanize",         icon: "🧠", desc: "AI pattern removal & voice naturalisation" },
+  { n: 10, label: "Final Scoring",    icon: "🏆", desc: "Rule-based quality gate & density check" },
+  { n: 11, label: "Quality Loop",     icon: "🔄", desc: "Iterative quality improvement passes" },
+  { n: 12, label: "Redevelopment",    icon: "✨", desc: "Full content polish & final rewrite" },
 ]
 
 // ── AI helpers ────────────────────────────────────────────────────────────────
@@ -89,6 +90,31 @@ function HealthBadge({ status }) {
   )
 }
 
+// ── 15-second countdown bar for iteration review ─────────────────────────────
+function IterationCountdown() {
+  const [pct, setPct] = useState(100)
+  useEffect(() => {
+    const start = Date.now()
+    const dur = 15000
+    const id = setInterval(() => {
+      const elapsed = Date.now() - start
+      const remaining = Math.max(0, 100 - (elapsed / dur) * 100)
+      setPct(remaining)
+      if (remaining <= 0) clearInterval(id)
+    }, 100)
+    return () => clearInterval(id)
+  }, [])
+  return (
+    <div style={{ marginTop: 8, height: 3, background: "#e5e7eb", borderRadius: 99, overflow: "hidden" }}>
+      <div style={{
+        height: "100%", borderRadius: 99, width: `${pct}%`,
+        background: "linear-gradient(90deg, #8b5cf6, #a78bfa)",
+        transition: "width 0.1s linear",
+      }} />
+    </div>
+  )
+}
+
 // ── Live pipeline progress (full panel) ──────────────────────────────────────
 function PipelineProgress({ articleId, onComplete }) {
   const qc = useQueryClient()
@@ -99,6 +125,7 @@ function PipelineProgress({ articleId, onComplete }) {
   const [healthLoading, setHealthLoading] = useState(false)
   const [expandedStep, setExpandedStep] = useState(null)
   const [ollamaServers, setOllamaServers] = useState([])
+  const [recoveryProvider, setRecoveryProvider] = useState("groq")
 
   // Fetch remote ollama servers
   useEffect(() => {
@@ -162,12 +189,22 @@ function PipelineProgress({ articleId, onComplete }) {
     mutationFn: (payload) => api.post(`/api/content/${articleId}/pipeline/rerun-step`, payload),
     onSuccess: () => qc.invalidateQueries(["pipeline", articleId]),
   })
+  const aiRecovery = useMutation({
+    mutationFn: (provider) => api.post(`/api/content/${articleId}/pipeline/ai-recovery`, { provider }),
+    onSuccess: () => qc.invalidateQueries(["pipeline", articleId]),
+  })
+  const finalizePipeline = useMutation({
+    mutationFn: () => api.post(`/api/content/${articleId}/pipeline/finalize`),
+    onSuccess: () => qc.invalidateQueries(["pipeline", articleId]),
+  })
 
   const steps = data?.steps || []
   const logs = data?.logs || []
   const ruleResults = data?.rule_results || null
   const isPaused = data?.is_paused || false
+  const aiRecoveryNeeded = data?.ai_recovery_needed || false
   const stepMode = data?.step_mode || "auto"
+  const iteration = data?.iteration || {}
   const doneCount = steps.filter(s => s.status === "done").length
   const errorCount = steps.filter(s => s.status === "error").length
   const runningStep = steps.find(s => s.status === "running")
@@ -200,14 +237,20 @@ function PipelineProgress({ articleId, onComplete }) {
         {stepMode === "auto" && !isPaused ? (
           <button onClick={() => pausePipeline.mutate()} disabled={pausePipeline.isPending}
             style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.purple}40`, background: `${T.purple}08`, cursor: "pointer", color: T.purple, fontWeight: 600, flexShrink: 0 }}>
-            ⏸ Step-by-Step
+            ⏸ Pause
           </button>
         ) : isPaused ? (
           <button onClick={() => continuePipeline.mutate(true)} disabled={continuePipeline.isPending}
             style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.amber}40`, background: `${T.amber}08`, cursor: "pointer", color: T.amber, fontWeight: 600, flexShrink: 0 }}>
-            ⏩ Switch to Auto
+            ⏩ Resume
           </button>
         ) : null}
+        {data?.status === "generating" && (
+          <button onClick={() => cancelPipeline.mutate()} disabled={cancelPipeline.isPending}
+            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid #ef444440`, background: `#ef444408`, cursor: "pointer", color: "#ef4444", fontWeight: 600, flexShrink: 0 }}>
+            ✕ Stop
+          </button>
+        )}
         <button onClick={() => runHealthCheck(true)} disabled={healthLoading}
           style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.border}`, background: "transparent", cursor: "pointer", color: T.textSoft, flexShrink: 0 }}>
           {healthLoading ? "..." : "↻ Health"}
@@ -239,6 +282,90 @@ function PipelineProgress({ articleId, onComplete }) {
               {_getProviderLabel(key)} {info.status === "ok" ? "✓" : info.status === "rate_limited" ? "⚠" : "✕"}
             </span>
           ))}
+        </div>
+      )}
+
+      {/* ── AI Recovery Banner ── */}
+      {aiRecoveryNeeded && (
+        <div style={{
+          marginBottom: 12, padding: "12px 14px", borderRadius: 8,
+          background: "#fef3c720", border: "1.5px solid #f59e0b60",
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        }}>
+          <span style={{ fontSize: 18 }}>⚠️</span>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#92400e" }}>All AI providers failed</div>
+            <div style={{ fontSize: 10, color: "#b45309" }}>Pick a provider to retry this step:</div>
+          </div>
+          <AISelect
+            value={recoveryProvider}
+            onChange={setRecoveryProvider}
+            disabled={aiRecovery.isPending}
+            providers={aiProviders}
+            healthData={healthData}
+          />
+          <button
+            onClick={() => aiRecovery.mutate(recoveryProvider)}
+            disabled={aiRecovery.isPending || !recoveryProvider}
+            style={{
+              fontSize: 11, padding: "5px 12px", borderRadius: 6, fontWeight: 700, cursor: "pointer",
+              background: "#f59e0b", color: "#fff", border: "none",
+              opacity: aiRecovery.isPending ? 0.6 : 1,
+            }}>
+            {aiRecovery.isPending ? "Retrying…" : "↻ Retry"}
+          </button>
+        </div>
+      )}
+
+      {/* ── Iteration Review Banner ── */}
+      {iteration.current > 0 && data?.status === "generating" && (
+        <div style={{
+          marginBottom: 12, padding: "10px 14px", borderRadius: 8,
+          background: iteration.waiting_review ? `${T.purple}08` : `${T.teal}06`,
+          border: `1.5px solid ${iteration.waiting_review ? T.purple + "40" : T.teal + "25"}`,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 18 }}>{iteration.waiting_review ? "⏳" : "🔄"}</span>
+            <div style={{ flex: 1, minWidth: 150 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.text }}>
+                Iteration {iteration.current}/{iteration.max}
+                {iteration.score > 0 && (
+                  <span style={{
+                    marginLeft: 8, fontSize: 11, fontWeight: 600,
+                    color: iteration.score >= iteration.target_score ? T.teal : T.amber,
+                  }}>
+                    Score: {iteration.score}%
+                    {iteration.score >= iteration.target_score ? " ✓" : ` (target: ${iteration.target_score}%)`}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 10, color: T.textSoft }}>
+                {iteration.waiting_review
+                  ? "Review the article — click Finalize to accept, or it auto-continues in 15s"
+                  : iteration.finalized
+                    ? "Finalized by user"
+                    : `Score → Quality Loop → Redevelop cycle`}
+              </div>
+            </div>
+            {iteration.waiting_review && !finalizePipeline.isPending && (
+              <button
+                onClick={() => finalizePipeline.mutate()}
+                style={{
+                  fontSize: 12, padding: "6px 18px", borderRadius: 8, fontWeight: 700,
+                  cursor: "pointer", border: "none", flexShrink: 0,
+                  background: `linear-gradient(135deg, ${T.teal}, #059669)`,
+                  color: "#fff", boxShadow: "0 2px 8px rgba(16,185,129,0.3)",
+                  animation: "pulse 2s infinite",
+                }}>
+                ✓ Finalize Article
+              </button>
+            )}
+            {finalizePipeline.isPending && (
+              <span style={{ fontSize: 11, color: T.teal, fontWeight: 600 }}>Finalizing…</span>
+            )}
+          </div>
+          {/* Countdown bar when waiting */}
+          {iteration.waiting_review && <IterationCountdown />}
         </div>
       )}
 
@@ -294,6 +421,11 @@ function PipelineProgress({ articleId, onComplete }) {
                     {isRunning && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 99, background: T.amber, color: "#fff", fontWeight: 700, animation: "pulse 1s infinite" }}>RUNNING</span>}
                     {isPausedStep && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 99, background: T.purple, color: "#fff", fontWeight: 700 }}>PAUSED</span>}
                     {isError && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 99, background: "#ef4444", color: "#fff", fontWeight: 700 }}>ERROR</span>}
+                    {def.n >= 10 && iteration.current > 1 && !isPending && (
+                      <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 99, background: `${T.purple}15`, color: T.purple, fontWeight: 700 }}>
+                        ITER {iteration.current}
+                      </span>
+                    )}
                   </div>
                   {isDone && s?.summary ? (
                     <div style={{ fontSize: 9, color: T.textSoft, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.summary}</div>
