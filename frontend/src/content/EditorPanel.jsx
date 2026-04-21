@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react"
 import { T, api, Badge, Btn } from "../App"
 import TiptapEditor from "../components/TiptapEditor"
 import { PipelineLogsView } from "./PipelinePanel"
+import HumanizePanel from "./HumanizePanel"
 
 // ── Status helpers ─────────────────────────────────────────────────────────────
 const STATUS_COLOR = {
@@ -314,7 +315,7 @@ const PILLAR_ICONS = {
   visual: "📊", data: "📈", engagement: "💬", tech_seo: "⚙️", topic_authority: "📚", ai_detection: "🤖",
 }
 
-function RulesPanel({ articleId, data, loading, onReAnalyze }) {
+function RulesPanel({ articleId, data, sectionScores, loading, onReAnalyze }) {
   const [expandedPillar, setExpandedPillar] = useState(null)
   const percentage = data?.percentage ?? null
   const pillars = data?.pillars || []
@@ -413,6 +414,36 @@ function RulesPanel({ articleId, data, loading, onReAnalyze }) {
         </div>
       )}
 
+      {/* Section scores */}
+      {sectionScores?.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.text, marginBottom: 2 }}>Section Quality</div>
+          {sectionScores.map((s, i) => {
+            const sc = s.score ?? 100
+            const barColor = sc >= 70 ? T.teal : sc >= 45 ? T.amber : "#dc2626"
+            const failures = s.contract_failures || []
+            return (
+              <div key={i} style={{ marginBottom: 2 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                  <span style={{ fontSize: 10, color: T.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 160 }}>
+                    {s.heading || `Section ${i + 1}`}
+                  </span>
+                  <span style={{ fontSize: 10, fontWeight: 600, color: barColor, flexShrink: 0 }}>{sc}%</span>
+                </div>
+                <div style={{ height: 3, background: T.grayLight, borderRadius: 99 }}>
+                  <div style={{ height: 3, borderRadius: 99, width: `${sc}%`, background: barColor, transition: "width 0.5s ease" }} />
+                </div>
+                {failures.map((f, j) => (
+                  <div key={j} style={{ fontSize: 9, color: "#dc2626", marginTop: 2, paddingLeft: 4 }}>
+                    ⚠ {f.detail}
+                  </div>
+                ))}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       {/* Re-analyze button */}
       <Btn
         onClick={onReAnalyze}
@@ -444,25 +475,30 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
   const [rewriteInstruction, setRewriteInstruction] = useState("")
   const [showInstruction, setShowInstruction] = useState(false)
   const [rulesData, setRulesData] = useState(null)
+  const [sectionScores, setSectionScores] = useState([])
   const [analyzingRules, setAnalyzingRules] = useState(false)
   const [logs, setLogs] = useState(null)
 
   // Bug #9 — mutual exclusion: one panel open at a time
-  const [openPanel, setOpenPanel] = useState(null) // "review" | "rules" | null
+  const [openPanel, setOpenPanel] = useState(null) // "review" | "rules" | "humanize" | null
   const reviewOpen = openPanel === "review"
   const rulesOpen = openPanel === "rules"
+  const humanizeOpen = openPanel === "humanize"
 
   const toggleReview = () => setOpenPanel(p => p === "review" ? null : "review")
   const toggleRules = () => {
     if (openPanel !== "rules") fetchRules()
     setOpenPanel(p => p === "rules" ? null : "rules")
   }
+  const toggleHumanize = () => setOpenPanel(p => p === "humanize" ? null : "humanize")
 
   // Fix state
   const [fixing, setFixing] = useState(false)
   const [fixingRule, setFixingRule] = useState(null)
   const [ruleDiff, setRuleDiff] = useState(null)
   const [fixStats, setFixStats] = useState(null)
+
+  const [articleCost, setArticleCost] = useState(null)
 
   // Refs
   const editorRef = useRef(null)
@@ -475,9 +511,11 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
     setIsDirty(false)
     setReviewData(null)
     setRulesData(null)
+    setSectionScores([])
     setOpenPanel(null)
     setLogs(null)
     setRuleDiff(null)
+    setArticleCost(null)
 
     // Clear pending auto-save timer from previous article
     if (saveTimer.current) {
@@ -496,6 +534,10 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
             setLogs(data.logs)
           }
         })
+        .catch(() => {})
+
+      api.get(`/api/content/${article.article_id}/generation-summary`)
+        .then(data => { if (!cancelled && data) setArticleCost(data.total_cost_usd ?? null) })
         .catch(() => {})
     }
 
@@ -540,6 +582,9 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
             rules: bd.rules,
             pillars: bd.pillars,
           })
+        }
+        if (notes.section_scores?.length) {
+          setSectionScores(notes.section_scores)
         }
       } catch (_) {}
     } else if (article?.review_score > 0) {
@@ -833,6 +878,16 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
             <Badge color={STATUS_COLOR[article.status] || "gray"}>{article.status}</Badge>
             {isDirty && <span style={{ fontSize: 9, color: T.amber, fontStyle: "italic" }}>Saving...</span>}
             {!isDirty && article.body && <span style={{ fontSize: 9, color: T.teal }}>Saved</span>}
+            {article.word_count > 0 && (
+              <span style={{ fontSize: 9, color: T.textSoft }}>
+                {article.word_count.toLocaleString()} words · ~{Math.ceil(article.word_count / 250)} min read
+              </span>
+            )}
+            {articleCost !== null && (
+              <span style={{ fontSize: 9, fontWeight: 600, color: articleCost === 0 ? T.teal : "#6366f1" }}>
+                {articleCost === 0 ? "Free" : `$${articleCost.toFixed(4)}`}
+              </span>
+            )}
           </div>
         </div>
 
@@ -859,6 +914,9 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
         </Btn>
         <Btn small onClick={toggleRules} style={{ background: rulesOpen ? T.purpleLight : undefined, color: rulesOpen ? T.purple : undefined }}>
           {rulesOpen ? "Close Rules" : "Rules"}
+        </Btn>
+        <Btn small onClick={toggleHumanize} style={{ background: humanizeOpen ? "#7c3aed22" : undefined, color: humanizeOpen ? "#7c3aed" : undefined }}>
+          {humanizeOpen ? "Close Humanize" : "Humanize"}
         </Btn>
         <Btn small onClick={() => setShowInstruction(v => !v)} disabled={rewriting}>Options</Btn>
         <Btn small onClick={rewriteSelection} disabled={rewriting}>Rewrite Selection</Btn>
@@ -1035,8 +1093,31 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
             <RulesPanel
               articleId={article?.article_id}
               data={rulesData}
+              sectionScores={sectionScores}
               loading={analyzingRules}
               onReAnalyze={fetchRules}
+            />
+          )}
+        </div>
+
+        {/* Right: Humanize panel */}
+        <div style={{
+          width: humanizeOpen ? 310 : 0,
+          minWidth: humanizeOpen ? 310 : 0,
+          overflow: "hidden",
+          transition: "width 0.25s ease, min-width 0.25s ease",
+          borderLeft: humanizeOpen ? `1px solid ${T.border}` : "none",
+          background: "#F2F2F7",
+        }}>
+          {humanizeOpen && (
+            <HumanizePanel
+              articleId={article?.article_id}
+              onHumanized={(res) => {
+                if (res?.humanized_html && editorRef.current) {
+                  editorRef.current.commands?.setContent(res.humanized_html)
+                  setHtmlContent(res.humanized_html)
+                }
+              }}
             />
           )}
         </div>
