@@ -178,18 +178,32 @@ function BulkTopicsTab({ form, projectId, onClose }) {
     if (!selectedTopics.length) return
     setGenerating(true)
     setPhase(3)
-    const go = async (topic) => {
+
+    const pollUntilDone = async (articleId) => {
+      for (let i = 0; i < 120; i++) {
+        await new Promise(res => setTimeout(res, 6000))
+        try {
+          const row = await api.get(`/api/content/${articleId}`)
+          if (row?.status && row.status !== "generating") return
+        } catch { return }
+      }
+    }
+
+    const go = async (topic, sequential) => {
+      setResults(r => ({ ...r, [topic.id]: "active" }))
       try {
-        await api.post("/api/content/generate", buildPayload(topic))
+        const res = await api.post("/api/content/generate", buildPayload(topic))
+        if (sequential && res?.article_id) await pollUntilDone(res.article_id)
         setResults(r => ({ ...r, [topic.id]: "ok" }))
       } catch {
         setResults(r => ({ ...r, [topic.id]: "error" }))
       }
     }
-    if (genMode === "parallel" || addOnly) {
-      await Promise.allSettled(selectedTopics.map(go))
+
+    if (genMode === "parallel") {
+      await Promise.allSettled(selectedTopics.map(t => go(t, false)))
     } else {
-      for (const t of selectedTopics) await go(t)
+      for (const t of selectedTopics) await go(t, true)
     }
     setGenerating(false)
     if (addOnly) onClose()
@@ -355,18 +369,22 @@ function BulkTopicsTab({ form, projectId, onClose }) {
   return (
     <div>
       <div style={{ fontSize: 12, fontWeight: 600, color: T.text, marginBottom: 12 }}>
-        {generating ? `Generating articles… (${Object.keys(results).length}/${selectedTopics.length})` : "Generation complete"}
+        {generating
+          ? `Generating articles… (${Object.values(results).filter(v => v === "ok" || v === "error").length}/${selectedTopics.length} done)`
+          : "Generation complete"}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 300, overflowY: "auto" }}>
         {selectedTopics.map(t => {
           const s = results[t.id]
+          const bg = s === "ok" ? "#f0fdf4" : s === "error" ? "#fef2f2" : s === "active" ? "#fffbeb" : "#f9fafb"
+          const border = s === "ok" ? "#bbf7d0" : s === "error" ? "#fecaca" : s === "active" ? "#fde68a" : T.border
+          const icon = s === "ok" ? "✓" : s === "error" ? "✗" : s === "active" ? "⚡" : "⏳"
           return (
             <div key={t.id} style={{
               display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8,
-              background: s === "ok" ? "#f0fdf4" : s === "error" ? "#fef2f2" : "#f9fafb",
-              border: `1px solid ${s === "ok" ? "#bbf7d0" : s === "error" ? "#fecaca" : T.border}`,
+              background: bg, border: `1px solid ${border}`,
             }}>
-              <span style={{ fontSize: 14, flexShrink: 0 }}>{s === "ok" ? "✓" : s === "error" ? "✗" : "⏳"}</span>
+              <span style={{ fontSize: 14, flexShrink: 0 }}>{icon}</span>
               <span style={{ fontSize: 11, color: T.text, flex: 1 }}>{t.keyword}</span>
               <span style={{
                 fontSize: 9, padding: "1px 6px", borderRadius: 4,
