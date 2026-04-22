@@ -1782,88 +1782,107 @@ class PlanBody(BaseModel):
 
 @app.post("/api/content/parse-topics", tags=["Content"])
 async def parse_topics_ai(body: dict = Body(default={}), user=Depends(current_user)):
-    """Use Groq (Gemini fallback) to extract topic titles + intents from free-form pasted content."""
+    """Hybrid: regex finds numbered topic lines, Groq classifies intent only."""
     text = (body.get("text") or "").strip()
     if not text:
         return {"topics": []}
 
-    prompt = (
-        "Extract ONLY the article topic titles from the text below. "
-        "Ignore all sub-bullets, structure notes, CTA lines, intro descriptions, and strategic insights.\n\n"
-        "For each topic return:\n"
-        "- keyword: the article title (clean, no emoji, no leading numbers)\n"
-        "- intent: one of informational | commercial | transactional | navigational\n\n"
-        "Rules:\n"
-        "- 'Transactional + Informational' → transactional\n"
-        "- 'Commercial Investigation' or 'Comparison' → commercial\n"
-        "- Return ONLY a JSON array, no other text.\n\n"
-        "Example output:\n"
-        '[{"keyword": "Buy Kerala Spices Online: Complete Guide", "intent": "transactional"},'
-        '{"keyword": "Best Kerala Spices You Can Buy Online", "intent": "commercial"}]\n\n'
-        f"Text to parse:\n{text[:6000]}"
-    )
-    system_msg = "You are a JSON extraction engine. Return ONLY a valid JSON array, no prose, no markdown."
+    import re as _re
 
-    result_text = ""
-    groq_key = os.getenv("GROQ_API_KEY", "")
-    if groq_key:
-        try:
-            r = requests.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                    "messages": [
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-                timeout=25,
-            )
-            if r.ok:
-                result_text = r.json()["choices"][0]["message"]["content"].strip()
-        except Exception:
-            pass
+    INTENT_MAP = {
+        "transactional": "transactional",
+        "commercial": "commercial",
+        "informational": "informational",
+        "navigational": "navigational",
+        "comparison": "commercial",
+        "investigation": "commercial",
+    }
+    VALID_INTENTS = set(INTENT_MAP.values())
 
-    if not result_text:
-        gemini_key = os.getenv("GEMINI_API_KEY", "")
-        if gemini_key:
+    # Step 1: regex identifies numbered topic lines only
+    lines = text.splitlines()
+    topic_idxs = [
+        i for i, ln in enumerate(lines)
+        if _re.match(r"^\s*[^\w\n]*?\d{1,2}[.)]\s+.{5,}", ln)
+    ]
+    if not topic_idxs:
+        return {"topics": [], "error": "No numbered topics found. Use format: 1. Title, 2. Title..."}
+
+    # Step 2: extract titles + look for explicit Intent: lines
+    topics_raw = []
+    seen = set()
+    for ti, li in enumerate(topic_idxs):
+        title_raw = _re.sub(r"^\s*[^\w\n]*?\d{1,2}[.)]\s+", "", lines[li])
+        title_raw = _re.sub(r"\s*[:\-]\s*(Structure|Intent|CTA|Keywords?).*$", "", title_raw, flags=_re.I).strip()
+        if not title_raw or len(title_raw) < 5:
+            continue
+        block_end = topic_idxs[ti + 1] if ti + 1 < len(topic_idxs) else len(lines)
+        block = "\n".join(lines[li:block_end])
+        intent_line = next((ln for ln in block.splitlines() if _re.match(r"^intent\s*:", ln.strip(), _re.I)), "")
+        raw_intent = _re.sub(r"^intent\s*:\s*", "", intent_line, flags=_re.I).lower().strip()
+        intent = None
+        for k, v in INTENT_MAP.items():
+            if k in raw_intent:
+                intent = v
+                break
+        key = title_raw.lower()
+        if key not in seen:
+            seen.add(key)
+            topics_raw.append({"keyword": title_raw, "intent": intent})
+
+    if not topics_raw:
+        return {"topics": [], "error": "Could not extract topic titles from numbered lines"}
+
+    # Step 3: classify intent via Groq only for topics missing explicit intent
+    need_classify = [t for t in topics_raw if t["intent"] is None]
+    if need_classify:
+        titles_list = "\n".join(f"{i+1}. {t['keyword']}" for i, t in enumerate(need_classify))
+        prompt = (
+            "Classify the search intent for each article title below.\n"
+            "Return ONLY a JSON array like: [\"informational\", \"commercial\", \"transactional\", \"navigational\"]\n"
+            "One entry per title, same order. No other text.\n\n"
+            f"Titles:\n{titles_list}"
+        )
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        result_text = ""
+        if groq_key:
             try:
                 r = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}",
-                    json={"contents": [{"parts": [{"text": f"{system_msg}\n\n{prompt}"}]}],
-                          "generationConfig": {"temperature": 0.1}},
-                    timeout=25,
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "temperature": 0.1,
+                        "max_tokens": 500,
+                        "messages": [
+                            {"role": "system", "content": "Return ONLY a JSON array of intent strings."},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                    timeout=20,
                 )
                 if r.ok:
-                    result_text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    result_text = r.json()["choices"][0]["message"]["content"].strip()
             except Exception:
                 pass
+        if result_text:
+            m = re.search(r'\[.*?\]', result_text, re.DOTALL)
+            if m:
+                try:
+                    classified = json.loads(m.group())
+                    for i, t in enumerate(need_classify):
+                        if i < len(classified):
+                            v = str(classified[i]).lower().strip()
+                            t["intent"] = v if v in VALID_INTENTS else "informational"
+                except Exception:
+                    pass
 
-    if result_text:
-        m = re.search(r'\[[\s\S]*\]', result_text)
-        if m:
-            try:
-                raw = json.loads(m.group())
-                seen: set = set()
-                clean = []
-                valid_intents = {"informational", "commercial", "transactional", "navigational"}
-                for t in raw:
-                    kw = str(t.get("keyword", "")).strip()
-                    intent = str(t.get("intent", "informational")).lower().strip()
-                    if intent not in valid_intents:
-                        intent = "informational"
-                    if kw and len(kw) > 2 and kw.lower() not in seen:
-                        seen.add(kw.lower())
-                        clean.append({"keyword": kw, "intent": intent})
-                if clean:
-                    return {"topics": clean}
-            except Exception:
-                pass
+    # Fill any still-None intents
+    for t in topics_raw:
+        if t["intent"] is None:
+            t["intent"] = "informational"
 
-    return {"topics": [], "error": "AI parsing failed — try again or use manual entry"}
+    return {"topics": topics_raw}
 
 
 @app.post("/api/content/plan", tags=["Content"])

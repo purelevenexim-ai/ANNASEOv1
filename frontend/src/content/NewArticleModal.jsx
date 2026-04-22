@@ -106,38 +106,38 @@ const ROUTING_TASKS = [
 ]
 const DEFAULT_ROUTING = expandToLegacyRouting(SYSTEM_TEMPLATES.find(t => t.id === DEFAULT_TEMPLATE_ID).steps)
 
-// ── Bulk topic parser ─────────────────────────────────────────────────────────
+// ── Bulk topic parser (numbered-line only — sub-bullets are never numbered) ──
 function parseBulkText(text) {
   if (!text?.trim()) return []
   const INTENT_MAP = {
     transactional: "transactional", commercial: "commercial",
     informational: "informational", navigational: "navigational",
-    comparison: "commercial", "buy intent": "transactional", "purchase intent": "transactional",
+    comparison: "commercial",
   }
-  const blocks = text.split(/\n(?=\s*\d+[.)]\s|[🔥🌿🛒🌶📦🌱🏆🍛⚙️✅💰🌍🌾]+\s)|\n{2,}/)
+  const lines = text.split("\n")
   const seen = new Set()
-  return blocks.flatMap(block => {
-    const lines = block.split("\n").map(l => l.trim()).filter(Boolean)
-    if (!lines.length) return []
-    let keyword = lines[0]
-      .replace(/^\d+[.)]\s*/, "")
-      .replace(/^[🔥🌿🛒🌶📦🌱🏆🍛⚙️✅💰🌍🌾]+\s*/, "")
-      .replace(/[:\-–—]\s*(Structure|Intent|CTA|Keywords?).*$/i, "")
-      .trim()
-    if (!keyword || keyword.length < 3) return []
-    let intent = "informational"
-    const intentLine = lines.find(l => /^intent:/i.test(l))
-    if (intentLine) {
-      const raw = intentLine.replace(/^intent:\s*/i, "").toLowerCase().trim()
-      for (const [k, v] of Object.entries(INTENT_MAP)) { if (raw.includes(k)) { intent = v; break } }
-    }
-    const key = keyword.toLowerCase()
-    if (seen.has(key)) return []
-    seen.add(key)
-    return [{ id: Math.random().toString(36).slice(2), keyword, intent, selected: true }]
+  const topics = []
+  const topicIdx = []
+  lines.forEach((line, i) => {
+    if (/^[ 	]*[^\w\n]*?\d{1,2}[.)]\s+.{5,}/.test(line)) topicIdx.push(i)
   })
+  topicIdx.forEach((li, ti) => {
+    const titleRaw = lines[li]
+      .replace(/^[ 	]*[^\w\n]*?\d{1,2}[.)]\s+/, "")
+      .replace(/\s*[:\-]\s*(Structure|Intent|CTA|Keywords?).*$/i, "")
+      .trim()
+    if (!titleRaw || titleRaw.length < 5) return
+    const blockEnd = ti + 1 < topicIdx.length ? topicIdx[ti + 1] : lines.length
+    const block = lines.slice(li, blockEnd).join("\n")
+    const intentLine = block.split("\n").find(l => /^intent\s*:/i.test(l.trim())) || ""
+    const rawIntent = intentLine.replace(/^intent\s*:\s*/i, "").toLowerCase().trim()
+    let intent = "informational"
+    for (const [k, v] of Object.entries(INTENT_MAP)) { if (rawIntent.includes(k)) { intent = v; break } }
+    const key = titleRaw.toLowerCase()
+    if (!seen.has(key)) { seen.add(key); topics.push({ id: Math.random().toString(36).slice(2), keyword: titleRaw, intent, selected: true }) }
+  })
+  return topics
 }
-
 // ── Bulk Topics Tab component ─────────────────────────────────────────────────
 function BulkTopicsTab({ form, projectId, onClose }) {
   const [bulkText, setBulkText] = useState("")
