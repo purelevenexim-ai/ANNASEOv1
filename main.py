@@ -1780,6 +1780,92 @@ class PlanBody(BaseModel):
     content_type: str = "blog"
     project_name: str = ""
 
+@app.post("/api/content/parse-topics", tags=["Content"])
+async def parse_topics_ai(body: dict = Body(default={}), user=Depends(current_user)):
+    """Use Groq (Gemini fallback) to extract topic titles + intents from free-form pasted content."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"topics": []}
+
+    prompt = (
+        "Extract ONLY the article topic titles from the text below. "
+        "Ignore all sub-bullets, structure notes, CTA lines, intro descriptions, and strategic insights.\n\n"
+        "For each topic return:\n"
+        "- keyword: the article title (clean, no emoji, no leading numbers)\n"
+        "- intent: one of informational | commercial | transactional | navigational\n\n"
+        "Rules:\n"
+        "- 'Transactional + Informational' → transactional\n"
+        "- 'Commercial Investigation' or 'Comparison' → commercial\n"
+        "- Return ONLY a JSON array, no other text.\n\n"
+        "Example output:\n"
+        '[{"keyword": "Buy Kerala Spices Online: Complete Guide", "intent": "transactional"},'
+        '{"keyword": "Best Kerala Spices You Can Buy Online", "intent": "commercial"}]\n\n'
+        f"Text to parse:\n{text[:6000]}"
+    )
+    system_msg = "You are a JSON extraction engine. Return ONLY a valid JSON array, no prose, no markdown."
+
+    result_text = ""
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if groq_key:
+        try:
+            r = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "temperature": 0.1,
+                    "max_tokens": 2000,
+                    "messages": [
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=25,
+            )
+            if r.ok:
+                result_text = r.json()["choices"][0]["message"]["content"].strip()
+        except Exception:
+            pass
+
+    if not result_text:
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        if gemini_key:
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}",
+                    json={"contents": [{"parts": [{"text": f"{system_msg}\n\n{prompt}"}]}],
+                          "generationConfig": {"temperature": 0.1}},
+                    timeout=25,
+                )
+                if r.ok:
+                    result_text = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            except Exception:
+                pass
+
+    if result_text:
+        m = re.search(r'\[[\s\S]*\]', result_text)
+        if m:
+            try:
+                raw = json.loads(m.group())
+                seen: set = set()
+                clean = []
+                valid_intents = {"informational", "commercial", "transactional", "navigational"}
+                for t in raw:
+                    kw = str(t.get("keyword", "")).strip()
+                    intent = str(t.get("intent", "informational")).lower().strip()
+                    if intent not in valid_intents:
+                        intent = "informational"
+                    if kw and len(kw) > 2 and kw.lower() not in seen:
+                        seen.add(kw.lower())
+                        clean.append({"keyword": kw, "intent": intent})
+                if clean:
+                    return {"topics": clean}
+            except Exception:
+                pass
+
+    return {"topics": [], "error": "AI parsing failed — try again or use manual entry"}
+
+
 @app.post("/api/content/plan", tags=["Content"])
 def generate_content_plan(body: PlanBody, user=Depends(current_user)):
     """Generate a rule-aware content blueprint for user review before generation."""
@@ -3008,6 +3094,8 @@ def generation_summary(article_id: str):
                 "name": s.get("name"),
                 "status": s.get("status"),
                 "duration_seconds": dur,
+                "summary": s.get("summary", ""),
+                "ai_first": s.get("ai_first", ""),
             })
     except Exception:
         pass

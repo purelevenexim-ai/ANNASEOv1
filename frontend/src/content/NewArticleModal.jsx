@@ -146,6 +146,8 @@ function BulkTopicsTab({ form, projectId, onClose }) {
   const [genMode, setGenMode] = useState("sequential")
   const [pipelineMode, setPipelineMode] = useState(form.pipeline_mode || "standard")
   const [wordCount, setWordCount] = useState(form.word_count || 2000)
+  const [parsing, setParsing] = useState(false)
+  const [parseError, setParseError] = useState("")
   const [generating, setGenerating] = useState(false)
   const [results, setResults] = useState({})
 
@@ -198,11 +200,33 @@ function BulkTopicsTab({ form, projectId, onClose }) {
   const removeTopic = id => setTopics(ts => ts.filter(t => t.id !== id))
   const toggleAll = val => setTopics(ts => ts.map(t => ({ ...t, selected: val })))
 
+  const handleParse = async () => {
+    if (!bulkText.trim() || parsing) return
+    setParsing(true)
+    setParseError("")
+    try {
+      const res = await api.post("/api/content/parse-topics", { text: bulkText })
+      if (res?.topics?.length) {
+        setTopics(res.topics.map(t => ({ ...t, id: Math.random().toString(36).slice(2), selected: true })))
+        setPhase(2)
+      } else {
+        const fallback = parseBulkText(bulkText)
+        if (fallback.length) { setTopics(fallback); setPhase(2) }
+        else setParseError(res?.error || "No topics found — check your text and try again")
+      }
+    } catch {
+      const fallback = parseBulkText(bulkText)
+      if (fallback.length) { setTopics(fallback); setPhase(2) }
+      else setParseError("Parsing failed — check your connection and try again")
+    }
+    setParsing(false)
+  }
+
   // Phase 1 — paste
   if (phase === 1) return (
     <div>
       <div style={{ fontSize: 11, color: T.textSoft, marginBottom: 10 }}>
-        Paste topic ideas, keyword lists, or structured content briefs. The parser extracts keywords and detects search intent automatically.
+        Paste topic ideas, keyword lists, or structured content briefs. AI will extract the article titles and detect search intent automatically.
       </div>
       <textarea
         value={bulkText}
@@ -210,17 +234,18 @@ function BulkTopicsTab({ form, projectId, onClose }) {
         placeholder={"Paste your topic list here...\n\nExample:\n🔥 1. Buy Kerala Spices Online: Complete Guide\nIntent: Transactional\n\n🌿 2. Best Kerala Spices Top 10\nIntent: Commercial"}
         style={{ ...inputStyle, minHeight: 220, resize: "vertical", fontFamily: "monospace", fontSize: 11 }}
       />
-      <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
+      <div style={{ marginTop: 10, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+        {parseError && <div style={{ fontSize: 10, color: "#dc2626", alignSelf: "flex-start" }}>{parseError}</div>}
         <button
-          onClick={() => { setTopics(parseBulkText(bulkText)); setPhase(2) }}
-          disabled={!bulkText.trim()}
+          onClick={handleParse}
+          disabled={!bulkText.trim() || parsing}
           style={{
             padding: "8px 18px", borderRadius: 8, fontSize: 12, fontWeight: 600,
-            background: bulkText.trim() ? T.purple : "#e5e7eb",
-            color: bulkText.trim() ? "#fff" : T.textSoft,
-            border: "none", cursor: bulkText.trim() ? "pointer" : "default",
+            background: bulkText.trim() && !parsing ? T.purple : "#e5e7eb",
+            color: bulkText.trim() && !parsing ? "#fff" : T.textSoft,
+            border: "none", cursor: bulkText.trim() && !parsing ? "pointer" : "default",
           }}
-        >Parse Topics →</button>
+        >{parsing ? "Parsing with AI…" : "Parse Topics →"}</button>
       </div>
     </div>
   )
