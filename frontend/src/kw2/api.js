@@ -555,6 +555,12 @@ export const getPromptVersions = (key) =>
 export const restorePromptVersion = (key, versionNumber) =>
   apiCall(`${KW2}/prompts/${key}/restore/${versionNumber}`, "POST")
 
+export const getPromptSampleData = (key) =>
+  apiCall(`${KW2}/prompts/${key}/sample-data`)
+
+export const testPrompt = (promptKey, template, provider = "ollama", sampleData = null) =>
+  apiCall(`${KW2}/prompts/test`, "POST", { prompt_key: promptKey, template, provider, sample_data: sampleData })
+
 // ── Performance / Feedback ────────────────────────────────────────────────────
 
 export const recordPerformance = (pid, sid, body) =>

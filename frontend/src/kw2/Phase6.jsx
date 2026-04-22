@@ -4,7 +4,7 @@
 import React, { useState, useCallback, useEffect } from "react"
 import useKw2Store from "./store"
 import * as api from "./api"
-import { Card, RunButton, Badge, StatsRow, usePhaseRunner, PhaseResult, NotificationList, ConsolePanel } from "./shared"
+import { Card, RunButton, Badge, StatsRow, usePhaseRunner, PhaseResult, NotificationList } from "./shared"
 
 export default function Phase6({ projectId, sessionId, onComplete }) {
   const { graph, setGraph, setActivePhase } = useKw2Store()
@@ -91,7 +91,6 @@ export default function Phase6({ projectId, sessionId, onComplete }) {
       )}
 
       <NotificationList notifications={notifications} />
-      <ConsolePanel filterBadge="P6" />
     </Card>
   )
 }

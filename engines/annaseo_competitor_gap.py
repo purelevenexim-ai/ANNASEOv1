@@ -342,22 +342,17 @@ class AttackPlanGenerator:
 
     def _deepseek_brief(self, gap: KeywordGap, seed: str) -> dict:
         try:
-            r = _req.post(
-                f"{os.getenv('OLLAMA_URL','http://172.235.16.165:11434')}/api/generate",
-                json={"model": "deepseek-r1:7b",
-                      "prompt": (
-                          f"Write a content brief for this SEO gap keyword: '{gap.keyword}'\n"
-                          f"Seed business: {seed}\n"
-                          f"Gap type: {gap.gap_type}\n"
-                          f"Competitor URLs covering this: {gap.competitor_urls[:2]}\n\n"
-                          f"Provide: H1 title, 4 H2 headings, 2 FAQ questions, target word count.\n"
-                          f"Return JSON: {{\"title\":\"...\",\"h2s\":[...],\"faqs\":[...],\"word_count\":0}}"
-                      ),
-                      "stream": False, "options": {"num_predict": 400}},
-                timeout=60
+            from core.ai_config import AIRouter
+            prompt = (
+                f"Write a content brief for this SEO gap keyword: '{gap.keyword}'\n"
+                f"Seed business: {seed}\n"
+                f"Gap type: {gap.gap_type}\n"
+                f"Competitor URLs covering this: {gap.competitor_urls[:2]}\n\n"
+                f"Provide: H1 title, 4 H2 headings, 2 FAQ questions, target word count.\n"
+                f"Return JSON: {{\"title\":\"...\",\"h2s\":[...],\"faqs\":[...],\"word_count\":0}}"
             )
-            if r.ok:
-                text = r.json().get("response","").strip()
+            text = AIRouter._call_ollama(prompt, "You are an SEO content strategist.", 0.1)
+            if text:
                 m = re.search(r'\{.*\}', text, re.DOTALL)
                 if m: return json.loads(m.group(0))
         except Exception as e:

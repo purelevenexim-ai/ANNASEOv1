@@ -54,10 +54,14 @@ export function PhaseStepper({ current, completed, onSelect, flow = null, phaseS
     2: "Generate",
     3: "Validate",
     REVIEW: "Review",
+    VALIDATE: "Validate",
     4: "Score",
     5: "Tree",
     6: "Graph",
     7: "Links",
+    SCORETREE: "Score & Tree",
+    GRAPHLINKS: "Graph & Links",
+    DELIVER: "Deliver",
     8: "Calendar",
     9: "Strategy",
     UNDERSTAND: "Understand",
@@ -67,13 +71,14 @@ export function PhaseStepper({ current, completed, onSelect, flow = null, phaseS
   }
 
   const iconMap = {
-    README: "📖", BI: "🧠", SEARCH: "🔎", REVIEW: "✅",
+    README: "📖", BI: "🧠", SEARCH: "🔎", REVIEW: "✅", VALIDATE: "✅",
+    SCORETREE: "🌳", DELIVER: "🚀",
     UNDERSTAND: "🏢", EXPAND: "🌱", ORGANIZE: "📊", APPLY: "🚀",
   }
 
   const baseFlow = Array.isArray(flow) && flow.length
     ? flow.map(normalizePhaseKey)
-    : [1, "BI", "SEARCH", 2, 3, "REVIEW", 4, 5, 6, 7, 8, 9]
+    : [1, "BI", 2, "VALIDATE", "SCORETREE", "DELIVER"]
 
   // For v2 flows (no numbered phases) skip the README guide step
   const hasNumberedPhases = baseFlow.some((p) => typeof p === "number")
@@ -99,7 +104,11 @@ export function PhaseStepper({ current, completed, onSelect, flow = null, phaseS
         const done = isV2Phase
           ? parsedStatus[String(p.n).toLowerCase()] === "done"
           : (typeof p.n === "number" && completed >= p.n) ||
-            (p.n === "REVIEW" && completed >= 3)
+            (p.n === "REVIEW" && completed >= 3) ||
+            (p.n === "VALIDATE" && completed >= 3) ||
+            (p.n === "SCORETREE" && completed >= 6) ||
+            (p.n === "GRAPHLINKS" && completed >= 7) ||
+            (p.n === "DELIVER" && completed >= 9)
         const active = currentNorm === p.n
         const icon = iconMap[p.n]
         return (
@@ -351,6 +360,27 @@ const LOG_BADGE_BG = {
   error: "#45171e", progress: "#1e2d3a",
 }
 
+// Extended colors per badge label
+const BADGE_LABEL_COLORS = {
+  BROWSER: { bg: "#4a1c4a", fg: "#e879f9" },
+  AI:      { bg: "#3a2c00", fg: "#fcd34d" },
+  TIMING:  { bg: "#0c2a3a", fg: "#7dd3fc" },
+  PHASE:   { bg: "#1e1a4f", fg: "#c7d2fe" },
+  API:     { bg: "#003322", fg: "#6ee7b7" },
+  DATA:    { bg: "#0f2a3f", fg: "#93c5fd" },
+  SUCCESS: { bg: "#1e3a2f", fg: "#86efac" },
+  ERROR:   { bg: "#45171e", fg: "#f38ba8" },
+  WARN:    { bg: "#3a321e", fg: "#fcd34d" },
+  BI:      { bg: "#0f2436", fg: "#38bdf8" },
+  P1:      { bg: "#1e2a1e", fg: "#86efac" },
+}
+
+function _badgeStyle(badge, type) {
+  const s = BADGE_LABEL_COLORS[badge] || BADGE_LABEL_COLORS[type?.toUpperCase()] || null
+  if (s) return { background: s.bg, color: s.fg }
+  return { background: LOG_BADGE_BG[type] || LOG_BADGE_BG.info, color: LOG_COLORS[type] || LOG_COLORS.info }
+}
+
 /**
  * Collapsible debug console. Shows global consoleLogs.
  * Optionally filtered to a specific phase badge.
@@ -403,19 +433,35 @@ export function ConsolePanel({ filterBadge, maxHeight = 240, defaultOpen = false
           ) : (
             logs.map((entry, i) => {
               const type = entry.type || "info"
+              const bs = _badgeStyle(entry.badge, type)
               return (
-                <div key={i} style={{ color: LOG_COLORS[type] || LOG_COLORS.info, display: "flex", gap: 8, marginBottom: 1 }}>
-                  <span style={{ color: "#585b70", flexShrink: 0 }}>{entry.time}</span>
-                  {entry.badge && (
-                    <span style={{
-                      background: LOG_BADGE_BG[type] || LOG_BADGE_BG.info,
-                      color: LOG_COLORS[type] || LOG_COLORS.info,
-                      padding: "0 5px", borderRadius: 3, fontSize: 10, flexShrink: 0,
-                    }}>
-                      {entry.badge}
-                    </span>
+                <div key={i} style={{ color: LOG_COLORS[type] || LOG_COLORS.info, marginBottom: entry.progress != null ? 2 : 0 }}>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <span style={{ color: "#585b70", flexShrink: 0 }}>{entry.time}</span>
+                    {entry.badge && (
+                      <span style={{ ...bs, padding: "0 5px", borderRadius: 3, fontSize: 10, flexShrink: 0 }}>
+                        {entry.badge}
+                      </span>
+                    )}
+                    {entry.ai && (
+                      <span style={{ background: "#3a2c00", color: "#fcd34d", padding: "0 5px", borderRadius: 3, fontSize: 10, flexShrink: 0 }}>
+                        🤖 {entry.ai}
+                      </span>
+                    )}
+                    <span style={{ wordBreak: "break-word" }}>{entry.text}</span>
+                    {entry.progress != null && (
+                      <span style={{ color: "#89b4fa", fontSize: 10, flexShrink: 0, marginLeft: "auto" }}>
+                        {entry.progress}%
+                      </span>
+                    )}
+                  </div>
+                  {entry.progress != null && (
+                    <div style={{ marginLeft: 60, marginBottom: 4 }}>
+                      <div style={{ height: 3, background: "#313244", borderRadius: 2, overflow: "hidden", width: "90%" }}>
+                        <div style={{ width: `${entry.progress}%`, height: "100%", background: "#89b4fa", borderRadius: 2, transition: "width 0.3s ease" }} />
+                      </div>
+                    </div>
                   )}
-                  <span style={{ wordBreak: "break-word" }}>{entry.text}</span>
                 </div>
               )
             })
@@ -433,13 +479,20 @@ export function LiveConsole({ logs, maxHeight = 280 }) {
   const endRef = useRef(null)
   const { clearLogs } = useKw2Store()
   const [filterBadge, setFilterBadge] = useState(null)
+  const [filterType, setFilterType] = useState(null)
   const [open, setOpen] = useState(true)
 
-  const filtered = filterBadge
-    ? logs.filter((l) => l.badge === filterBadge || l.type === "error")
+  const filtered = (filterBadge || filterType)
+    ? logs.filter((l) =>
+        (!filterBadge || l.badge === filterBadge) &&
+        (!filterType || l.type === filterType || (filterType === "error" && l.type === "error"))
+      )
     : logs
   const errorCount = (logs || []).filter((l) => l.type === "error").length
+  const browserErrorCount = (logs || []).filter((l) => l.badge === "BROWSER").length
   const badges = [...new Set((logs || []).map((l) => l.badge).filter(Boolean))]
+  const hasProgress = (logs || []).some(l => l.progress != null)
+  const lastProgress = hasProgress ? [...(logs || [])].reverse().find(l => l.progress != null) : null
 
   useEffect(() => {
     if (open) endRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -449,7 +502,7 @@ export function LiveConsole({ logs, maxHeight = 280 }) {
 
   return (
     <div style={{ marginTop: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 6 }}>
         <button
           onClick={() => setOpen((o) => !o)}
           style={{ background: "none", border: "none", cursor: "pointer", padding: 0, display: "flex", alignItems: "center", gap: 6 }}
@@ -459,6 +512,12 @@ export function LiveConsole({ logs, maxHeight = 280 }) {
           </span>
           <Badge color="green">{filtered.length} events</Badge>
           {errorCount > 0 && <Badge color="red">{errorCount} error{errorCount > 1 ? "s" : ""}</Badge>}
+          {browserErrorCount > 0 && <Badge color="red">🌐 {browserErrorCount} browser</Badge>}
+          {lastProgress != null && lastProgress.progress < 100 && (
+            <span style={{ fontSize: 10, background: "#1e2d3a", color: "#89b4fa", padding: "1px 6px", borderRadius: 3 }}>
+              {lastProgress.progress}% {lastProgress.step || ""}
+            </span>
+          )}
           <span style={{ fontSize: 10, color: "#9ca3af" }}>{open ? "▼" : "▶"}</span>
         </button>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -472,6 +531,16 @@ export function LiveConsole({ logs, maxHeight = 280 }) {
               {badges.map((b) => <option key={b} value={b}>{b}</option>)}
             </select>
           )}
+          <select
+            value={filterType || ""}
+            onChange={(e) => setFilterType(e.target.value || null)}
+            style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, border: "1px solid #d1d5db", background: "#f9fafb" }}
+          >
+            <option value="">All types</option>
+            <option value="error">Errors only</option>
+            <option value="success">Success only</option>
+            <option value="progress">Progress only</option>
+          </select>
           <button
             onClick={clearLogs}
             style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, border: "1px solid #d1d5db", background: "#fff", cursor: "pointer", color: "#6b7280" }}
@@ -491,15 +560,44 @@ export function LiveConsole({ logs, maxHeight = 280 }) {
           ) : (
             filtered.map((entry, i) => {
               const type = entry.type || "info"
+              const bs = _badgeStyle(entry.badge, type)
               return (
-                <div key={i} style={{ color: LOG_COLORS[type] || LOG_COLORS.info, display: "flex", gap: 8 }}>
-                  <span style={{ color: "#585b70", flexShrink: 0 }}>{entry.time}</span>
-                  {entry.badge && (
-                    <span style={{ background: LOG_BADGE_BG[type] || LOG_BADGE_BG.info, color: LOG_COLORS[type] || LOG_COLORS.info, padding: "0 6px", borderRadius: 3, fontSize: 11, flexShrink: 0 }}>
-                      {entry.badge}
-                    </span>
+                <div key={i} style={{ marginBottom: entry.progress != null ? 2 : 0 }}>
+                  <div style={{ color: LOG_COLORS[type] || LOG_COLORS.info, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ color: "#585b70", flexShrink: 0 }}>{entry.time}</span>
+                    {entry.badge && (
+                      <span style={{ ...bs, padding: "0 6px", borderRadius: 3, fontSize: 10, flexShrink: 0 }}>
+                        {entry.badge}
+                      </span>
+                    )}
+                    {entry.ai && (
+                      <span style={{ background: "#3a2c00", color: "#fcd34d", padding: "0 5px", borderRadius: 3, fontSize: 10, flexShrink: 0 }}>
+                        🤖 {entry.ai}
+                      </span>
+                    )}
+                    <span style={{ wordBreak: "break-word", flex: 1 }}>{entry.text}</span>
+                    {entry.step && entry.total && (
+                      <span style={{ color: "#89b4fa", fontSize: 10, flexShrink: 0 }}>
+                        {entry.step}/{entry.total}
+                      </span>
+                    )}
+                    {entry.progress != null && (
+                      <span style={{ color: "#89b4fa", fontSize: 10, flexShrink: 0 }}>
+                        {entry.progress}%
+                      </span>
+                    )}
+                  </div>
+                  {entry.progress != null && (
+                    <div style={{ marginLeft: 60, marginBottom: 3 }}>
+                      <div style={{ height: 3, background: "#313244", borderRadius: 2, overflow: "hidden", width: "88%" }}>
+                        <div style={{
+                          width: `${entry.progress}%`, height: "100%",
+                          background: entry.progress === 100 ? "#a6e3a1" : "#89b4fa",
+                          borderRadius: 2, transition: "width 0.4s ease"
+                        }} />
+                      </div>
+                    </div>
                   )}
-                  <span>{entry.text}</span>
                 </div>
               )
             })
@@ -657,7 +755,17 @@ export function KeywordTable({ keywords, onExplain, maxRows = 50 }) {
           {display.map((kw, i) => (
             <tr key={kw.id || i} style={{ borderBottom: "1px solid #f3f4f6" }}>
               <td style={{ padding: "6px 10px", color: "#9ca3af", fontSize: 11 }}>{i + 1}</td>
-              <td style={{ padding: "6px 10px", fontWeight: 500 }}>{kw.keyword}</td>
+              <td style={{ padding: "6px 10px", fontWeight: 500 }}>
+                {kw.keyword}
+                {kw.spot_check_warning && (
+                  <span title={kw.spot_check_warning}
+                    style={{ marginLeft: 5, padding: "1px 5px", borderRadius: 4,
+                      background: "#fef3c7", color: "#92400e", fontSize: 10,
+                      fontWeight: 700, cursor: "help", border: "1px solid #fde68a" }}>
+                    ⚠ review
+                  </span>
+                )}
+              </td>
               <td style={{ padding: "6px 10px" }}><Badge color="blue">{kw.pillar || "-"}</Badge></td>
               <td style={{ padding: "6px 10px" }}>
                 <Badge color={kw.intent === "purchase" ? "green" : kw.intent === "wholesale" ? "purple" : kw.intent === "commercial" ? "yellow" : "gray"}>

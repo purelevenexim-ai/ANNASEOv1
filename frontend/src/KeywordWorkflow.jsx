@@ -38,10 +38,42 @@ const STAGE_TO_STEP = {
   calendar:  3,
 }
 
-// ─── Breadcrumb ────────────────────────────────────────────────────────────────
-function StepBreadcrumb({ step, maxReached, onNavigate }) {
+// ─── AI Provider config ──────────────────────────────────────────────────────
+const KW_AI_PROVIDERS = [
+  { value: "groq",        label: "⚡ Groq",       desc: "Llama 3.3-70b · fastest" },
+  { value: "gemini_free", label: "💎 Gemini",     desc: "gemini-2.0-flash · free" },
+  { value: "gemini_paid", label: "💎 Gemini Pro", desc: "gemini-pro · paid" },
+  { value: "ollama",      label: "🦙 Local",      desc: "mistral-7b · offline" },
+  { value: "anthropic",   label: "🧠 Claude",     desc: "claude-sonnet" },
+  { value: "openai_paid", label: "🤖 ChatGPT",    desc: "gpt-4o" },
+]
+
+function AiProviderPicker({ value, onChange }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", marginBottom: 24, overflowX: "auto" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, whiteSpace: "nowrap" }}>🤖 AI:</span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          fontSize: 11, padding: "4px 10px", borderRadius: 7,
+          border: `1.5px solid ${T.border}`, background: "#fff",
+          cursor: "pointer", fontWeight: 600, color: T.text, minWidth: 160,
+        }}
+      >
+        {KW_AI_PROVIDERS.map(p => (
+          <option key={p.value} value={p.value}>{p.label} — {p.desc}</option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+// ─── Breadcrumb ────────────────────────────────────────────────────────────────
+function StepBreadcrumb({ step, maxReached, onNavigate, aiProvider, onAiChange }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", marginBottom: 24, overflowX: "auto", gap: 12 }}>
+      <div style={{ flex: 1, display: "flex", alignItems: "center" }}>
       {STEPS.map((s, i) => {
         const done    = s.n < step
         const current = s.n === step
@@ -79,6 +111,10 @@ function StepBreadcrumb({ step, maxReached, onNavigate }) {
           </div>
         )
       })}
+      </div>
+      <div style={{ flexShrink: 0 }}>
+        <AiProviderPicker value={aiProvider} onChange={onAiChange} />
+      </div>
     </div>
   )
 }
@@ -593,6 +629,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
   const [step, setStep]               = useState(1)
   const [maxReached, setMaxReached]   = useState(1)
   const [skipDashboard, setSkipDashboard] = useState(false)
+  const [aiProvider, setAiProvider]   = useState("groq")
 
   // Dashboard check
   const { data: dashData, isLoading: dashLoading } = useQuery({
@@ -682,12 +719,15 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
         step={step}
         maxReached={maxReached}
         onNavigate={navigateTo}
+        aiProvider={aiProvider}
+        onAiChange={setAiProvider}
       />
 
       {step === 1 && (
         <Step1Setup
           projectId={projectId}
           onComplete={handleStep1Done}
+          aiProvider={aiProvider}
         />
       )}
       {step === 2 && (
@@ -695,6 +735,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
           projectId={projectId}
           onComplete={advanceStep}
           onBack={() => setStep(1)}
+          aiProvider={aiProvider}
         />
       )}
       {step === 3 && (
@@ -706,6 +747,7 @@ export default function KeywordWorkflow({ projectId, onGoToCalendar, setPage }) 
             setStep(1)
           }}
           onBack={() => setStep(2)}
+          aiProvider={aiProvider}
         />
       )}
 

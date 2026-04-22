@@ -327,7 +327,7 @@ function PipelineConsole({ logs, running }) {
 }
 
 // ─── Main Component ──────────────────────────────────────────────────────────
-export default function Step3Pipeline({ projectId, onComplete, onBack }) {
+export default function Step3Pipeline({ projectId, onComplete, onBack, aiProvider = "groq" }) {
   const notify = useNotification(s => s.notify)
   const ctx = useWorkflowContext()
 
@@ -372,6 +372,7 @@ export default function Step3Pipeline({ projectId, onComplete, onBack }) {
         selected_pillars: selectedPillars,
         execution_mode: executionMode,
         max_phase: "P14",
+        preferred_provider: aiProvider,
       })
 
       const newRuns = (res.runs || []).map(r => ({ ...r, status: "queued" }))

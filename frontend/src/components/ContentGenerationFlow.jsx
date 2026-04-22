@@ -22,8 +22,10 @@ const STEPS = [
   { num: 6, name: "Writing", icon: "✍️", desc: "Draft content" },
   { num: 7, name: "AI Review", icon: "🤖", desc: "Review quality" },
   { num: 8, name: "Issue Check", icon: "⚠️", desc: "Identify issues" },
-  { num: 9, name: "Redevelop", icon: "🔨", desc: "Fix issues" },
-  { num: 10, name: "Final Polish", icon: "⭐", desc: "Final review" },
+  { num: 9, name: "Humanize", icon: "✨", desc: "Human voice" },
+  { num: 10, name: "Score", icon: "📊", desc: "Quality scoring" },
+  { num: 11, name: "Quality Loop", icon: "🔄", desc: "Iterate fixes" },
+  { num: 12, name: "Redevelop", icon: "🚀", desc: "Final polish" },
 ]
 
 function ContentGenerationFlow({ projectId, keyword, onComplete }) {

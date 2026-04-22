@@ -1,5 +1,5 @@
 """
-73-rule content quality checker across 14 pillars (237 pts total),
+74-rule content quality checker across 15 pillars (202 pts total),
 normalised to a 0-100 percentage in the output.
 
 Pillars 1-9:   Original 46 rules (136 pts)
@@ -8,11 +8,16 @@ Pillar 11:     AI Humanization (12 pts, R54-R59)
 Pillar 12:     Semantic Depth (12 pts, R60-R64)
 Pillar 13:     Customer Context (12 pts, R65-R69)
 Pillar 14:     Snippet Optimization (10 pts, R70-R73)
+Pillar 15:     Numeric Consistency (5 pts, R74)
 
 Provides check_all_rules() used by content_scorer.py and the generation engine.
 """
 import re
+import logging
 from collections import Counter
+from typing import Dict, Optional
+
+log = logging.getLogger("annaseo.quality")
 
 
 def check_all_rules(
@@ -28,6 +33,7 @@ def check_all_rules(
     target_locations: str = "",
     target_audience: str = "",
     customer_url: str = "",
+    quality_profile: Optional[Dict] = None,
 ) -> dict:
     """
     Run quality rules on HTML content.
@@ -77,32 +83,85 @@ def check_all_rules(
     has_faq = bool(re.search(r"frequently asked|<h2[^>]*>.*?faq.*?</h2>", body_html, re.I))
     external_a = len(re.findall(r'href="http', body_html))
     internal_a = len(re.findall(r'href="/', body_html))
+    # Also count absolute links to customer's own domain as internal
+    if customer_url:
+        _cu = customer_url.replace("https://", "").replace("http://", "").replace("www.", "").rstrip("/")
+        if _cu:
+            abs_internal = len(re.findall(r'href="https?://(?:www\.)?' + re.escape(_cu), body_html, re.I))
+            internal_a += abs_internal
+            external_a -= abs_internal  # don't double-count as external
+            external_a = max(external_a, 0)
     wiki_links = len(re.findall(r"wikipedia\.org", body_html, re.I))
 
     sentences = re.split(r"[.!?]+", text)
     sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
     sent_count = max(len(sentences), 1)
 
-    first_p = re.search(r"<p[^>]*>(.*?)</p>", body_html, re.I | re.DOTALL)
+    first_p = None
+    for _fp_match in re.finditer(r"<p[^>]*>(.*?)</p>", body_html, re.I | re.DOTALL):
+        _fp_text = re.sub(r"<[^>]+>", "", _fp_match.group(1)).strip()
+        if len(_fp_text.split()) >= 25:
+            first_p = _fp_match
+            break
     first_p_text = re.sub(r"<[^>]+>", "", first_p.group(1)).strip() if first_p else ""
     first_p_words = len(first_p_text.split())
     first_p_has_kw = any(w in first_p_text.lower() for w in kw_lower.split() if len(w) > 3) if kw_lower else True
 
     kw_count = text_lower.count(kw_lower) if kw_lower else 0
+    kw_word_len = len(kw_lower.split()) if kw_lower else 1
+    # Density = (occurrences × words-in-phrase) / total-words × 100
+    # For multi-word keywords, count each occurrence as occupying kw_word_len words
+    # but apply a fairness floor: treat the density as if the phrase were 1 word
+    # so "best black pepper" appearing 8× in 2000 words = 8/2000 × 100 = 0.4%
+    # raw density = 8×3/2000 = 1.2%, fair density = max(raw/kw_word_len, raw×0.6)
+    raw_density = (kw_count * kw_word_len / word_count * 100) if (word_count > 0 and kw_lower) else 0.0
+    # For scoring purposes, use per-phrase density (treats phrase as single unit)
     kw_density = (kw_count / word_count * 100) if (word_count > 0 and kw_lower) else 0.0
+    # But for display/normalization pass the raw density
+    kw_density_raw = raw_density
+
+    # ── Runtime quality profile (blueprint-aligned thresholds) ───────────────
+    qp = quality_profile or {}
+
+    wc_cfg = qp.get("word_count", {}) if isinstance(qp, dict) else {}
+    wc_target = int(wc_cfg.get("target", 2200) or 2200)
+    wc_soft_min = int(wc_cfg.get("soft_min", 1800) or 1800)
+    wc_hard_min = int(wc_cfg.get("hard_min", 2000) or 2000)
+
+    struct_cfg = qp.get("structure", {}) if isinstance(qp, dict) else {}
+    h2_min_req = int(struct_cfg.get("h2_min", 6) or 6)
+    h3_min_req = int(struct_cfg.get("h3_min", 4) or 4)
+    faq_required = bool(struct_cfg.get("faq_required", True))
+
+    link_cfg = qp.get("links", {}) if isinstance(qp, dict) else {}
+    internal_min_req = int(link_cfg.get("internal_min", 4) or 4)
+    external_min_req = int(link_cfg.get("external_min", 3) or 3)
+    wikipedia_min_req = int(link_cfg.get("wikipedia_min", 1) or 1)
+
+    kd_cfg = qp.get("keyword_density", {}) if isinstance(qp, dict) else {}
+    kw_min_req = float(kd_cfg.get("min", 1.0) or 1.0)
+    kw_max_req = float(kd_cfg.get("max", 3.0) or 3.0)
+    kw_max_req = max(kw_max_req, kw_min_req + 0.25)
+
+    elem_cfg = qp.get("elements", {}) if isinstance(qp, dict) else {}
+    table_required = bool(elem_cfg.get("table_required", True))
+    lists_required = bool(elem_cfg.get("lists_required", True))
+    cta_required = bool(elem_cfg.get("cta_required", True))
+    buyer_intent_required = bool(elem_cfg.get("buyer_intent_required", False))
 
     # ── PILLAR 1: Content Quality (15 pts) ───────────────────────────────────
     cq = 0
 
-    if word_count >= 2200:
-        cq += rule("R01", "Word Count ≥ 2200", "content_quality", 5, 5, True)
-    elif word_count >= 1800:
-        cq += rule("R01", "Word Count ≥ 2200", "content_quality", 3, 5, False,
-                   "high", f"Article {word_count} words — target 2200+",
+    r01_name = f"Word Count ≥ {wc_target}"
+    if word_count >= wc_target:
+        cq += rule("R01", r01_name, "content_quality", 5, 5, True)
+    elif word_count >= wc_soft_min:
+        cq += rule("R01", r01_name, "content_quality", 3, 5, False,
+                   "high", f"Article {word_count} words — target {wc_target}+",
                    "Expand content with more detail and examples")
     else:
-        cq += rule("R01", "Word Count ≥ 2200", "content_quality", 0, 5, False,
-                   "critical", f"Article too short: {word_count} words (need 2000+)",
+        cq += rule("R01", r01_name, "content_quality", 0, 5, False,
+                   "critical", f"Article too short: {word_count} words (need {wc_hard_min}+)",
                    "Expand content with more detail, examples, and analysis")
 
     p_count = len(re.findall(r"<p", body_html, re.I))
@@ -116,25 +175,29 @@ def check_all_rules(
                    "high", f"Only {p_count} paragraphs — content feels sparse",
                    "Add more paragraphs with specific details and examples")
 
-    if h2_count >= 6 and h3_count >= 4:
+    if h2_count >= h2_min_req and h3_count >= h3_min_req:
         cq += rule("R03", "Heading Structure (H2+H3)", "content_quality", 4, 4, True)
-    elif h2_count >= 4:
+    elif h2_count >= max(2, h2_min_req - 2):
         cq += rule("R03", "Heading Structure (H2+H3)", "content_quality", 2, 4, False,
                    "high", f"Only {h2_count} H2 and {h3_count} H3 sections",
-                   "Add 6-8 H2 headings with 2-3 H3 sub-sections each")
+                   f"Add {h2_min_req}+ H2 headings and {h3_min_req}+ H3 sub-sections")
     else:
         cq += rule("R03", "Heading Structure (H2+H3)", "content_quality", 0, 4, False,
-                   "high", f"Only {h2_count} H2 headings — need 6+",
-                   "Add 6-8 H2 headings with 2-3 H3 sub-sections each")
+                   "high", f"Only {h2_count} H2 headings — need {h2_min_req}+",
+                   f"Add {h2_min_req}+ H2 headings and {h3_min_req}+ H3 sub-sections")
 
-    if has_table:
+    if not table_required:
+        cq += rule("R04", "Comparison Table Present", "content_quality", 2, 2, True)
+    elif has_table:
         cq += rule("R04", "Comparison Table Present", "content_quality", 2, 2, True)
     else:
         cq += rule("R04", "Comparison Table Present", "content_quality", 0, 2, False,
                    "medium", "No comparison table found",
                    "Add a table for data comparison, pricing, or feature breakdown")
 
-    if has_ul or has_ol:
+    if not lists_required:
+        cq += rule("R05", "Lists Present (UL/OL)", "content_quality", 1, 1, True)
+    elif has_ul or has_ol:
         cq += rule("R05", "Lists Present (UL/OL)", "content_quality", 1, 1, True)
     else:
         cq += rule("R05", "Lists Present (UL/OL)", "content_quality", 0, 1, False,
@@ -144,20 +207,21 @@ def check_all_rules(
     # ── PILLAR 2: SEO / Keywords (20 pts) ────────────────────────────────────
     seo = 0
 
-    if 1.0 <= kw_density <= 3.0:
-        seo += rule("R06", "Keyword Density 1-3%", "seo", 6, 6, True)
-    elif 0.5 <= kw_density < 1.0:
-        seo += rule("R06", "Keyword Density 1-3%", "seo", 3, 6, False,
-                    "high", f"Keyword density {kw_density:.1f}% — too low (target 1.5-2.5%)",
+    r06_name = f"Keyword Density {kw_min_req:.1f}-{kw_max_req:.1f}%"
+    if kw_min_req <= kw_density <= kw_max_req:
+        seo += rule("R06", r06_name, "seo", 6, 6, True)
+    elif max(0.4, kw_min_req - 0.5) <= kw_density < kw_min_req:
+        seo += rule("R06", r06_name, "seo", 3, 6, False,
+                    "high", f"Keyword density {kw_density:.1f}% — too low (target {kw_min_req:.1f}-{kw_max_req:.1f}%)",
                     f"Add '{keyword}' more naturally in paragraphs")
-    elif kw_density > 3.0:
-        seo += rule("R06", "Keyword Density 1-3%", "seo", 0, 6, False,
+    elif kw_density > kw_max_req:
+        seo += rule("R06", r06_name, "seo", 0, 6, False,
                     "critical", f"Keyword density {kw_density:.1f}% — KEYWORD STUFFING detected",
                     "Remove forced repetitions, use synonyms and semantic variations")
     else:
-        seo += rule("R06", "Keyword Density 1-3%", "seo", 0, 6, False,
+        seo += rule("R06", r06_name, "seo", 0, 6, False,
                     "critical", f"Keyword density {kw_density:.1f}% — keyword barely present",
-                    f"Add '{keyword}' naturally throughout the article (target 1.5-2.5%)")
+                    f"Add '{keyword}' naturally throughout the article (target {kw_min_req:.1f}-{kw_max_req:.1f}%)")
 
     first_100 = " ".join(words[:100]).lower()
     if kw_lower and kw_lower in first_100:
@@ -212,24 +276,28 @@ def check_all_rules(
     # ── PILLAR 3: Structure & HTML (10 pts) ──────────────────────────────────
     struct = 0
 
-    if has_faq:
+    if not faq_required:
+        struct += rule("R12", "FAQ Section Present", "structure", 3, 3, True)
+    elif has_faq:
         struct += rule("R12", "FAQ Section Present", "structure", 3, 3, True)
     else:
         struct += rule("R12", "FAQ Section Present", "structure", 0, 3, False,
                        "high", "Missing FAQ section",
                        "Add FAQ section with 5-6 specific Q&As for featured snippets")
 
-    if h2_count >= 5:
-        struct += rule("R13", "H2 Count ≥ 5", "structure", 2, 2, True)
+    r13_name = f"H2 Count ≥ {h2_min_req}"
+    if h2_count >= h2_min_req:
+        struct += rule("R13", r13_name, "structure", 2, 2, True)
     else:
-        struct += rule("R13", "H2 Count ≥ 5", "structure", 0, 2, False,
-                       "medium", f"Only {h2_count} H2 headings (target 5+)", "Add more H2 sections")
+        struct += rule("R13", r13_name, "structure", 0, 2, False,
+                       "medium", f"Only {h2_count} H2 headings (target {h2_min_req}+)", "Add more H2 sections")
 
-    if h3_count >= 4:
-        struct += rule("R14", "H3 Count ≥ 4", "structure", 2, 2, True)
+    r14_name = f"H3 Count ≥ {h3_min_req}"
+    if h3_count >= h3_min_req:
+        struct += rule("R14", r14_name, "structure", 2, 2, True)
     else:
-        struct += rule("R14", "H3 Count ≥ 4", "structure", 0, 2, False,
-                       "medium", f"Only {h3_count} H3 sub-headings (target 4+)",
+        struct += rule("R14", r14_name, "structure", 0, 2, False,
+                       "medium", f"Only {h3_count} H3 sub-headings (target {h3_min_req}+)",
                        "Add H3 sub-sections within H2s")
 
     if first_p_words >= 30 and first_p_has_kw:
@@ -266,20 +334,64 @@ def check_all_rules(
     try:
         import textstat
         flesch = textstat.flesch_reading_ease(text[:5000])
-        if 50 <= flesch <= 75:
-            read += rule("R18", "Flesch Reading Ease 50-75", "readability", 4, 4, True)
-        elif 40 <= flesch < 50 or 75 < flesch <= 85:
-            read += rule("R18", "Flesch Reading Ease 50-75", "readability", 2, 4, False,
-                         "medium", f"Flesch Reading Ease {flesch:.0f} (target 50-75)",
-                         "Adjust sentence complexity for professional readability")
+
+        # ── Adaptive Flesch target based on content type ─────────────────
+        # Technical/educational content (scientific names, specialty products)
+        # naturally scores lower due to required vocabulary. Adjust expectations.
+        kw_l = (keyword or "").lower()
+        title_l = (title or "").lower()
+        combined = f"{kw_l} {title_l} {text_lower[:2000]}"
+
+        # Detect content type from keyword/title/intro
+        is_technical = any(t in combined for t in [
+            "scientific", "compound", "chemical", "molecular", "biology",
+            "cinnamomum", "verum", "extract", "essential oil", "anatomy",
+            "biochemistry", "pharmac", "clinical", "medical research"
+        ])
+        is_commercial = any(t in kw_l for t in [
+            "buy", "shop", "price", "cheap", "best", "top", "review",
+            "vs ", " vs", "compare", "discount", "deal"
+        ])
+        # Informational has "what/why/how/guide/benefits" or no commercial signals
+        is_informational = any(t in combined for t in [
+            "what is", "what are", "how to", "why ", "guide", "benefits",
+            "history", "origin", "tradition", "uses of"
+        ]) or (not is_commercial and not is_technical)
+
+        # Pick target range
+        if is_technical:
+            f_low, f_high = 30, 50
+            range_label = "30-50 (technical)"
+        elif is_commercial and not is_informational:
+            f_low, f_high = 55, 75
+            range_label = "55-75 (commercial)"
         else:
-            read += rule("R18", "Flesch Reading Ease 50-75", "readability", 0, 4, False,
+            f_low, f_high = 40, 60
+            range_label = "40-60 (informational)"
+
+        # Tolerance band (half-credit zone)
+        tol = 10
+        f_tol_low = max(0, f_low - tol)
+        f_tol_high = min(100, f_high + tol)
+
+        rule_name = f"Flesch Reading Ease {range_label}"
+        if f_low <= flesch <= f_high:
+            read += rule("R18", rule_name, "readability", 4, 4, True)
+        elif f_tol_low <= flesch < f_low or f_high < flesch <= f_tol_high:
+            read += rule("R18", rule_name, "readability", 2, 4, False,
+                         "medium", f"Flesch Reading Ease {flesch:.0f} (target {f_low}-{f_high})",
+                         "Adjust sentence complexity for the content type")
+        else:
+            direction = "too difficult" if flesch < f_low else "too casual"
+            read += rule("R18", rule_name, "readability", 0, 4, False,
                          "medium",
-                         f"Flesch Reading Ease {flesch:.0f} — "
-                         f"{'too difficult' if flesch < 50 else 'too casual'} (target 50-75)",
+                         f"Flesch Reading Ease {flesch:.0f} — {direction} (target {f_low}-{f_high})",
                          "Adjust sentence complexity")
     except Exception:
-        read += rule("R18", "Flesch Reading Ease 50-75", "readability", 2, 4, True)
+        log.warning("textstat not available or error — Flesch score defaulting to 0/4")
+        read += rule("R18", "Flesch Reading Ease 50-75", "readability", 0, 4, False,
+                     "medium", "Flesch score unavailable (textstat missing/error)",
+                     "Install textstat: pip install textstat")
 
     sen_starts = [" ".join(s.split()[:2]).lower() for s in sentences if s.split()]
     start_freq = Counter(sen_starts).most_common(3)
@@ -301,9 +413,11 @@ def check_all_rules(
     # ── PILLAR 5: E-E-A-T (15 pts) ───────────────────────────────────────────
     eeat = 0
 
-    eeat_signals = ["according to", "research shows", "study found", "study published",
-                    "experts say", "data shows", "evidence suggests", "published in",
-                    "scientific", "peer-reviewed", "clinical trial", "%"]
+    eeat_signals = ["according to", "published in", "study found", "study published",
+                    "scientific", "peer-reviewed", "clinical trial", "%",
+                    "university", "institute", "foundation", "journal",
+                    "guidelines", "fda", "usda", "who ", "cdc",
+                    "a 20", "et al"]
     eeat_hits = sum(1 for s in eeat_signals if s in text_lower)
     if eeat_hits >= 5:
         eeat += rule("R20", "Authority Signals (5+)", "eeat", 5, 5, True)
@@ -329,20 +443,23 @@ def check_all_rules(
                      "high", f"Only {specific_data} specific data points (numbers, stats, measurements)",
                      "Add specific percentages, dates, measurements — e.g. '2000% increase in absorption'")
 
-    if external_a >= 3:
-        eeat += rule("R22", "External Authority Links (3+)", "eeat", 3, 3, True)
+    r22_name = f"External Authority Links ({external_min_req}+)"
+    if external_a >= external_min_req:
+        eeat += rule("R22", r22_name, "eeat", 3, 3, True)
     elif external_a >= 1:
-        eeat += rule("R22", "External Authority Links (3+)", "eeat", 1, 3, False,
-                     "medium", f"Only {external_a} external links (target 3+)",
+        eeat += rule("R22", r22_name, "eeat", 1, 3, False,
+                     "medium", f"Only {external_a} external links (target {external_min_req}+)",
                      "Link to PubMed, Wikipedia, .gov/.edu sources")
     else:
-        eeat += rule("R22", "External Authority Links (3+)", "eeat", 0, 3, False,
+        eeat += rule("R22", r22_name, "eeat", 0, 3, False,
                      "high", "No external/reference links to authoritative sources",
                      "Add links to PubMed, Wikipedia, .gov/.edu sources for credibility")
 
     cta_words = ["buy", "shop", "order", "contact", "get started", "learn more", "discover", "try"]
     has_cta = any(w in text_lower[-500:] for w in cta_words)
-    if has_cta:
+    if not cta_required:
+        eeat += rule("R23", "Call-to-Action in Conclusion", "eeat", 3, 3, True)
+    elif has_cta:
         eeat += rule("R23", "Call-to-Action in Conclusion", "eeat", 3, 3, True)
     else:
         eeat += rule("R23", "Call-to-Action in Conclusion", "eeat", 0, 3, False,
@@ -352,32 +469,35 @@ def check_all_rules(
     # ── PILLAR 6: Links (10 pts) ─────────────────────────────────────────────
     links = 0
 
-    if internal_a >= 4:
-        links += rule("R24", "Internal Links (4+)", "links", 5, 5, True)
+    r24_name = f"Internal Links ({internal_min_req}+)"
+    if internal_a >= internal_min_req:
+        links += rule("R24", r24_name, "links", 5, 5, True)
     elif internal_a >= 2:
-        links += rule("R24", "Internal Links (4+)", "links", 3, 5, False,
-                      "high", f"Only {internal_a} internal links (target 4+)",
+        links += rule("R24", r24_name, "links", 3, 5, False,
+                      "high", f"Only {internal_a} internal links (target {internal_min_req}+)",
                       "Add internal links to related articles and category pages")
     else:
-        links += rule("R24", "Internal Links (4+)", "links", 0, 5, False,
+        links += rule("R24", r24_name, "links", 0, 5, False,
                       "high", f"Only {internal_a} internal links (need 3-5)",
                       "Add internal links to product pages, related articles, and category pages")
 
-    if external_a >= 3:
-        links += rule("R25", "External Links (3+)", "links", 3, 3, True)
+    r25_name = f"External Links ({external_min_req}+)"
+    if external_a >= external_min_req:
+        links += rule("R25", r25_name, "links", 3, 3, True)
     elif external_a >= 1:
-        links += rule("R25", "External Links (3+)", "links", 1, 3, False,
-                      "medium", f"Only {external_a} external links (target 3+)",
+        links += rule("R25", r25_name, "links", 1, 3, False,
+                      "medium", f"Only {external_a} external links (target {external_min_req}+)",
                       "Add 2-3 authoritative external links")
     else:
-        links += rule("R25", "External Links (3+)", "links", 0, 3, False,
+        links += rule("R25", r25_name, "links", 0, 3, False,
                       "medium", f"Only {external_a} external links",
                       "Add 2-3 authoritative external links (Wikipedia, studies, .gov)")
 
-    if wiki_links >= 1:
-        links += rule("R26", "Wikipedia Reference", "links", 2, 2, True)
+    r26_name = f"Wikipedia Reference ({wikipedia_min_req}+)"
+    if wiki_links >= wikipedia_min_req:
+        links += rule("R26", r26_name, "links", 2, 2, True)
     else:
-        links += rule("R26", "Wikipedia Reference", "links", 0, 2, False,
+        links += rule("R26", r26_name, "links", 0, 2, False,
                       "low", "No Wikipedia reference",
                       "Add at least one Wikipedia citation for credibility")
 
@@ -391,14 +511,18 @@ def check_all_rules(
                     "high", "Opening paragraph isn't a concise extractable definition",
                     "Start with a clear 2-sentence definition/answer that AI engines can extract")
 
-    if has_faq:
+    if not faq_required:
+        aeo += rule("R28", "FAQ Section for AEO", "aeo", 3, 3, True)
+    elif has_faq:
         aeo += rule("R28", "FAQ Section for AEO", "aeo", 3, 3, True)
     else:
         aeo += rule("R28", "FAQ Section for AEO", "aeo", 0, 3, False,
                     "high", "Missing FAQ — reduces AEO/featured snippet potential",
                     "Add FAQ section with direct question-answer format")
 
-    if has_ul or has_ol:
+    if not lists_required:
+        aeo += rule("R29", "Scannable Lists for AI", "aeo", 2, 2, True)
+    elif has_ul or has_ol:
         aeo += rule("R29", "Scannable Lists for AI", "aeo", 2, 2, True)
     else:
         aeo += rule("R29", "Scannable Lists for AI", "aeo", 0, 2, False,
@@ -529,14 +653,53 @@ def check_all_rules(
     # Use regex patterns for common entity-like phrases
     entity_patterns = [
         r"\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)+\b",  # Multi-word proper nouns (Title Case)
+        r"\b[A-Z][a-z]{2,}\b",                   # Single-word proper nouns (3+ chars)
     ]
+    # Common false positives to exclude (sentence starters, generic words)
+    _entity_stopwords = {
+        "the", "this", "that", "these", "those", "here", "there", "when", "where",
+        "what", "which", "while", "with", "without", "would", "could", "should",
+        "have", "has", "had", "been", "being", "are", "were", "was", "also",
+        "however", "although", "because", "therefore", "moreover", "furthermore",
+        "additionally", "finally", "first", "second", "third", "next", "then",
+        "each", "every", "many", "some", "most", "other", "another", "such",
+        "like", "just", "only", "even", "still", "already", "always", "never",
+        "often", "sometimes", "usually", "typically", "generally", "essentially",
+        "particularly", "especially", "really", "actually", "certainly", "definitely",
+        "simply", "truly", "indeed", "perhaps", "maybe", "probably", "possibly",
+        "clearly", "obviously", "apparently", "understand", "understanding",
+        "whether", "either", "neither", "both", "all", "any", "few", "several",
+        "much", "more", "less", "very", "too", "quite", "rather", "fairly",
+        "how", "why", "for", "but", "and", "not", "yet", "nor",
+        "from", "into", "onto", "upon", "about", "above", "below", "between",
+        "through", "during", "before", "after", "since", "until",
+        "our", "your", "their", "its", "his", "her",
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "don", "doesn", "didn", "won", "wouldn", "couldn", "shouldn",
+        "key", "top", "best", "new", "old", "good", "great", "high", "low",
+        "look", "make", "take", "give", "keep", "let", "get", "set", "put",
+        "read", "find", "know", "think", "see", "come", "want", "need", "use",
+        "try", "ask", "work", "seem", "feel", "leave", "call", "start", "run",
+        "advantages", "disadvantages", "benefits", "drawbacks", "features",
+        "conclusion", "introduction", "overview", "summary", "section",
+        "table", "figure", "image", "list", "step", "tip", "note", "example",
+        "pros", "cons", "faq", "frequently", "asked", "questions",
+    }
     entities_found = set()
     for ep in entity_patterns:
         for m in re.finditer(ep, text):
             ent = m.group().strip()
-            # Skip common false positives (sentence starts after period aren't entities)
-            if len(ent.split()) >= 2 and len(ent) > 5:
-                entities_found.add(ent.lower())
+            ent_lower = ent.lower()
+            # Skip stopwords and very short entities
+            if ent_lower in _entity_stopwords or len(ent) < 3:
+                continue
+            # Skip keyword words themselves
+            if ent_lower in kw_lower.split():
+                continue
+            # For single-word matches, require 4+ chars
+            if len(ent.split()) < 2 and len(ent) < 4:
+                continue
+            entities_found.add(ent_lower)
     entity_count = len(entities_found)
     if entity_count >= 8:
         ci += rule("R37", "Entity Richness (8+)", "content_intelligence", 3, 3, True)
@@ -583,7 +746,9 @@ def check_all_rules(
             if cols >= 3:
                 table_quality_ok = True
                 break
-    if table_quality_ok:
+    if not table_required:
+        ci += rule("R39", "Quality Comparison Table (3×3+)", "content_intelligence", 2, 2, True)
+    elif table_quality_ok:
         ci += rule("R39", "Quality Comparison Table (3×3+)", "content_intelligence", 2, 2, True)
     else:
         ci += rule("R39", "Quality Comparison Table (3×3+)", "content_intelligence", 0, 2, False,
@@ -598,7 +763,9 @@ def check_all_rules(
         "beginner vs", "budget vs", "premium vs",
     ]
     buyer_hits = sum(1 for s in buyer_signals if s in text_lower)
-    if buyer_hits >= 1:
+    if not buyer_intent_required:
+        ci += rule("R40", "Buyer Intent Section", "content_intelligence", 3, 3, True)
+    elif buyer_hits >= 1:
         ci += rule("R40", "Buyer Intent Section", "content_intelligence", 3, 3, True)
     else:
         ci += rule("R40", "Buyer Intent Section", "content_intelligence", 0, 3, False,
@@ -709,7 +876,9 @@ def check_all_rules(
         r"(?:<h2[^>]*>.*?(?:faq|frequently asked).*?</h2>)(.*?)(?=<h2|$)",
         body_html, re.I | re.DOTALL,
     )
-    if faq_section:
+    if not faq_required:
+        ci += rule("R46", "FAQ Answer Quality (25-80w avg)", "content_intelligence", 2, 2, True)
+    elif faq_section:
         faq_body = faq_section.group(1)
         faq_answers = re.findall(r"<p[^>]*>(.*?)</p>", faq_body, re.I | re.DOTALL)
         if faq_answers:
@@ -738,7 +907,9 @@ def check_all_rules(
         "is it worth", "recommended for", "not recommended for", "ideal for",
     ]
     decision_found = sum(1 for p in decision_phrases if p in text_lower)
-    if decision_found >= 1:
+    if not buyer_intent_required:
+        conv += rule("R47", "Decision / Buyer Guidance Section", "conversion", 3, 3, True)
+    elif decision_found >= 1:
         conv += rule("R47", "Decision / Buyer Guidance Section", "conversion", 3, 3, True)
     else:
         conv += rule("R47", "Decision / Buyer Guidance Section", "conversion", 0, 3, False,
@@ -750,7 +921,9 @@ def check_all_rules(
         r"pros?\s*(and|&|vs)\s*cons?|advantages?\s*(and|&)\s*disadvantages?|benefits?\s*(and|&)\s*drawbacks?",
         text_lower
     ))
-    if has_pros_cons:
+    if not buyer_intent_required:
+        conv += rule("R48", "Pros & Cons Section", "conversion", 2, 2, True)
+    elif has_pros_cons:
         conv += rule("R48", "Pros & Cons Section", "conversion", 2, 2, True)
     else:
         conv += rule("R48", "Pros & Cons Section", "conversion", 0, 2, False,
@@ -819,7 +992,9 @@ def check_all_rules(
     second_half = text_lower[mid_point:]
     has_mid_cta = any(c in first_half for c in cta_words)
     has_end_cta = any(c in second_half[-800:] for c in cta_words)
-    if has_mid_cta and has_end_cta:
+    if not cta_required:
+        conv += rule("R52", "CTA Placement (mid + end)", "conversion", 2, 2, True)
+    elif has_mid_cta and has_end_cta:
         conv += rule("R52", "CTA Placement (mid + end)", "conversion", 2, 2, True)
     elif has_mid_cta or has_end_cta:
         conv += rule("R52", "CTA Placement (mid + end)", "conversion", 1, 2, False,
@@ -840,7 +1015,9 @@ def check_all_rules(
         if rows >= 3 and any(p in t_lower for p in ["vs", "compare", "price", "feature", "best", "rating", "score"]):
             has_decision_table = True
             break
-    if has_decision_table:
+    if not buyer_intent_required:
+        conv += rule("R53", "Comparison Table for Decisions", "conversion", 2, 2, True)
+    elif has_decision_table:
         conv += rule("R53", "Comparison Table for Decisions", "conversion", 2, 2, True)
     else:
         conv += rule("R53", "Comparison Table for Decisions", "conversion", 0, 2, False,
@@ -1164,17 +1341,17 @@ def check_all_rules(
     # ── PILLAR 14: Snippet Optimization (10 pts) ─────────────────────────────
     snip = 0
 
-    # R70: Definition block in first 200 words (3 pts)
-    first_200 = " ".join(words[:200]).lower() if word_count >= 50 else text_lower
+    # R70: Definition block in first 400 words (3 pts)
+    first_400 = " ".join(words[:400]).lower() if word_count >= 50 else text_lower
     has_definition = bool(re.search(
-        r"\b(is a|are a|refers to|defined as|means|describes)\b", first_200
+        r"\b(is a|are a|refers to|defined as|means|describes|can be described as|is the process of|involves)\b", first_400
     ))
     if has_definition:
-        snip += rule("R70", "Definition Block in First 200 Words", "snippet_optimization", 3, 3, True)
+        snip += rule("R70", "Definition Block in First 400 Words", "snippet_optimization", 3, 3, True)
     else:
-        snip += rule("R70", "Definition Block in First 200 Words", "snippet_optimization", 0, 3, False,
+        snip += rule("R70", "Definition Block in First 400 Words", "snippet_optimization", 0, 3, False,
                      "high", "No clear definition in the opening section",
-                     "Add a 40-60 word direct definition/answer in the first 200 words")
+                     "Add a 40-60 word direct definition/answer in the first 400 words")
 
     # R71: Step-by-step list for how-to content (2 pts)
     has_steps = bool(re.search(r"<ol|step\s+\d|step\s+one|first.*second.*third", body_html.lower()))
@@ -1196,8 +1373,9 @@ def check_all_rules(
                      "Add a comparison <table> — Google extracts these as featured snippets")
 
     # R73: Concise answer paragraphs after question headings (3 pts)
+    # Match H2 with ? (allowing nested tags like <p>, <strong> inside the H2)
     question_h2s = re.findall(
-        r"<h2[^>]*>[^<]*\?[^<]*</h2>\s*<p[^>]*>(.*?)</p>",
+        r"<h2[^>]*>(?:(?!</h2>).)*\?(?:(?!</h2>).)*</h2>\s*<p[^>]*>(.*?)</p>",
         body_html, re.I | re.DOTALL,
     )
     good_answers = 0
@@ -1217,9 +1395,55 @@ def check_all_rules(
                      "medium", "No snippet-ready answers found after question headings",
                      "Follow question H2s with a 30-70 word direct answer paragraph")
 
+    # ── PILLAR 15: Numeric Consistency (5 pts) ───────────────────────────────
+    nc = 0
+
+    def _extract_numeric_vals(txt):
+        """Return list of float values from price/rate patterns in text."""
+        hits = []
+        for pat in (
+            r"(?:₹|INR\s*|Rs\.?\s*)[\s]*([\d,]+(?:\.\d+)?)",
+            r"\$([\d,]+(?:\.\d+)?)",
+            r"([\d,]+(?:\.\d+)?)\s*/\s*(?:kg|tonne|MT|quintal|lb|unit)",
+        ):
+            for m in re.finditer(pat, txt, re.I):
+                raw = m.group(1).replace(",", "")
+                try:
+                    hits.append(float(raw))
+                except ValueError:
+                    pass
+        return hits
+
+    # R74: Cross-section numeric consistency (5 pts)
+    _num_vals = _extract_numeric_vals(text)
+    _nc_pass = True
+    _nc_issue_msg = ""
+    if len(_num_vals) >= 4:
+        _nv_min = min(_num_vals)
+        _nv_max = max(_num_vals)
+        if _nv_min > 0 and _nv_max / _nv_min > 3.0:
+            _tier_count = len(re.findall(
+                r"\b(?:grade|quality|variant|tier|premium|standard|ordinary|bold|small|large)\b",
+                text, re.I
+            ))
+            if _tier_count < 2:
+                _nc_pass = False
+                _ratio = round(_nv_max / _nv_min, 1)
+                _nc_issue_msg = (
+                    f"Numeric contradiction: figures range from "
+                    f"{_nv_min:,.0f} to {_nv_max:,.0f} ({_ratio}×) with no explicit grade/tier labels"
+                )
+    if _nc_pass:
+        nc += rule("R74", "Numeric Consistency", "numeric_consistency", 5, 5, True)
+    else:
+        nc += rule("R74", "Numeric Consistency", "numeric_consistency", 0, 5, False,
+                   "high", _nc_issue_msg,
+                   "Ensure price/quantity figures are consistent across sections, or label each "
+                   "with an explicit grade qualifier (e.g. 'Grade A: ₹4,500/kg vs Grade B: ₹1,850/kg')")
+
     # ── Totals ───────────────────────────────────────────────────────────────
-    total_earned = cq + seo + struct + read + eeat + links + aeo + lang + ci + conv + human + semdeep + ctx + snip
-    max_possible = 237  # 15+20+10+15+15+10+10+5+36 + 15+12+12+12+10
+    total_earned = cq + seo + struct + read + eeat + links + aeo + lang + ci + conv + human + semdeep + ctx + snip + nc
+    max_possible = 202  # 197 + 5 (R74 numeric_consistency)
     percentage = round(total_earned / max_possible * 100)
 
     categories = {
@@ -1237,6 +1461,7 @@ def check_all_rules(
         "semantic_depth":  {"score": semdeep, "max": 12, "label": "Semantic Depth"},
         "customer_context": {"score": ctx,   "max": 12, "label": "Customer Context"},
         "snippet_optimization": {"score": snip, "max": 10, "label": "Snippet Optimization"},
+        "numeric_consistency": {"score": nc,   "max": 5,  "label": "Numeric Consistency"},
     }
 
     pillars = [
@@ -1279,4 +1504,5 @@ def check_all_rules(
         "summary": summary,
         "word_count": word_count,
         "kw_density": round(kw_density, 2),
+        "kw_density_raw": round(kw_density_raw, 2),
     }

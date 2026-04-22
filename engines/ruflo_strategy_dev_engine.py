@@ -26,6 +26,7 @@ AI routing:
 """
 
 import os, json, re, time, logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -295,6 +296,243 @@ INDUSTRY_TEMPLATES: Dict[Industry, dict] = {
         },
         "intent_flow": ["informational","consideration","comparison","appointment"],
         "eeat_critical": True,  # E-E-A-T is especially important for healthcare
+    },
+
+    Industry.TOURISM: {
+        "content_types": ["travel_guide","itinerary","hotel_review",
+                          "activity_guide","food_guide","packing_list"],
+        "schema_priority": ["TouristAttraction","Hotel","FAQPage","HowTo","Article"],
+        "persona_seeds": [
+            "honeymoon couples", "family travellers", "solo travellers",
+            "adventure seekers", "pilgrims", "NRI visiting home",
+            "corporate retreats", "photography enthusiasts"
+        ],
+        "keyword_modifiers": [
+            "package", "itinerary", "hotel", "homestay", "guide",
+            "places to visit", "things to do", "weather", "how to reach"
+        ],
+        "religion_content": {
+            Religion.MUSLIM: [
+                "halal food {destination}","Muslim friendly hotels {destination}",
+                "prayer room availability {destination}",
+            ],
+            Religion.HINDU: [
+                "temple tour {destination}","pilgrimage {destination}",
+                "Onam celebration {destination}",
+            ],
+            Religion.CHRISTIAN: [
+                "church visit {destination}","Christmas celebration {destination}",
+                "Good Friday {destination}",
+            ],
+        },
+        "intent_flow": ["inspiration","planning","booking","post_visit"],
+    },
+
+    Industry.ECOMMERCE: {
+        "content_types": ["product_review","buying_guide","comparison","how_to","trend","blog"],
+        "schema_priority": ["Product","ItemList","FAQPage","HowTo","Article"],
+        "persona_seeds": [
+            "online shoppers", "deal hunters", "first-time buyers",
+            "gift shoppers", "bulk buyers", "subscription customers",
+            "mobile shoppers", "price-sensitive buyers"
+        ],
+        "keyword_modifiers": [
+            "buy online", "best price", "discount", "offer", "review",
+            "free shipping", "COD", "return policy", "sale", "cheap"
+        ],
+        "seasonal_peaks": {
+            "Diwali":      ["Diwali sale","festive offers","gift hampers","discount"],
+            "Christmas":   ["Christmas sale","year end offer","gift ideas","deals"],
+            "New Year":    ["New Year sale","clearance","electronics offers"],
+            "Independence Day": ["freedom sale","offers","best deals India"],
+            "Republic Day": ["republic day sale","discount","mega offer"],
+        },
+        "religion_content": {
+            Religion.MUSLIM: [
+                "Eid gift ideas online", "Ramadan offers {product}",
+                "halal certified {product} buy online",
+            ],
+            Religion.HINDU: [
+                "Diwali {product} gift set buy online",
+                "Puja {product} online India",
+                "Navratri {product} offer",
+            ],
+            Religion.CHRISTIAN: [
+                "Christmas gift {product} online",
+                "Christmas sale {product} India",
+            ],
+        },
+        "region_content": {
+            GeoLevel.NATIONAL:   ["{product} buy online India","{product} best price India"],
+            GeoLevel.KERALA:     ["{product} online Kerala","Kerala delivery {product}"],
+            GeoLevel.MALABAR:    ["{product} free shipping Malabar", "{product} COD Calicut"],
+        },
+        "intent_flow": ["informational","comparison","commercial","transactional"],
+    },
+
+    Industry.RESTAURANT: {
+        "content_types": ["menu_page","food_guide","event","catering","review","blog"],
+        "schema_priority": ["Restaurant","FoodEstablishment","Menu","FAQPage","Event"],
+        "persona_seeds": [
+            "family diners", "corporate lunch crowd", "birthday party planners",
+            "foodies and bloggers", "NRI nostalgic diners", "wedding caterers",
+            "delivery app users", "diet-conscious diners"
+        ],
+        "keyword_modifiers": [
+            "near me", "delivery", "menu", "price", "booking",
+            "catering", "takeaway", "best", "authentic", "home delivery"
+        ],
+        "seasonal_peaks": {
+            "Onam":     ["Onam sadya restaurant","Onam feast","Kerala Onam buffet"],
+            "Eid":      ["Eid special menu","biryani near me Eid","Eid buffet"],
+            "Christmas":["Christmas buffet","Christmas special menu","Christmas catering"],
+            "New Year": ["New Year party restaurant","New Year dinner","NYE reservation"],
+            "Diwali":   ["Diwali special menu","Diwali catering","festive thali"],
+        },
+        "religion_content": {
+            Religion.MUSLIM: [
+                "halal restaurant {location}",
+                "Malabar biryani {location}",
+                "Ramadan iftar buffet {location}",
+                "Eid catering {location}",
+            ],
+            Religion.HINDU: [
+                "Onam sadya {location}",
+                "satvik food restaurant {location}",
+                "jain food restaurant {location}",
+                "prasadam style vegetarian {location}",
+            ],
+            Religion.CHRISTIAN: [
+                "Syrian Christian cuisine {location}",
+                "Christmas special dinner {location}",
+                "Good Friday fish special {location}",
+                "Kerala Christian food {location}",
+            ],
+        },
+        "region_content": {
+            GeoLevel.KOCHI:      ["best restaurant Kochi","Kochi food delivery","fine dining Kochi"],
+            GeoLevel.KOZHIKODE:  ["Malabar restaurant Calicut","biryani Calicut","Kozhikode food"],
+            GeoLevel.THRISSUR:   ["restaurant Thrissur","catering Thrissur","Thrissur cuisine"],
+            GeoLevel.KERALA:     ["best Kerala restaurant","authentic Kerala food","Kerala cuisine"],
+        },
+        "intent_flow": ["discovery","comparison","booking","post_visit"],
+    },
+
+    Industry.TECH_SAAS: {
+        "content_types": ["feature_page","comparison","tutorial","case_study",
+                          "pricing_page","integration_guide","blog"],
+        "schema_priority": ["SoftwareApplication","FAQPage","HowTo","Article","Review"],
+        "persona_seeds": [
+            "startup founders", "SME business owners", "IT decision makers",
+            "freelancers", "remote teams", "agency owners",
+            "data analysts", "non-technical buyers"
+        ],
+        "keyword_modifiers": [
+            "software", "tool", "platform", "free trial", "pricing",
+            "alternative", "vs", "review", "integration", "API"
+        ],
+        "seasonal_peaks": {
+            "New Year":       ["new year business tools","productivity software 2026"],
+            "Financial Year": ["FY tools","year end business review software"],
+            "Q4 Planning":    ["Q4 planning software","annual review tools"],
+        },
+        "religion_content": {
+            Religion.MUSLIM:   ["Ramadan team productivity tools","Eid business offers SaaS"],
+            Religion.HINDU:    ["Diwali software deals","festive SaaS discounts"],
+            Religion.CHRISTIAN:["year end software deals","Christmas SaaS offer"],
+        },
+        "region_content": {
+            GeoLevel.NATIONAL:  ["{product} software India","best {product} tool India"],
+            GeoLevel.KERALA:    ["{product} software Kerala","Kerala startup {product}"],
+            GeoLevel.GLOBAL:    ["{product} for remote teams","global {product} platform"],
+        },
+        "intent_flow": ["awareness","consideration","comparison","trial","conversion"],
+    },
+
+    Industry.FOOD_SPICES: {
+        "content_types": ["recipe","how_to","product","comparison","health","blog"],
+        "schema_priority": ["Recipe","Product","FAQPage","HowTo","Article"],
+        "persona_seeds": [
+            "home cooks", "restaurant owners", "spice dealers",
+            "Ayurvedic practitioners", "export buyers", "gift buyers",
+            "health-conscious buyers", "NRI families"
+        ],
+        "keyword_modifiers": [
+            "recipe", "benefits", "buy", "organic", "price", "uses",
+            "substitute", "storage", "fresh", "wholesale", "farm direct"
+        ],
+        "seasonal_peaks": {
+            "Christmas":  ["baking spices","cake spice","cinnamon","cardamom","cloves"],
+            "Onam":       ["sadya spices","sambar powder","curry leaves"],
+            "Eid":        ["biryani masala","halal spices","Malabar masala"],
+            "Diwali":     ["mithai spices","sweets masala","cardamom"],
+            "Harvest":    ["new crop pepper","fresh cardamom","first flush"],
+        },
+        "religion_content": {
+            Religion.CHRISTIAN: [
+                "Christmas plum cake spice mix",
+                "Kerala Christmas cake {product} recipe",
+                "Christmas baking spice set Kerala",
+                "Lent-friendly {product} dishes",
+            ],
+            Religion.MUSLIM: [
+                "Malabar {product} chicken masala halal",
+                "Eid biryani spice mix with {product}",
+                "halal certified {product} Kerala",
+                "Ramadan {product} recipes",
+                "Moplah {product} recipe traditional",
+            ],
+            Religion.HINDU: [
+                "Onam sadya {product} recipe",
+                "{product} in Ayurveda benefits",
+                "satvik cooking with {product}",
+                "Vishu {product} festival recipe",
+                "trikatu {product} Ayurvedic",
+            ],
+        },
+        "region_content": {
+            GeoLevel.MALABAR:  ["Malabar {product}","Kozhikode style {product}","Moplah {product}"],
+            GeoLevel.WAYANAD:  ["Wayanad {product} farm direct","Wayanad organic {product}"],
+            GeoLevel.KOTTAYAM: ["Kottayam duck curry {product}","Syrian Christian {product} recipe"],
+            GeoLevel.THRISSUR: ["Thrissur {product} traditional","Thrissur festival {product}"],
+        },
+        "intent_flow": ["informational","comparison","commercial","transactional"],
+    },
+
+    Industry.HEALTHCARE: {
+        "content_types": ["symptom_guide","treatment_info","doctor_profile",
+                          "patient_story","cost_guide","faq","procedure_explainer"],
+        "schema_priority": ["MedicalWebPage","Physician","MedicalProcedure","FAQPage","Article"],
+        "persona_seeds": [
+            "patients seeking diagnosis", "family caregivers",
+            "medical tourists", "NRI patients", "corporate health",
+            "senior citizens", "chronic disease patients", "new parents"
+        ],
+        "keyword_modifiers": [
+            "symptoms", "treatment", "cost", "doctor", "specialist",
+            "hospital", "surgery", "recovery", "best", "how to"
+        ],
+        "religion_content": {
+            Religion.MUSLIM: [
+                "halal food during hospital stay {location}",
+                "prayer facilities {hospital_name}",
+                "Arabic speaking doctors Kerala hospital",
+            ],
+            Religion.HINDU: [
+                "Ayurvedic integrative care {specialty}",
+                "yoga after {procedure} recovery",
+            ],
+            Religion.CHRISTIAN: [
+                "chaplaincy services hospital Kerala",
+                "faith-based counselling {location}",
+            ],
+        },
+        "region_content": {
+            GeoLevel.KERALA:  ["best {specialty} hospital Kerala","Kerala medical tourism"],
+            GeoLevel.NATIONAL:["top {specialty} doctors India","affordable {procedure} India"],
+        },
+        "intent_flow": ["informational","consideration","comparison","appointment"],
+        "eeat_critical": True,
     },
 
     Industry.TOURISM: {
@@ -1002,17 +1240,35 @@ class StrategyDevelopmentEngine:
         # ── Engine 3: Context Engine ──────────────────────────────────────────
         t = time.time()
         all_context_clusters = []
-        # Generate for each relevant intersection (limit combinations)
-        for product in user_input.products[:3]:
-            for religion in user_input.target_religions[:3]:
-                for location in user_input.target_locations[:3]:
-                    lang = user_input.target_languages[0] if user_input.target_languages else Language.ENGLISH
-                    persona = unique_personas[0] if unique_personas else {}
-                    cluster = self.context.generate_context_cluster(
-                        product, religion, location, lang, persona, user_input
-                    )
-                    all_context_clusters.extend(cluster)
-                    time.sleep(0.5)  # rate limit Gemini
+        # Build all (product, religion, location) combinations then run in parallel.
+        # Each call is independent and network-bound — ThreadPoolExecutor saves the
+        # sequential sleep(0.5) * N_combinations wall-clock time.
+        lang = user_input.target_languages[0] if user_input.target_languages else Language.ENGLISH
+        persona = unique_personas[0] if unique_personas else {}
+        context_combos = [
+            (product, religion, location)
+            for product in user_input.products[:3]
+            for religion in user_input.target_religions[:3]
+            for location in user_input.target_locations[:3]
+        ]
+
+        def _gen_cluster(args):
+            product, religion, location = args
+            try:
+                return self.context.generate_context_cluster(
+                    product, religion, location, lang, persona, user_input
+                )
+            except Exception as _e:
+                log.warning(f"[Strategy] context cluster failed ({product}/{religion}/{location}): {_e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=min(6, len(context_combos) or 1)) as _pool:
+            futures = {_pool.submit(_gen_cluster, combo): combo for combo in context_combos}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result:
+                    all_context_clusters.extend(result)
+
         steps_log.append({"step":"context_engine","ms":int((time.time()-t)*1000),
                            "context_keywords":len(all_context_clusters)})
 
@@ -1053,16 +1309,20 @@ class StrategyDevelopmentEngine:
             user_input, unique_personas, all_context_clusters,
             seasonal_kws, competitors, review_kws + ad_intel.get("keywords",[])
         )
-        try:
-            strategy = AI.parse_json(strategy_text)
-        except Exception as e:
-            log.warning(f"Strategy parse failed: {e}")
-            # `strategy_text` may be a dict (already parsed) or other type — guard slicing
+        # synthesize() already calls AI.parse_json() internally and returns a dict.
+        # Only parse if it came back as a raw string (e.g. fallback path).
+        if isinstance(strategy_text, dict):
+            strategy = strategy_text
+        else:
             try:
-                raw_preview = strategy_text[:500] if isinstance(strategy_text, (str, bytes)) else json.dumps(strategy_text)[:500]
-            except Exception:
-                raw_preview = str(strategy_text)[:500]
-            strategy = {"error": "parse_failed", "raw": raw_preview}
+                strategy = AI.parse_json(strategy_text)
+            except Exception as e:
+                log.warning(f"Strategy parse failed: {e}")
+                try:
+                    raw_preview = strategy_text[:500] if isinstance(strategy_text, (str, bytes)) else json.dumps(strategy_text)[:500]
+                except Exception:
+                    raw_preview = str(strategy_text)[:500]
+                strategy = {"error": "parse_failed", "raw": raw_preview}
         steps_log.append({"step":"claude_synthesis","ms":int((time.time()-t)*1000),
                            "tokens":tokens})
 

@@ -7,6 +7,7 @@ import React, { useState, useCallback, useEffect } from "react"
 import useKw2Store from "./store"
 import * as api from "./api"
 import { Card, Badge, RunButton, Spinner, StatsRow } from "./shared"
+import ConfirmModal from "./ConfirmModal"
 
 const INTENT_OPTIONS = ["purchase", "wholesale", "transactional", "commercial", "informational", "navigational"]
 const INTENT_COLORS = {
@@ -109,6 +110,7 @@ export default function Phase3Review({ projectId, sessionId, onProceed, onRegene
   const [addForm, setAddForm] = useState({ keyword: "", pillar: "", intent: "purchase", mapped_page: "" })
   const [adding, setAdding] = useState(false)
   const [showAddRow, setShowAddRow] = useState(false)
+  const [pendingDeleteId, setPendingDeleteId] = useState(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -131,12 +133,22 @@ export default function Phase3Review({ projectId, sessionId, onProceed, onRegene
   }, [projectId, sessionId])
 
   const handleDelete = useCallback(async (id) => {
-    if (!confirm("Delete this keyword?")) return
-    await api.deleteKeyword(projectId, sessionId, id)
-    setKeywords((prev) => prev.filter((k) => k.id !== id))
-    setValidatedCount((c) => Math.max(0, c - 1))
-    pushLog("Keyword deleted", { badge: "REVIEW", type: "warning" })
-  }, [projectId, sessionId])
+    setPendingDeleteId(id)
+  }, [])
+
+  const confirmDelete = useCallback(async () => {
+    const id = pendingDeleteId
+    setPendingDeleteId(null)
+    if (!id) return
+    try {
+      await api.deleteKeyword(projectId, sessionId, id)
+      setKeywords((prev) => prev.filter((k) => k.id !== id))
+      setValidatedCount((c) => Math.max(0, c - 1))
+      pushLog("Keyword deleted", { badge: "REVIEW", type: "warning" })
+    } catch (e) {
+      addToast("Delete failed: " + e.message, "error")
+    }
+  }, [projectId, sessionId, pendingDeleteId])
 
   const handleAdd = useCallback(async () => {
     if (!addForm.keyword.trim()) return
@@ -173,6 +185,15 @@ export default function Phase3Review({ projectId, sessionId, onProceed, onRegene
 
   return (
     <div>
+      <ConfirmModal
+        open={!!pendingDeleteId}
+        title="Delete this keyword?"
+        message="This action cannot be undone."
+        confirmLabel="Delete"
+        danger
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDeleteId(null)}
+      />
       {/* Header Card */}
       <Card
         title="Phase 3 Review: Manual Keyword Review"

@@ -1001,7 +1001,7 @@ class TargetedTuningApplicator:
     Uses same manual approval gate as all other tunings.
     DeepSeek writes the code change. Claude verifies.
     """
-    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://172.235.16.165:11434")
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
 
     def __init__(self):
         self._db = LineageDB()
@@ -1055,14 +1055,10 @@ Write the minimal change to {t['fn_target']} that fixes this problem.
 Add comment: # LN-FIX: {tuning_id[:12]}
 Return only the modified function or the specific lines to add/change."""
 
-            r = _req.post(
-                f"{self.OLLAMA_URL}/api/generate",
-                json={"model":"deepseek-r1:7b","prompt":prompt,
-                      "stream":False,"options":{"num_predict":1000}},
-                timeout=90
-            )
-            if r.ok:
-                code_change = r.json().get("response","").strip()
+            from core.ai_config import AIRouter
+            code_change = AIRouter._call_ollama(prompt, "You are a Python SEO engine developer.", 0.1)
+            if code_change:
+                code_change = code_change.strip()
                 self._db._db.execute(
                     "UPDATE ln_targeted_tunings SET after_value=? WHERE tuning_id=?",
                     (code_change[:5000], tuning_id)

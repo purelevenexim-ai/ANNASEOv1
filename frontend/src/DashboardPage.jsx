@@ -33,11 +33,17 @@ function DashStat({ label, value, sub, color, accentColor }) {
 }
 
 // ── Project card ─────────────────────────────────────────────────────────────
-function ProjectCard({ project: p, isActive, onSelect, onEdit, onDelete }) {
+function ProjectCard({ project: p, isActive, onSelect, onEdit, onDelete, kwStats }) {
   const seeds = (() => {
     try { return JSON.parse(p.seed_keywords || "[]").slice(0, 3) } catch { return [] }
   })()
+  const targetLocs = (() => {
+    try { return JSON.parse(p.target_locations || "[]").slice(0, 3) } catch { return [] }
+  })()
   const statusAccent = { active: T.teal, paused: T.amber, archived: T.gray }[p.status] || T.gray
+  const kw2 = kwStats?.kw2
+  const confidence = kw2?.confidence_score || 0
+  const confColor = confidence >= 80 ? T.teal : confidence >= 60 ? T.amber : T.gray
 
   return (
     <div
@@ -68,9 +74,19 @@ function ProjectCard({ project: p, isActive, onSelect, onEdit, onDelete }) {
           }}>
             {p.name}
           </div>
-          {p.industry && (
-            <div style={{ fontSize: 10, color: T.textSoft, marginTop: 3 }}>{p.industry}</div>
-          )}
+          <div style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 4, flexWrap: "wrap" }}>
+            {p.industry && (
+              <span style={{ fontSize: 10, color: T.textSoft }}>{p.industry}</span>
+            )}
+            {(p.business_type || kw2?.business_type) && (
+              <span style={{
+                fontSize: 9, fontWeight: 600, padding: "1px 6px", borderRadius: 99,
+                background: "rgba(0,122,255,0.1)", color: T.purple, textTransform: "uppercase",
+              }}>
+                {p.business_type || kw2?.business_type}
+              </span>
+            )}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: 8, flexShrink: 0 }}>
           <Badge color={p.status === "active" ? "teal" : "gray"}>{p.status}</Badge>
@@ -87,9 +103,20 @@ function ProjectCard({ project: p, isActive, onSelect, onEdit, onDelete }) {
         </div>
       </div>
 
-      {seeds.length > 0 ? (
+      {/* Target locations row */}
+      {(targetLocs.length > 0 || (kw2?.target_locations?.length > 0)) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: 6 }}>
+          <span style={{ fontSize: 10 }}>📍</span>
+          <span style={{ fontSize: 10, color: T.textSoft }}>
+            {(kw2?.target_locations?.length > 0 ? kw2.target_locations : targetLocs).join(", ")}
+          </span>
+        </div>
+      )}
+
+      {/* Seed keywords / pillar chips */}
+      {(seeds.length > 0 || kw2?.pillar_names?.length > 0) ? (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {seeds.map((s, i) => (
+          {(kw2?.pillar_names?.length > 0 ? kw2.pillar_names : seeds).map((s, i) => (
             <span key={i} style={{
               fontSize: 10, padding: "2px 7px", borderRadius: 99,
               background: isActive ? "rgba(127,119,221,0.15)" : "rgba(0,0,0,0.05)",
@@ -98,7 +125,25 @@ function ProjectCard({ project: p, isActive, onSelect, onEdit, onDelete }) {
           ))}
         </div>
       ) : (
-        <div style={{ fontSize: 10, color: T.textSoft, opacity: 0.6 }}>No seed keywords yet</div>
+        <div style={{ fontSize: 10, color: T.textSoft, opacity: 0.6 }}>No profile data yet</div>
+      )}
+
+      {/* kw2 footer strip */}
+      {kw2 && (
+        <div style={{
+          marginTop: 10, paddingTop: 8,
+          borderTop: "0.5px solid rgba(60,60,67,0.1)",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <span style={{ fontSize: 10, color: T.textSoft }}>
+            {kw2.session_count} kw2 session{kw2.session_count !== 1 ? "s" : ""} · Phase {kw2.latest_phase}
+          </span>
+          {kw2.confidence_score > 0 && (
+            <span style={{ fontSize: 10, color: confColor, fontWeight: 600 }}>
+              {confidence}% confidence
+            </span>
+          )}
+        </div>
       )}
 
       {isActive && (
@@ -249,12 +294,69 @@ export default function DashboardPage() {
 
       {/* Keyword universe stats */}
       {kwStats && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24 }}>
-          <DashStat label="Universes" value={(kwStats.universe_count || 1).toLocaleString()} color={T.purple} accentColor={T.purple} />
-          <DashStat label="Pillars" value={(kwStats.pillar_count || 0).toLocaleString()} color={T.purpleDark} accentColor={T.purpleDark} />
-          <DashStat label="Clusters" value={(kwStats.cluster_count || 0).toLocaleString()} color={T.teal} accentColor={T.teal} />
-          <DashStat label="Keywords" value={(kwStats.total || 0).toLocaleString()} color={T.green} accentColor={T.green} />
-        </div>
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 16 }}>
+            <DashStat label="kw2 Sessions" value={(kwStats.kw2?.session_count || 0).toLocaleString()} color={T.purple} accentColor={T.purple} />
+            <DashStat label="Pillars" value={(kwStats.pillar_count || 0).toLocaleString()} color={T.purpleDark} accentColor={T.purpleDark} />
+            <DashStat label="Clusters" value={(kwStats.cluster_count || 0).toLocaleString()} color={T.teal} accentColor={T.teal} />
+            <DashStat label="Keywords" value={(kwStats.total || 0).toLocaleString()} color={T.green} accentColor={T.green} />
+          </div>
+
+          {/* kw2 Profile snapshot for active project */}
+          {kwStats.kw2 && (kwStats.kw2.target_locations?.length > 0 || kwStats.kw2.goals?.length > 0 || kwStats.kw2.pricing_model) && (
+            <div style={{
+              background: "#fff", borderRadius: 12, boxShadow: T.cardShadow,
+              padding: "12px 16px", marginBottom: 20,
+              borderLeft: `3px solid ${T.purple}`,
+            }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                Active Project Profile
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                {kwStats.kw2.business_type && (
+                  <span style={{ fontSize: 11, color: T.text }}>
+                    <strong>Type:</strong> {kwStats.kw2.business_type}
+                  </span>
+                )}
+                {kwStats.kw2.target_locations?.length > 0 && (
+                  <span style={{ fontSize: 11, color: T.text }}>
+                    📍 {kwStats.kw2.target_locations.join(", ")}
+                  </span>
+                )}
+                {kwStats.kw2.goals?.length > 0 && (
+                  <span style={{ fontSize: 11, color: T.text }}>
+                    🎯 {kwStats.kw2.goals.join(" · ")}
+                  </span>
+                )}
+                {kwStats.kw2.pricing_model && (
+                  <span style={{ fontSize: 11, color: T.text }}>
+                    💰 {kwStats.kw2.pricing_model}
+                  </span>
+                )}
+                {kwStats.kw2.confidence_score > 0 && (
+                  <span style={{
+                    fontSize: 11, fontWeight: 600,
+                    color: kwStats.kw2.confidence_score >= 80 ? T.teal
+                         : kwStats.kw2.confidence_score >= 60 ? T.amber : T.red,
+                  }}>
+                    {kwStats.kw2.confidence_score}% profile confidence
+                    {kwStats.kw2.confidence_score < 60 && " ⚠️"}
+                  </span>
+                )}
+              </div>
+              {kwStats.kw2.pillar_names?.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
+                  {kwStats.kw2.pillar_names.map((p, i) => (
+                    <span key={i} style={{
+                      fontSize: 10, padding: "2px 8px", borderRadius: 99,
+                      background: "rgba(0,122,255,0.08)", color: T.purple,
+                    }}>{p}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {/* Section heading */}
@@ -279,6 +381,7 @@ export default function DashboardPage() {
             onSelect={() => { setProject(p.project_id); setPage("content") }}
             onEdit={() => setEditingProject(p)}
             onDelete={() => setDeletingProject(p)}
+            kwStats={activeProject === p.project_id ? kwStats : null}
           />
         ))}
         {(projects || []).length === 0 && (

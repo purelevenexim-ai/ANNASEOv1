@@ -43,7 +43,7 @@ def _build_seo_checklist(page_type: str = "article", word_count: int = 2000) -> 
         "reading_level_target": "8th-10th",       # P1.7
         "cta_required": True,                     # P1.9
         "internal_links_min": 4,                  # P1.10, P9.83
-        "external_authority_links_min": 2,        # P2.12
+        "external_authority_links_min": 3,        # P2.12
         "wikipedia_links_min": 1,                 # AI.5
         "date_stamps_min": 2,                     # P2.14
         "case_study_min": 1,                      # P2.17
@@ -103,6 +103,77 @@ def _build_seo_checklist(page_type: str = "article", word_count: int = 2000) -> 
         })
 
     return checklist
+
+
+def _build_quality_profile(
+    page_type: str = "article",
+    intent: str = "informational",
+    word_count: int = 2000,
+    checklist: Optional[Dict] = None,
+) -> Dict:
+    """Build a canonical quality profile consumed by draft + validation.
+
+    The profile normalizes threshold values so generation prompts and
+    `quality.content_rules.check_all_rules()` evaluate against the same target.
+    """
+    checklist = checklist or _build_seo_checklist(page_type, word_count)
+
+    soft_min = max(900, int(word_count * 0.85))
+    hard_min = max(750, int(word_count * 0.75))
+
+    h2_min = max(3, int(checklist.get("h2_min", 6)))
+    h3_per_h2 = max(1, int(checklist.get("h3_min_per_h2", 2)))
+    h3_min = max(2, min(10, h3_per_h2 * max(2, h2_min // 2)))
+
+    internal_min = max(1, int(checklist.get("internal_links_min", 4)))
+    external_min = max(0, int(checklist.get("external_authority_links_min", 3)))
+    wikipedia_min = max(0, int(checklist.get("wikipedia_links_min", 1)))
+
+    table_required = int(checklist.get("comparison_table_min", 1)) > 0
+    faq_required = int(checklist.get("faq_count", 0)) > 0
+    lists_required = int(checklist.get("ul_lists_min", 0)) + int(checklist.get("ol_lists_min", 0)) > 0
+
+    buyer_intent_required = intent in ("commercial", "transactional", "buying_guide") or page_type in (
+        "product",
+        "landing",
+        "service",
+    )
+
+    kd_min = float(checklist.get("keyword_density_min", 1.0))
+    kd_max = float(checklist.get("keyword_density_max", 3.0))
+    kd_min = max(0.6, min(kd_min, 2.5))
+    kd_max = max(kd_min + 0.5, min(kd_max, 3.0))
+
+    return {
+        "version": "article_v1",
+        "page_type": page_type,
+        "intent": intent,
+        "word_count": {
+            "target": int(word_count),
+            "soft_min": int(soft_min),
+            "hard_min": int(hard_min),
+        },
+        "keyword_density": {
+            "min": round(kd_min, 2),
+            "max": round(kd_max, 2),
+        },
+        "structure": {
+            "h2_min": h2_min,
+            "h3_min": h3_min,
+            "faq_required": faq_required,
+        },
+        "links": {
+            "internal_min": internal_min,
+            "external_min": external_min,
+            "wikipedia_min": wikipedia_min,
+        },
+        "elements": {
+            "table_required": table_required,
+            "lists_required": lists_required,
+            "buyer_intent_required": buyer_intent_required,
+            "cta_required": bool(checklist.get("cta_required", True)),
+        },
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +274,12 @@ def generate_blueprint(
     page_inputs = page_inputs or {}
     supporting_keywords = supporting_keywords or []
     checklist = _build_seo_checklist(page_type, word_count)
+    quality_profile = _build_quality_profile(
+        page_type=page_type,
+        intent=intent,
+        word_count=word_count,
+        checklist=checklist,
+    )
 
     # Use AI-generated structure if provided, otherwise build defaults
     if ai_structure and ai_structure.get("h2_sections"):
@@ -249,6 +326,7 @@ def generate_blueprint(
 
         # SEO checklist derived from rules
         "seo_checklist": checklist,
+        "quality_profile": quality_profile,
 
         # Pre-generation quality elements
         "required_elements": {

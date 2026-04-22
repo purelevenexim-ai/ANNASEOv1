@@ -140,8 +140,8 @@ class PipelineJob:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Cfg:
-    OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
-    OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
+    OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://172.235.16.165:8080")
+    OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "mistral:7b-instruct-q4_K_M")
     OLLAMA_EMBED   = os.getenv("OLLAMA_EMBED",   "nomic-embed-text")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL   = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")
@@ -181,17 +181,10 @@ class AI:
     @staticmethod
     def deepseek(prompt: str, system: str = "You are an SEO expert.",
                   temperature: float = 0.1) -> str:
+        """Route through central AIRouter (health check, semaphore, 620s timeout)."""
         try:
-            combined = f"{system}\n\n{prompt}" if system else prompt
-            r = _req.post(f"{Cfg.OLLAMA_URL}/api/generate", json={
-                "model": Cfg.OLLAMA_MODEL, "stream": False,
-                "options": {"temperature": temperature},
-                "prompt": combined
-            }, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            t = data.get("response", "").strip()
-            return re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL).strip()
+            from core.ai_config import AIRouter
+            return AIRouter._call_ollama(prompt, system or "You are an SEO expert.", temperature)
         except Exception as e:
             log.warning(f"DeepSeek error: {e}")
             return ""

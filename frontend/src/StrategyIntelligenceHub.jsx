@@ -5,6 +5,8 @@
 import { useState, useEffect, useCallback } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { StrategyTab } from "./kw2/shared"
+import SessionStrategyPage from "./kw2/SessionStrategyPage"
+import Kw2PromptStudio from "./kw2/Kw2PromptStudio"
 
 const API = import.meta.env.VITE_API_URL || ""
 function authHeaders() {
@@ -108,6 +110,23 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
     queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${kw2Session.id}/validated`),
     enabled: !!kw2Session?.id && !!projectId,
     staleTime: 30_000,
+    retry: false,
+  })
+
+  // Extended kw2 business profile (has business_locations, audience, languages, cultural_context, etc.)
+  const { data: kw2ProfileData } = useQuery({
+    queryKey: ["kw2-profile-hub", projectId],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/profile`).catch(() => null),
+    enabled: !!projectId,
+    staleTime: 60_000,
+    retry: false,
+  })
+  // BI intel for goals, pricing_model, usps, audience_segments
+  const { data: biIntelData } = useQuery({
+    queryKey: ["kw2-bi-intel-hub", projectId, kw2Session?.id],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${kw2Session.id}/biz-intel`).catch(() => null),
+    enabled: !!kw2Session?.id && !!projectId,
+    staleTime: 60_000,
     retry: false,
   })
   // Group by pillar for expandable view
@@ -251,7 +270,7 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
         </div>
         {setPage && (
           <button
-            onClick={() => setPage("keywords")}
+            onClick={() => setPage("kw2")}
             style={{
               padding: "8px 20px", borderRadius: 8, border: "none",
               background: T.purple, color: "#fff", cursor: "pointer",
@@ -518,7 +537,7 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
           </button>
           {setPage && (
             <button
-              onClick={() => setPage("keywords")}
+              onClick={() => setPage("kw2")}
               style={{ padding: "5px 12px", borderRadius: 6, border: "none",
                 background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 12 }}
             >
@@ -529,46 +548,115 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
       </div>
 
       {/* Stats bar */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
-        {[
-          { label: "Pillars", val: pillars.length, color: T.purple },
-          { label: "Total Keywords", val: brief.total_keywords, color: T.teal },
-          { label: "Business Type", val: ctx.business_type || "—", color: T.purpleDark },
-          { label: "Markets", val: (ctx.target_locations || []).length || "—", color: T.amber },
-        ].map(s => (
-          <Card key={s.label} style={{ padding: "10px 14px", textAlign: "center" }}>
-            <div style={{ fontSize: s.label === "Business Type" || s.label === "Markets" ? 13 : 22,
-              fontWeight: 800, color: s.color, lineHeight: 1.2 }}>{s.val}</div>
-            <div style={{ fontSize: 10, color: T.textSoft, marginTop: 3, textTransform: "uppercase", letterSpacing: ".06em" }}>{s.label}</div>
-          </Card>
-        ))}
-      </div>
+      {(() => {
+        const kw2Profile = kw2ProfileData?.profile || {}
+        const biIntel = biIntelData?.profile || biIntelData || {}
+        const extCtx = { ...ctx }
+        // Augment ctx with kw2 profile fields (take kw2 value if ctx empty)
+        if (!extCtx.usp && kw2Profile.usp) extCtx.usp = kw2Profile.usp
+        if (!extCtx.usp && kw2Profile.manual_input?.usp) extCtx.usp = kw2Profile.manual_input.usp
+        const bizType = extCtx.business_type || kw2Profile.business_type || "—"
+        const targLocs = extCtx.target_locations?.length > 0 ? extCtx.target_locations : (kw2Profile.target_locations || kw2Profile.manual_input?.target_locations || [])
+        const confidence = (kw2Profile.confidence_score || 0) * 100
 
-      {/* Context chips */}
-      {(ctx.target_locations?.length > 0 || ctx.products?.length > 0) && (
-        <Card style={{ marginBottom: 14, padding: "10px 14px" }}>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {ctx.usp && (
-              <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
-                background: T.purpleLight, color: T.purpleDark, fontWeight: 600 }}>
-                💡 {ctx.usp.slice(0, 60)}{ctx.usp.length > 60 ? "…" : ""}
-              </span>
-            )}
-            {(ctx.target_locations || []).slice(0, 6).map(loc => (
-              <span key={loc} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
-                background: "#f0fdf4", color: T.teal, fontWeight: 500 }}>
-                📍 {loc}
-              </span>
-            ))}
-            {(ctx.products || []).slice(0, 5).map(p => (
-              <span key={p} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
-                background: T.amberLight, color: T.amber, fontWeight: 500 }}>
-                📦 {p}
-              </span>
-            ))}
-          </div>
-        </Card>
-      )}
+        return (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 16 }}>
+              {[
+                { label: "Pillars", val: pillars.length, color: T.purple },
+                { label: "Total Keywords", val: brief.total_keywords, color: T.teal },
+                { label: "Business Type", val: bizType, color: T.purpleDark },
+                { label: "Markets", val: targLocs.length || "—", color: T.amber },
+              ].map(s => (
+                <Card key={s.label} style={{ padding: "10px 14px", textAlign: "center" }}>
+                  <div style={{ fontSize: s.label === "Business Type" || s.label === "Markets" ? 13 : 22,
+                    fontWeight: 800, color: s.color, lineHeight: 1.2 }}>{s.val}</div>
+                  <div style={{ fontSize: 10, color: T.textSoft, marginTop: 3, textTransform: "uppercase", letterSpacing: ".06em" }}>{s.label}</div>
+                </Card>
+              ))}
+            </div>
+
+            {/* Context chips — full profile context */}
+            <Card style={{ marginBottom: 14, padding: "10px 14px" }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: T.textSoft, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.4 }}>
+                Business Profile Context
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                {extCtx.usp && (
+                  <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: T.purpleLight, color: T.purpleDark, fontWeight: 600 }}>
+                    💡 {extCtx.usp.slice(0, 60)}{extCtx.usp.length > 60 ? "…" : ""}
+                  </span>
+                )}
+                {targLocs.slice(0, 6).map(loc => (
+                  <span key={loc} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: "#f0fdf4", color: T.teal, fontWeight: 500 }}>
+                    📍 {loc}
+                  </span>
+                ))}
+                {(kw2Profile.business_locations || kw2Profile.manual_input?.business_locations || []).slice(0, 3).map(loc => (
+                  <span key={loc} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: "rgba(52,199,89,0.06)", color: "#059669", fontWeight: 500 }}>
+                    🏢 {loc}
+                  </span>
+                ))}
+                {(extCtx.products || kw2Profile.product_catalog || []).slice(0, 5).map(p => (
+                  <span key={p} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: T.amberLight, color: T.amber, fontWeight: 500 }}>
+                    📦 {p}
+                  </span>
+                ))}
+                {(kw2Profile.audience || extCtx.target_audience?.split(",").map(s => s.trim()).filter(Boolean) || []).slice(0, 4).map(a => (
+                  <span key={a} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: "rgba(139,92,246,0.1)", color: "#7c3aed", fontWeight: 500 }}>
+                    👥 {a}
+                  </span>
+                ))}
+                {(kw2Profile.manual_input?.languages || extCtx.languages || []).slice(0, 3).map(l => (
+                  <span key={l} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: "rgba(14,165,233,0.1)", color: "#0284c7", fontWeight: 500 }}>
+                    🌐 {l}
+                  </span>
+                ))}
+                {(kw2Profile.negative_scope || []).slice(0, 4).map(ns => (
+                  <span key={ns} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                    background: "rgba(239,68,68,0.08)", color: T.red, fontWeight: 500 }}>
+                    🚫 {ns}
+                  </span>
+                ))}
+              </div>
+              {/* BI Intel row */}
+              {(biIntel.goals?.length > 0 || biIntel.pricing_model || biIntel.usps?.length > 0) && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+                  {(biIntel.goals || []).slice(0, 4).map(g => (
+                    <span key={g} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                      background: "rgba(0,122,255,0.08)", color: T.purple, fontWeight: 600 }}>
+                      🎯 {g}
+                    </span>
+                  ))}
+                  {biIntel.pricing_model && (
+                    <span style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                      background: "rgba(16,185,129,0.08)", color: T.teal, fontWeight: 500 }}>
+                      💰 {biIntel.pricing_model}
+                    </span>
+                  )}
+                  {(biIntel.usps || []).slice(0, 3).map(u => (
+                    <span key={u} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 12,
+                      background: "rgba(127,119,221,0.1)", color: "#6d28d9", fontWeight: 500 }}>
+                      ✨ {u.slice(0, 40)}{u.length > 40 ? "…" : ""}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {confidence > 0 && (
+                <div style={{ marginTop: 8, fontSize: 10, color: confidence >= 80 ? T.teal : confidence >= 60 ? T.amber : T.red }}>
+                  Profile confidence: {Math.round(confidence)}%{confidence < 60 ? " ⚠️ Consider re-running Phase 1" : ""}
+                </div>
+              )}
+            </Card>
+          </>
+        )
+      })()}
 
       {/* Pillar keyword cards */}
       <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
@@ -984,16 +1072,48 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
 function AnalysisPhase({ projectId, strategy, kw2Session }) {
   const [tab, setTab] = useState("research")
 
+  // Old KI pipeline brief (fallback for when no KW2 session is active)
   const { data: kwBriefData } = useQuery({
     queryKey: ["kw-strategy-brief", projectId],
     queryFn: () => apiFetch(`/api/ki/${projectId}/keyword-strategy-brief`),
-    enabled: !!projectId, retry: false, staleTime: 60_000,
+    enabled: !!projectId && !kw2Session, retry: false, staleTime: 60_000,
   })
   const kwBrief = kwBriefData?.brief
   const kwCtx = kwBrief?.context_json || {}
-  const clusters = kwCtx.content_clusters || []
-  const allKws = Object.values(kwBrief?.keywords_json || {}).flat()
-  const pillars = Object.entries(kwBrief?.keywords_json || {})
+
+  // KW2 session validated keywords — used when a session is active
+  const { data: sessionValidatedData } = useQuery({
+    queryKey: ["analysis-session-kw", projectId, kw2Session?.id],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${kw2Session.id}/validated`),
+    enabled: !!kw2Session?.id,
+    staleTime: 60_000,
+    retry: false,
+  })
+
+  // Build allKws/pillars/clusters from KW2 session data or fallback to KI pipeline
+  const { clusters, allKws, pillars } = (() => {
+    if (kw2Session && sessionValidatedData?.items) {
+      const items = sessionValidatedData.items
+      // Group by pillar for pillar breakdown
+      const pillarMap = {}
+      items.forEach(k => {
+        const p = k.pillar || "General"
+        if (!pillarMap[p]) pillarMap[p] = []
+        pillarMap[p].push(k)
+      })
+      return {
+        clusters: [],  // KW2 doesn't use blog clusters in analysis tab
+        allKws: items,
+        pillars: Object.entries(pillarMap),
+      }
+    }
+    const kws = Object.values(kwBrief?.keywords_json || {}).flat()
+    return {
+      clusters: kwCtx.content_clusters || [],
+      allKws: kws,
+      pillars: Object.entries(kwBrief?.keywords_json || {}),
+    }
+  })()
 
   const [showLHF, setShowLHF] = useState(false)
   const { data: lhfData } = useQuery({
@@ -1029,7 +1149,10 @@ function AnalysisPhase({ projectId, strategy, kw2Session }) {
     <div>
       <h2 style={{ margin: "0 0 4px", fontSize: 18 }}>Keyword Analysis</h2>
       <p style={{ margin: "0 0 14px", fontSize: 13, color: T.textSoft }}>
-        Research insights, scoring, and quick-win opportunities from your {allKws.length} keywords.
+        {kw2Session
+          ? `Session: "${kw2Session.name || kw2Session.id.slice(-6)}" · ${allKws.length} validated keywords · ${pillars.length} pillars`
+          : `Research insights, scoring, and quick-win opportunities from your ${allKws.length} keywords.`
+        }
       </p>
 
       {/* Session strategy highlights */}
@@ -1088,9 +1211,9 @@ function AnalysisPhase({ projectId, strategy, kw2Session }) {
             {[
               { label: "Total Keywords", val: allKws.length, color: T.purpleDark },
               { label: "Pillars", val: pillars.length, color: T.teal },
-              { label: "Blog Clusters", val: clusters.length, color: T.amber },
-              { label: "AI Suggested", val: kwCtx.ai_suggested_count || 0, color: T.purple },
-              { label: "Brand", val: kwCtx.brand_name || "—", color: kwCtx.brand_name ? T.purpleDark : T.gray },
+              { label: kw2Session ? "Universe" : "Blog Clusters", val: kw2Session ? (kw2Session.universe_total || 0).toLocaleString() : clusters.length, color: T.amber },
+              { label: kw2Session ? "Validated" : "AI Suggested", val: kw2Session ? (kw2Session.validated_total || 0).toLocaleString() : (kwCtx.ai_suggested_count || 0), color: T.purple },
+              { label: kw2Session ? "Mode" : "Brand", val: kw2Session ? (kw2Session.mode || "expand").toUpperCase() : (kwCtx.brand_name || "—"), color: T.purpleDark },
             ].map((s, i) => (
               <Card key={i} style={{ textAlign: "center", padding: "8px 6px" }}>
                 <div style={{ fontSize: typeof s.val === "number" ? 18 : 12, fontWeight: 700, color: s.color }}>{s.val}</div>
@@ -1935,6 +2058,169 @@ function PipelineProgress({ articleId }) {
   )
 }
 
+// ── Phase8ContentQueue — shows Phase 8 scheduled items with generate buttons ──
+function Phase8ContentQueue({ items, articleMap, generateMut, retryMut, statusColor, intentColor, genKeyword, setGenKeyword, sessionLabel }) {
+  const [filter, setFilter] = useState("all")        // all | pending | generated
+  const [search, setSearch] = useState("")
+  const [pillarFilter, setPillarFilter] = useState("all")
+  const [generating, setGenerating] = useState({})   // track per-item loading
+
+  const pillars = [...new Set(items.map(i => i.pillar).filter(Boolean))]
+
+  const filtered = items.filter(item => {
+    const kw = (item.keyword || item.title || "").toLowerCase()
+    const art = articleMap[kw]
+    const hasSome = !!art
+    if (filter === "pending" && hasSome) return false
+    if (filter === "generated" && !hasSome) return false
+    if (search && !kw.includes(search.toLowerCase())) return false
+    if (pillarFilter !== "all" && item.pillar !== pillarFilter) return false
+    return true
+  })
+
+  const pendingCount = items.filter(i => !articleMap[(i.keyword || i.title || "").toLowerCase()]).length
+  const doneCount = items.length - pendingCount
+
+  const handleGenerate = async (item) => {
+    const kw = item.keyword || item.title || ""
+    const title = item.title || item.keyword || ""
+    setGenerating(g => ({ ...g, [kw]: true }))
+    try {
+      await generateMut.mutateAsync({ keyword: kw, title })
+    } finally {
+      setGenerating(g => ({ ...g, [kw]: false }))
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.purpleDark }}>
+            ✍️ Phase 8 Content Queue · {sessionLabel}
+          </div>
+          <div style={{ fontSize: 11, color: T.textSoft, marginTop: 2 }}>
+            {items.length} scheduled articles · {doneCount} generated · {pendingCount} pending
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {["all", "pending", "generated"].map(f => (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              padding: "4px 10px", borderRadius: 6, border: "none", fontSize: 11, fontWeight: filter === f ? 700 : 500,
+              background: filter === f ? T.purple : T.grayLight,
+              color: filter === f ? "#fff" : T.textSoft, cursor: "pointer",
+            }}>{f.charAt(0).toUpperCase() + f.slice(1)}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Filters row */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search titles…"
+          style={{ flex: 1, padding: "6px 10px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12 }}
+        />
+        {pillars.length > 0 && (
+          <select value={pillarFilter} onChange={e => setPillarFilter(e.target.value)}
+            style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, cursor: "pointer" }}>
+            <option value="all">All Pillars</option>
+            {pillars.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ height: 4, background: T.grayLight, borderRadius: 2, overflow: "hidden", marginBottom: 12 }}>
+        <div style={{ height: "100%", width: `${Math.round((doneCount / items.length) * 100)}%`,
+          background: T.teal, borderRadius: 2, transition: "width .3s" }} />
+      </div>
+
+      {/* Item grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 8 }}>
+        {filtered.slice(0, 60).map((item, i) => {
+          const kw = item.keyword || item.title || ""
+          const art = articleMap[kw.toLowerCase()]
+          const isGen = generating[kw] || (generateMut.isPending && !generating[kw] && false)
+          return (
+            <div key={i} style={{
+              padding: "10px 12px", borderRadius: 9,
+              background: art ? (art.status === "published" ? "#f0fdf4" : art.status === "failed" ? "#fff5f5" : "#fefefe") : "#fff",
+              border: `1px solid ${art ? (art.status === "published" ? T.teal + "44" : art.status === "failed" ? T.red + "44" : T.border) : T.border}`,
+              boxShadow: T.cardShadow,
+              display: "flex", flexDirection: "column", gap: 6,
+            }}>
+              {/* Title */}
+              <div style={{ fontSize: 12, fontWeight: 600, color: T.text, lineHeight: 1.4 }}>
+                {item.title || item.keyword}
+              </div>
+
+              {/* Meta */}
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {item.pillar && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4,
+                  background: T.purpleLight, color: T.purpleDark, fontWeight: 600 }}>{item.pillar}</span>}
+                {item.article_type && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4,
+                  background: T.amberLight, color: T.amber, fontWeight: 600 }}>{item.article_type}</span>}
+                {item.scheduled_date && <span style={{ fontSize: 10, color: T.textSoft }}>{item.scheduled_date}</span>}
+              </div>
+
+              {/* Action */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
+                {art ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 5, fontWeight: 700,
+                      background: statusColor(art.status) + "18", color: statusColor(art.status) }}>
+                      {art.status}
+                    </span>
+                    {art.seo_score > 0 && <span style={{ fontSize: 10, color: T.teal, fontWeight: 600 }}>SEO {Math.round(art.seo_score)}</span>}
+                    {art.status === "failed" && (
+                      <button onClick={() => retryMut.mutate(art.article_id)} disabled={retryMut.isPending}
+                        style={{ fontSize: 10, padding: "2px 7px", borderRadius: 5, border: `1px solid ${T.border}`,
+                          background: "#fff", color: T.textSoft, cursor: "pointer" }}>
+                        🔄 Retry
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 10, color: T.textSoft }}>{kw}</div>
+                )}
+                {!art && (
+                  <button
+                    onClick={() => handleGenerate(item)}
+                    disabled={isGen || generateMut.isPending}
+                    style={{
+                      padding: "4px 12px", borderRadius: 6, border: "none", fontSize: 11, fontWeight: 700,
+                      background: (isGen || generateMut.isPending) ? T.grayLight : T.purple,
+                      color: (isGen || generateMut.isPending) ? T.textSoft : "#fff",
+                      cursor: (isGen || generateMut.isPending) ? "not-allowed" : "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {isGen ? "Starting…" : "Generate"}
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {filtered.length > 60 && (
+        <div style={{ textAlign: "center", fontSize: 12, color: T.textSoft, marginTop: 10 }}>
+          Showing 60 of {filtered.length} items. Use search / filter to narrow down.
+        </div>
+      )}
+      {filtered.length === 0 && (
+        <div style={{ textAlign: "center", padding: 24, fontSize: 13, color: T.textSoft }}>
+          No items match your filters.
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ContentHubPhase({ projectId, kw2Session }) {
   const qc = useQueryClient()
   const [openCluster, setOpenCluster] = useState(null)
@@ -1951,8 +2237,33 @@ function ContentHubPhase({ projectId, kw2Session }) {
     enabled: !!projectId, retry: false, staleTime: 60_000,
   })
   const kwBrief = kwBriefData?.brief
-  const clusters = kwBrief?.context_json?.content_clusters || []
-  const topicsExpanded = kwBrief?.context_json?.topics_expanded || false
+
+  // KW2 session clusters — used when a session is active (expand-mode)
+  const { data: sessionClustersData } = useQuery({
+    queryKey: ["session-clusters-hub", projectId, kw2Session?.id],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${kw2Session.id}/expand/clusters`).catch(() => null),
+    enabled: !!kw2Session?.id && kw2Session.mode === "expand",
+    staleTime: 120_000, retry: false,
+  })
+
+  // Phase 8 calendar items for active session — shown as content queue with generate buttons
+  const { data: phase8CalData } = useQuery({
+    queryKey: ["session-phase8-cal", projectId, kw2Session?.id],
+    queryFn: () => apiFetch(`/api/kw2/${projectId}/sessions/${kw2Session.id}/calendar`).catch(() => null),
+    enabled: !!kw2Session?.id,
+    staleTime: 120_000, retry: false,
+  })
+  const phase8Items = phase8CalData?.items || []
+
+  // Clusters: session clusters > KI pipeline clusters (always loaded as fallback)
+  const sessionClusters = sessionClustersData?.clusters || []
+  const kiClusters = kwBrief?.context_json?.content_clusters || []
+  const clusters = kw2Session
+    ? (sessionClusters.length ? sessionClusters : kiClusters)
+    : kiClusters
+  const topicsExpanded = kw2Session
+    ? (sessionClusters.length > 0 || (kwBrief?.context_json?.topics_expanded || false))
+    : (kwBrief?.context_json?.topics_expanded || false)
   const totalTopics = clusters.reduce((s, c) => s + (c.blog_topics || []).length, 0)
 
   const { data: articles, isLoading: loadingArticles } = useQuery({
@@ -2019,8 +2330,19 @@ function ContentHubPhase({ projectId, kw2Session }) {
     { value: "ollama", label: "🦙 Ollama (Local)" },
   ]
 
-  // Session content calendar (from active KW2 session strategy)
-  const sessionCalendar = kw2Session?._strategy?.content_calendar || []
+  // Session content calendar — normalize weekly_plan → content_calendar format
+  const sessionCalendar = (() => {
+    if (!kw2Session?._strategy) return []
+    // Try content_calendar field first
+    const raw = kw2Session._strategy.content_calendar
+    if (Array.isArray(raw) && raw.length > 0) return raw
+    // Fall back to weekly_plan and normalize to {month, focus_pillar, articles}
+    return (kw2Session._strategy.weekly_plan || []).map(w => ({
+      month: `Week ${w.week || "?"}`,
+      focus_pillar: w.focus_pillar || w.pillar || "General",
+      articles: w.articles || [],
+    }))
+  })()
   const sessionPillars = kw2Session?._strategy?.pillar_strategy || kw2Session?._strategy?.priority_pillars || []
   const sessionLabel = kw2Session?.name ||
     (Array.isArray(kw2Session?.seed_keywords) && kw2Session.seed_keywords.length
@@ -2054,8 +2376,23 @@ function ContentHubPhase({ projectId, kw2Session }) {
         </span>
       </div>
 
-      {/* Session content calendar section (when session selected) */}
-      {kw2Session && sessionCalendar.length > 0 && (
+      {/* ── PHASE 8 CONTENT QUEUE (when session active) ─────────────────────── */}
+      {kw2Session && phase8Items.length > 0 && (
+        <Phase8ContentQueue
+          items={phase8Items}
+          articleMap={articleMap}
+          generateMut={generateMut}
+          retryMut={retryMut}
+          statusColor={statusColor}
+          intentColor={intentColor}
+          genKeyword={genKeyword}
+          setGenKeyword={setGenKeyword}
+          sessionLabel={sessionLabel}
+        />
+      )}
+
+      {/* Session calendar from strategy weekly_plan (when no Phase 8 data) */}
+      {kw2Session && sessionCalendar.length > 0 && phase8Items.length === 0 && (
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.teal, marginBottom: 10 }}>
             📅 Session Content Plan · {sessionLabel}
@@ -2067,16 +2404,36 @@ function ContentHubPhase({ projectId, kw2Session }) {
                 <div style={{ fontSize: 11, fontWeight: 700, color: T.purpleDark, marginBottom: 8 }}>
                   {month.month} — {month.focus_pillar}
                 </div>
-                {(month.articles || []).map((a, j) => (
-                  <div key={j} style={{ padding: "6px 8px", borderRadius: 7, background: "#f8f9fa",
-                    marginBottom: 4, fontSize: 11, border: `0.5px solid ${T.border}` }}>
-                    <div style={{ fontWeight: 600, lineHeight: 1.3, marginBottom: 2 }}>{a.title}</div>
-                    <div style={{ color: T.textSoft, fontSize: 10 }}>
-                      {a.type} · {a.word_count || 1500} words
-                      {a.target_keyword && <span style={{ color: T.purple }}> · {a.target_keyword}</span>}
+                {(month.articles || []).map((a, j) => {
+                  const kw = typeof a === "string" ? a : (a?.target_keyword || a?.keyword || "")
+                  const title = typeof a === "string" ? a : (a?.title || a?.keyword || "")
+                  const art = articleMap[kw?.toLowerCase()]
+                  return (
+                    <div key={j} style={{ padding: "6px 8px", borderRadius: 7,
+                      background: art ? T.tealLight : "#f8f9fa", marginBottom: 4, fontSize: 11,
+                      border: `0.5px solid ${art ? T.teal + "30" : T.border}` }}>
+                      <div style={{ fontWeight: 600, lineHeight: 1.3, marginBottom: 4 }}>{title}</div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <span style={{ color: T.textSoft, fontSize: 10 }}>
+                          {typeof a === "object" && a?.type ? `${a.type} · ` : ""}
+                          {typeof a === "object" && a?.word_count ? `${a.word_count}w` : ""}
+                        </span>
+                        {art ? (
+                          <Badge label={art.status} color={statusColor(art.status)} />
+                        ) : kw && (
+                          <button
+                            onClick={() => generateMut.mutate({ keyword: kw, title })}
+                            disabled={generateMut.isPending}
+                            style={{ fontSize: 10, padding: "2px 8px", borderRadius: 5, border: "none",
+                              background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600 }}
+                          >
+                            Generate
+                          </button>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             ))}
           </div>
@@ -2328,13 +2685,7 @@ const KW_SESSION_MODE_STYLE = {
 
 const KW_PHASE_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-function KwSessionCard({ session, projectId, setPage, isSelected, onSelect }) {
-  const [expanded, setExpanded] = useState(false)
-  const [strategy, setStrategy] = useState(null)
-  const [stratLoading, setStratLoading] = useState(false)
-  const [stratError, setStratError] = useState(null)
-
-  const hasStrategy = !!session.phase9_done
+function KwSessionCard({ session, projectId, setPage, isSelected, onSelect, onDevelop }) {
   const st = KW_SESSION_MODE_STYLE[session.mode] || KW_SESSION_MODE_STYLE.brand
 
   const label = session.name ||
@@ -2343,157 +2694,272 @@ function KwSessionCard({ session, projectId, setPage, isSelected, onSelect }) {
       : `Session ${(session.id || "").slice(-6)}`)
 
   const donePhasesCount = KW_PHASE_KEYS.filter(i => session[`phase${i}_done`]).length
+  const totalSteps = session.mode === "expand" ? 8 : 9
 
-  const toggle = async () => {
-    if (!hasStrategy) return
-    // Fetch when opening and no data yet — !stratError not needed since retries are allowed
-    if (!expanded && !strategy && !stratLoading) {
-      setStratLoading(true)
-      setStratError(null)
+  // Use pre-parsed strategy from hub (session._strategy), no fetch needed
+  const strat = session._strategy || null
+
+  // Safely extract headline — executive_summary may contain raw JSON if AI fallback fired
+  const _safeHeadline = (s) => {
+    if (!s) return ""
+    const direct = s?.strategy_summary?.headline
+    if (direct && typeof direct === "string" && direct.length < 400 && !direct.trimStart().startsWith("{")) return direct
+    const exec = s?.executive_summary
+    if (!exec || typeof exec !== "string") return ""
+    const trimmed = exec.trimStart()
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
-        const data = await apiFetch(`/api/kw2/${projectId}/sessions/${session.id}/apply/strategy`)
-        setStrategy(data)
-      } catch (e) {
-        setStratError(e.message || "Strategy not available")
-      }
-      setStratLoading(false)
+        const parsed = JSON.parse(exec)
+        const nested = parsed?.strategy_summary?.headline || parsed?.headline
+        if (nested && typeof nested === "string") return nested
+      } catch {}
+      return "" // don't show raw JSON blobs
     }
-    setExpanded(e => !e)
+    return exec.length > 200 ? exec.slice(0, 197) + "…" : exec
   }
+
+  const headline  = _safeHeadline(strat)
+  const quickWins = (strat?.quick_wins || []).slice(0, 3).map(w => typeof w === "string" ? w : w?.keyword || "")
+  const nextArts  = (() => {
+    const plan = strat?.weekly_plan || []
+    const arts = []
+    for (const w of plan) {
+      for (const a of (w.articles || [])) {
+        if (arts.length >= 2) break
+        arts.push(typeof a === "string" ? a : (a?.title || a?.keyword || ""))
+      }
+      if (arts.length >= 2) break
+    }
+    return arts
+  })()
+
+  // Pillar stats — lazy loaded when session has enough phases
+  const { data: pillarStats } = useQuery({
+    queryKey: ["kw-pillar-stats", projectId, session.id],
+    queryFn: async () => {
+      try { return await apiFetch(`/api/kw2/${projectId}/sessions/${session.id}/pillar-stats`) }
+      catch { return null }
+    },
+    enabled: !!session.phase3_done,
+    staleTime: 120_000,
+    retry: false,
+  })
+  const pillarRows = pillarStats?.pillars || (strat?.priority_pillars || []).map(p => ({
+    pillar: typeof p === "string" ? p : p?.pillar || "",
+    count: typeof p === "object" ? p?.count : null,
+    opportunity_score: typeof p === "object" ? p?.opportunity_score : null,
+  }))
 
   return (
     <div style={{
-      borderRadius: 12,
-      border: expanded ? `2px solid ${st.badge}` : `1px solid ${st.border}`,
+      borderRadius: 14,
+      border: isSelected ? `2px solid ${st.badge}` : `1px solid ${st.border}`,
       background: st.bg,
       overflow: "hidden",
-      boxShadow: T.cardShadow,
-      transition: "border .15s",
+      boxShadow: isSelected ? `0 0 0 3px ${st.badge}22, ${T.cardShadow}` : T.cardShadow,
+      transition: "border .15s, box-shadow .15s",
+      display: "flex",
+      flexDirection: "column",
+      maxHeight: 520,
     }}>
-      {/* Card header */}
-      <div style={{ padding: 18 }}>
-        {/* Mode badge */}
-        <div style={{ marginBottom: 10 }}>
-          <span style={{
-            display: "inline-flex", alignItems: "center", gap: 4,
+      {/* ── Header ── */}
+      <div style={{ padding: "14px 16px 12px", overflowY: "auto", flex: 1 }}>
+        {/* Mode badge + strategy ready */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4,
             padding: "2px 9px", borderRadius: 20, fontSize: 10, fontWeight: 700,
-            background: st.badgeBg, color: st.badge,
-          }}>
+            background: st.badgeBg, color: st.badge }}>
             {st.icon} {st.label}
           </span>
+          {session.phase9_done && (
+            <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20,
+              background: "#dcfce7", color: T.teal, fontWeight: 700 }}>
+              ✓ Strategy Ready
+            </span>
+          )}
         </div>
 
         {/* Session name */}
-        <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", lineHeight: 1.3,
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#111827", lineHeight: 1.3,
           marginBottom: 8, wordBreak: "break-word" }}>
           {label}
         </div>
 
         {/* Keyword counts */}
-        <div style={{ display: "flex", gap: 16, marginBottom: 10 }}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 18, fontWeight: 800, color: st.badge }}>
-              {(session.universe_total || 0).toLocaleString()}
-            </div>
-            <div style={{ fontSize: 10, color: T.textSoft }}>universe</div>
+        <div style={{ display: "flex", gap: 16, marginBottom: 8 }}>
+          <div>
+            <span style={{ fontSize: 17, fontWeight: 800, color: st.badge }}>{(session.universe_total || 0).toLocaleString()}</span>
+            <span style={{ fontSize: 10, color: T.textSoft, marginLeft: 4 }}>universe</span>
           </div>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 18, fontWeight: 800,
-              color: (session.validated_total || 0) > 0 ? T.teal : "#9ca3af" }}>
+          <div>
+            <span style={{ fontSize: 17, fontWeight: 800, color: (session.validated_total || 0) > 0 ? T.teal : "#9ca3af" }}>
               {(session.validated_total || 0).toLocaleString()}
-            </div>
-            <div style={{ fontSize: 10, color: T.textSoft }}>validated</div>
+            </span>
+            <span style={{ fontSize: 10, color: T.textSoft, marginLeft: 4 }}>validated</span>
           </div>
         </div>
 
         {/* Phase dots */}
-        <div style={{ display: "flex", gap: 3, alignItems: "center", marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 3, alignItems: "center", marginBottom: 10 }}>
           {KW_PHASE_KEYS.map(i => (
             <div key={i} style={{
-              width: 8, height: 8, borderRadius: "50%",
+              width: 9, height: 9, borderRadius: "50%",
               background: session[`phase${i}_done`] ? T.teal : "#e5e7eb",
+              boxShadow: session[`phase${i}_done`] ? `0 0 0 1px ${T.teal}44` : "none",
             }} title={`Phase ${i}`} />
           ))}
           <span style={{ fontSize: 10, color: T.gray, marginLeft: 4 }}>
-            {donePhasesCount}/9
+            {donePhasesCount}/{totalSteps}
           </span>
         </div>
 
-        {/* Action buttons */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {hasStrategy && (
-            <button
-              onClick={toggle}
-              style={{
-                width: "100%", padding: "7px 0", borderRadius: 7, border: "none",
-                background: expanded ? st.badge : st.badgeBg,
-                color: expanded ? "#fff" : st.badge,
-                fontWeight: 700, fontSize: 12, cursor: "pointer", transition: "all .12s",
-              }}
-            >
-              {expanded ? "Collapse ▲" : "View Strategy ▼"}
-            </button>
-          )}
-          {!hasStrategy && (
-            <div style={{ fontSize: 11, color: T.gray, fontStyle: "italic", marginBottom: 4 }}>
-              Complete Phase 9 to generate strategy
+        {/* Pillars (if available) */}
+        {pillarRows.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: T.textSoft, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".05em" }}>
+              Keyword Pillars
             </div>
-          )}
-          {/* Set Active / Selected button */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {pillarRows.slice(0, 4).map((p, i) => (
+                <span key={i} style={{ fontSize: 10, padding: "2px 7px", borderRadius: 6,
+                  background: "#fff", border: `1px solid ${st.border}`, color: st.badge, fontWeight: 600 }}>
+                  {p.pillar}{p.count != null ? ` (${p.count})` : p.opportunity_score != null ? ` · ${p.opportunity_score}` : ""}
+                </span>
+              ))}
+              {pillarRows.length > 4 && (
+                <span style={{ fontSize: 10, color: T.textSoft }}>+{pillarRows.length - 4} more</span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Strategy headline */}
+        {headline && (
+          <div style={{ padding: "7px 10px", background: `${T.purple}08`, borderRadius: 8,
+            border: `1px solid ${T.purple}20`, marginBottom: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: T.purpleDark, marginBottom: 3 }}>Strategy Headline</div>
+            <div style={{ fontSize: 11, color: T.text, lineHeight: 1.5 }}>{headline}</div>
+          </div>
+        )}
+
+        {/* Quick wins */}
+        {quickWins.length > 0 && (
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: T.textSoft, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".05em" }}>
+              Quick Wins
+            </div>
+            {quickWins.map((w, i) => (
+              <div key={i} style={{ fontSize: 11, color: T.text, padding: "2px 0", lineHeight: 1.4 }}>
+                → {w}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Next articles */}
+        {nextArts.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: T.textSoft, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".05em" }}>
+              Up Next
+            </div>
+            {nextArts.map((a, i) => (
+              <div key={i} style={{ fontSize: 11, color: T.purpleDark, padding: "2px 0", lineHeight: 1.4, fontWeight: 500 }}>
+                ✍️ {a}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!session.phase9_done && !strat && (
+          <div style={{ fontSize: 11, color: T.gray, fontStyle: "italic", marginBottom: 8 }}>
+            Complete Phase 9 to generate a strategy for this session
+          </div>
+        )}
+      </div>
+
+      {/* ── Action buttons ── */}
+      <div style={{ padding: "10px 14px", borderTop: `1px solid ${st.border}`,
+        background: "#fff", display: "flex", flexDirection: "column", gap: 6, marginTop: "auto" }}>
+
+        {/* Develop Strategy → */}
+        {onDevelop && (
+          <button
+            onClick={() => onDevelop(session.id)}
+            style={{
+              width: "100%", padding: "8px 0", borderRadius: 8, border: "none",
+              background: T.purple, color: "#fff",
+              fontWeight: 700, fontSize: 12, cursor: "pointer", transition: "opacity .12s",
+            }}
+          >
+            🗺️ Open Strategy →
+          </button>
+        )}
+
+        <div style={{ display: "flex", gap: 6 }}>
+          {/* Set Active */}
           {onSelect && (
             <button
               onClick={() => onSelect(isSelected ? null : session.id)}
               style={{
-                width: "100%", padding: "6px 0", borderRadius: 7, border: "none",
+                flex: 1, padding: "6px 0", borderRadius: 7, border: "none",
                 background: isSelected ? T.teal : `${T.teal}18`,
                 color: isSelected ? "#fff" : T.teal,
                 fontWeight: 700, fontSize: 11, cursor: "pointer", transition: "all .12s",
-                marginBottom: 4,
               }}
             >
-              {isSelected ? "✓ Active Session" : "Set as Active Session"}
+              {isSelected ? "✓ Active" : "Set Active"}
             </button>
           )}
+
+          {/* Go to Research */}
           {setPage && (
             <button
               onClick={() => setPage("kw2")}
               style={{
-                width: "100%", padding: "6px 0", borderRadius: 7,
+                flex: 1, padding: "6px 0", borderRadius: 7,
                 border: `1px solid ${st.border}`,
                 background: "transparent", color: st.badge,
                 fontWeight: 600, fontSize: 11, cursor: "pointer",
               }}
             >
-              Go to Research →
+              Research →
             </button>
           )}
         </div>
       </div>
-
-      {/* Expanded strategy panel */}
-      {expanded && (
-        <div style={{ borderTop: `1px solid ${st.border}`, padding: 18, background: "#fff" }}>
-          {stratLoading ? (
-            <div style={{ textAlign: "center", padding: 20, color: T.textSoft, fontSize: 13 }}>
-              Loading strategy…
-            </div>
-          ) : stratError ? (
-            <div style={{ color: T.red, fontSize: 13, padding: "8px 0" }}>
-              Strategy not generated yet — complete Phase 9 or run Apply
-            </div>
-          ) : (
-            <StrategyTab strategy={strategy} />
-          )}
-        </div>
-      )}
     </div>
   )
 }
 
 // ── KwSessionsOverview ────────────────────────────────────────────────────────
 
-function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSessionId, onSelectSession, onNavigate }) {
+function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSessionId, onSelectSession, onNavigate, onDevelop }) {
   const sessions = kw2Sessions
+  const qc = useQueryClient()
+  const [showNewPanel, setShowNewPanel] = useState(false)
+  const [newForm, setNewForm] = useState({ name: "", mode: "expand", seeds: "" })
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState(null)
+
+  const handleCreate = async () => {
+    setCreating(true)
+    setCreateError(null)
+    try {
+      const seeds = newForm.seeds.split(",").map(s => s.trim()).filter(Boolean)
+      await apiFetch(`/api/kw2/${projectId}/sessions`, {
+        method: "POST",
+        body: JSON.stringify({ name: newForm.name || undefined, mode: newForm.mode, seed_keywords: seeds }),
+      })
+      qc.invalidateQueries(["kw2-hub-sessions", projectId])
+      setShowNewPanel(false)
+      setNewForm({ name: "", mode: "expand", seeds: "" })
+      if (setPage) setPage("kw2")
+    } catch (e) {
+      setCreateError(e.message || "Failed to create session")
+    }
+    setCreating(false)
+  }
+  const inStyle = { width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: "border-box" }
 
   const totalUniverse = sessions.reduce((s, x) => s + (x.universe_total || 0), 0)
   const totalValidated = sessions.reduce((s, x) => s + (x.validated_total || 0), 0)
@@ -2537,14 +3003,14 @@ function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSess
         </div>
         {setPage && (
           <button
-            onClick={() => setPage("kw2")}
+            onClick={() => setShowNewPanel(true)}
             style={{
               padding: "6px 14px", borderRadius: 7, border: `1px solid ${T.border}`,
               background: "#fff", color: T.purpleDark, cursor: "pointer",
               fontWeight: 600, fontSize: 12,
             }}
           >
-            + New Session
+            + New Keyword Research
           </button>
         )}
       </div>
@@ -2605,9 +3071,75 @@ function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSess
             setPage={setPage}
             isSelected={selectedSessionId === s.id}
             onSelect={onSelectSession}
+            onDevelop={onDevelop}
           />
         ))}
       </div>
+
+      {/* ── New session side panel ── */}
+      {showNewPanel && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 900, display: "flex" }}>
+          {/* Backdrop */}
+          <div style={{ flex: 1, background: "rgba(0,0,0,0.3)" }} onClick={() => setShowNewPanel(false)} />
+          {/* Panel */}
+          <div style={{ width: 380, background: "#fff", boxShadow: "-4px 0 24px rgba(0,0,0,0.12)",
+            display: "flex", flexDirection: "column", overflowY: "auto" }}>
+            <div style={{ padding: "20px 20px 14px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>New Keyword Research</div>
+              <button onClick={() => setShowNewPanel(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: T.textSoft }}>✕</button>
+            </div>
+            <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14, flex: 1 }}>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, display: "block", marginBottom: 5 }}>
+                  Session Name (optional)
+                </label>
+                <input
+                  value={newForm.name}
+                  onChange={e => setNewForm(f => ({ ...f, name: e.target.value }))}
+                  placeholder="e.g., Cardamom Expansion Q3"
+                  style={inStyle}
+                />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, display: "block", marginBottom: 5 }}>
+                  Research Mode
+                </label>
+                <select value={newForm.mode} onChange={e => setNewForm(f => ({ ...f, mode: e.target.value }))} style={inStyle}>
+                  <option value="expand">🌱 Expand — grow keyword universe</option>
+                  <option value="brand">🏢 Brand — brand keyword analysis</option>
+                  <option value="v2">⚡ Smart v2 — full AI workflow</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 600, color: T.textSoft, display: "block", marginBottom: 5 }}>
+                  Seed Keywords
+                </label>
+                <textarea
+                  value={newForm.seeds}
+                  onChange={e => setNewForm(f => ({ ...f, seeds: e.target.value }))}
+                  placeholder="cardamom, Kerala spices, buy cardamom online"
+                  rows={4}
+                  style={{ ...inStyle, resize: "vertical", lineHeight: 1.6 }}
+                />
+                <div style={{ fontSize: 11, color: T.textSoft, marginTop: 4 }}>Separate with commas</div>
+              </div>
+
+              {createError && <div style={{ fontSize: 12, color: T.red }}>{createError}</div>}
+
+              <button
+                onClick={handleCreate}
+                disabled={creating}
+                style={{ padding: "10px", borderRadius: 9, border: "none",
+                  background: creating ? T.grayLight : T.purple,
+                  color: creating ? T.textSoft : "#fff",
+                  fontWeight: 700, fontSize: 13, cursor: creating ? "not-allowed" : "pointer" }}
+              >
+                {creating ? "Creating…" : "Create & Start Research →"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -4990,6 +5522,8 @@ function StrategyResultsPhase({ projectId, setPage }) {
 export default function StrategyIntelligenceHub({ projectId, setPage }) {
   const [activePhase, setActivePhase] = useState("overview")
   const [selectedSessionId, setSelectedSessionId] = useState(null)
+  const [strategySessionId, setStrategySessionId] = useState(null)
+  const [showPromptStudio, setShowPromptStudio] = useState(false)
 
   // ── Shared KW2 sessions query (passed to all phases) ──
   const { data: kw2SessionsData, refetch: refetchHubSessions } = useQuery({
@@ -5052,8 +5586,27 @@ export default function StrategyIntelligenceHub({ projectId, setPage }) {
     )
   }
 
+  // When a session strategy page is open, render it full-screen
+  if (strategySessionId) {
+    const stratSession = kw2Sessions.find(s => s.id === strategySessionId) || null
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+        <SessionStrategyPage
+          projectId={projectId}
+          sessionId={strategySessionId}
+          session={stratSession}
+          onBack={() => setStrategySessionId(null)}
+          setPage={setPage}
+        />
+      </div>
+    )
+  }
+
   return (
     <div style={{ display: "flex", height: "100%" }}>
+      {showPromptStudio && (
+        <Kw2PromptStudio filterPhases={[2]} onClose={() => setShowPromptStudio(false)} />
+      )}
       {/* Phase sidebar */}
       <div style={{ width: 180, borderRight: `1px solid ${T.border}`, background: "#fefefe", flexShrink: 0, padding: "12px 0" }}>
         <div style={{ padding: "4px 14px 12px", fontSize: 11, fontWeight: 700, color: T.purpleDark, textTransform: "uppercase", letterSpacing: 0.5 }}>
@@ -5121,12 +5674,16 @@ export default function StrategyIntelligenceHub({ projectId, setPage }) {
               onClick={() => refetchHubSessions()}
               style={{ marginLeft: "auto", fontSize: 11, padding: "2px 8px", borderRadius: 5, border: `1px solid ${T.border}`, background: "transparent", cursor: "pointer", color: T.textSoft }}
             >↺</button>
+            <button
+              onClick={() => setShowPromptStudio(true)}
+              style={{ fontSize: 11, padding: "3px 10px", borderRadius: 5, border: `1px solid ${T.border}`, background: "transparent", cursor: "pointer", color: T.textSoft, fontWeight: 500 }}
+            >🧪 Prompts</button>
           </div>
         )}
 
         {/* Main content */}
         <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto" }}>
-          {activePhase === "overview"  && <KwSessionsOverview projectId={projectId} setPage={setPage} kw2Sessions={kw2Sessions} selectedSessionId={selectedSessionId} onSelectSession={setSelectedSessionId} onNavigate={setActivePhase} />}
+          {activePhase === "overview"  && <KwSessionsOverview projectId={projectId} setPage={setPage} kw2Sessions={kw2Sessions} selectedSessionId={selectedSessionId} onSelectSession={setSelectedSessionId} onNavigate={setActivePhase} onDevelop={setStrategySessionId} />}
           {activePhase === "keywords"  && <KeywordPillarsPhase projectId={projectId} setPage={setPage} kw2Session={selectedSession} />}
           {activePhase === "analysis"  && <AnalysisPhase projectId={projectId} strategy={strategy} kw2Session={selectedSession} />}
           {activePhase === "strategy"  && <StrategyPhase projectId={projectId} setPage={setPage} selectedSessionId={selectedSessionId} setSelectedSessionId={setSelectedSessionId} kw2Sessions={kw2Sessions} />}

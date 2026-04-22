@@ -157,36 +157,16 @@ RESPOND WITH ONLY VALID JSON ARRAY, NO OTHER TEXT:
         return prompt
 
     def _call_ollama(self, prompt: str) -> str:
-        """Call Ollama API with retry."""
-        import requests
-        import time
-        last_err = None
-        for attempt in range(2):
-            try:
-                response = requests.post(
-                    f"{self.ollama_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "temperature": 0.3,
-                        "options": {"num_ctx": 2048, "num_predict": 1500},
-                    },
-                    timeout=120,  # Increased from 45s to 120s — batch processing can be slow
-                )
-                response.raise_for_status()
-                data = response.json()
-                result = data.get("response", "")
-                if not result:
-                    log.warning(f"[AIScorer] Empty response from Ollama")
-                return result
-            except Exception as e:
-                last_err = e
-                log.warning(f"[AIScorer] Ollama attempt {attempt+1} failed: {str(e)[:100]}")
-                if attempt == 0:
-                    time.sleep(2)
-        log.error(f"[AIScorer] Ollama failed after 2 attempts: {last_err}")
-        raise last_err
+        """Call Ollama via central AIRouter (health check, semaphore, 620s timeout)."""
+        try:
+            from core.ai_config import AIRouter
+            result = AIRouter._call_ollama(prompt, "You are a keyword intelligence expert.", 0.3)
+            if not result:
+                log.warning("[AIScorer] Empty response from Ollama")
+            return result
+        except Exception as e:
+            log.error(f"[AIScorer] Ollama failed: {e}")
+            raise
 
     def _parse_ollama_response(
         self,

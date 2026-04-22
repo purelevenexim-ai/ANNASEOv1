@@ -51,17 +51,10 @@ def _call_groq(prompt: str, max_tokens: int = 800) -> str:
 
 
 def _call_ollama(prompt: str, max_tokens: int = 800) -> str:
-    """Fallback: call local Ollama DeepSeek."""
+    """Fallback: call Ollama via central AIRouter (health check, semaphore, 620s timeout)."""
     try:
-        import requests
-        url = f"{os.getenv('OLLAMA_URL', 'http://172.235.16.165:11434')}/api/generate"
-        r = requests.post(url, json={
-            "model": os.getenv("OLLAMA_MODEL", "deepseek-r1:7b"),
-            "prompt": prompt,
-            "stream": False,
-            "options": {"num_predict": max_tokens, "temperature": 0.2},
-        }, timeout=60)
-        return r.json().get("response", "")
+        from core.ai_config import AIRouter
+        return AIRouter._call_ollama(prompt, "You are a Python debugging expert.", 0.2)
     except Exception as e:
         log.warning(f"[BugAnalyzer] Ollama failed: {e}")
         return ""

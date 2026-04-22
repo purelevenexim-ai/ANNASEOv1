@@ -358,27 +358,23 @@ class UpdatePlanGenerator:
 
     def _deepseek_write(self, keyword: str, instruction: dict,
                          article_body: str) -> str:
-        """DeepSeek writes the exact content addition."""
+        """Write exact content addition via central AIRouter."""
         try:
-            r = _req.post(
-                f"{os.getenv('OLLAMA_URL','http://172.235.16.165:11434')}/api/generate",
-                json={"model": "deepseek-r1:7b",
-                      "prompt": (
-                          f"Write content for an SEO article update.\n"
-                          f"Keyword: {keyword}\n"
-                          f"Update type: {instruction.get('instruction_type','')}\n"
-                          f"Location: {instruction.get('location','')}\n"
-                          f"What to write: {instruction.get('new_content','')}\n"
-                          f"Reason: {instruction.get('reason','')}\n\n"
-                          f"Write the exact text to add. 150-250 words. "
-                          f"Include specific facts, numbers, and expert signals. "
-                          f"Start with a direct statement, not 'In conclusion' or 'Furthermore'."
-                      ),
-                      "stream": False, "options": {"num_predict": 350}},
-                timeout=60
+            from core.ai_config import AIRouter
+            prompt = (
+                f"Write content for an SEO article update.\n"
+                f"Keyword: {keyword}\n"
+                f"Update type: {instruction.get('instruction_type','')}\n"
+                f"Location: {instruction.get('location','')}\n"
+                f"What to write: {instruction.get('new_content','')}\n"
+                f"Reason: {instruction.get('reason','')}\n\n"
+                f"Write the exact text to add. 150-250 words. "
+                f"Include specific facts, numbers, and expert signals. "
+                f"Start with a direct statement, not 'In conclusion' or 'Furthermore'."
             )
-            if r.ok:
-                return r.json().get("response","").strip()
+            result = AIRouter._call_ollama(prompt, "You are an expert SEO content writer.", 0.2)
+            if result:
+                return result
         except Exception as e:
             log.warning(f"[Refresh] DeepSeek write failed: {e}")
         return instruction.get("new_content","[Content to be written manually]")

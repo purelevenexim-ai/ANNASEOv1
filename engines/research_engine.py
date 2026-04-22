@@ -10,6 +10,7 @@ Guarantees: Never returns 0 keywords. Respects business intent.
 
 import logging
 import json
+import os
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -36,10 +37,11 @@ class ResearchEngine:
 
     def __init__(
         self,
-        ollama_url: str = "http://172.235.16.165:11434",
+        ollama_url: str = "",
         industry: str = "general",
     ):
-        self.ollama_url = ollama_url
+        # Default to env var (proxy on :8080); empty string means use AICfg at call time
+        self.ollama_url = ollama_url or os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
         self.industry = industry
         self._scorer = None  # Lazy load AIScorer
 

@@ -282,7 +282,7 @@ def get_audit_log(limit: int = 100) -> List[Dict]:
 
 # Default rate limits (requests per second / burst capacity)
 PROVIDER_RATE_LIMITS = {
-    "groq":         {"rate": 0.45, "capacity": 3},     # ~27 RPM (free tier: 30 RPM)
+    "groq":         {"rate": 0.45, "capacity": 1},     # ~27 RPM (free tier: 30 RPM), burst=1 to avoid 429
     "gemini_paid":  {"rate": 1.5,  "capacity": 10},    # ~90 RPM (paid tier generous)
     "gemini_free":  {"rate": 0.15, "capacity": 2},     # ~9 RPM (free tier: 10 RPM)
     "gemini":       {"rate": 0.15, "capacity": 2},
@@ -560,9 +560,14 @@ class AIProviderManager:
 
         # ── All retries exhausted ──
         latency = time.monotonic() - t0 if 't0' in dir() else 0
-        cb.record_failure()
         err_msg = last_result.error if last_result else "unknown"
         status_code = last_result.status_code if last_result else 0
+        # Don't count rate-limit failures (429, no_api_key) toward circuit breaker —
+        # they're expected transient issues, not provider outages
+        if status_code == 429 or err_msg in ("no_api_key", "all_keys_rate_limited"):
+            pass  # skip cb.record_failure()
+        else:
+            cb.record_failure()
         metrics.record_call(
             latency, False, status_code,
             error_msg=err_msg, request_id=request_id,
@@ -669,6 +674,9 @@ class CallResult:
     status_code: int = 0
     latency: float = 0.0
     tokens_used: int = 0
+    input_tokens: int = 0         # Prompt / input token count (from API response)
+    output_tokens: int = 0        # Completion / output token count (from API response)
+    model: str = ""               # Actual model used (populated by caller)
     response_chars: int = 0
     response_headers: Optional[Dict] = None
 

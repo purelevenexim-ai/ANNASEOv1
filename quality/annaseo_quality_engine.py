@@ -593,7 +593,7 @@ class TuningGenerator:
     DeepSeek writes the actual tuning code/prompt change.
     Claude verifies it before it goes to the approval gate.
     """
-    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://172.235.16.165:11434")
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
     GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
 
     # What each tuning_type means
@@ -716,14 +716,10 @@ Approach: {approach}
 Write a specific instruction to add to the relevant AI prompt that prevents this issue.
 Be specific and technical. 3 sentences maximum.
 Return only the instruction text, no explanation."""
-                r = _req.post(
-                    f"{self.OLLAMA_URL}/api/generate",
-                    json={"model": "deepseek-r1:7b", "prompt": prompt,
-                          "stream": False, "options": {"num_predict": 200}},
-                    timeout=60
-                )
-                if r.ok:
-                    new_instruction = r.json().get("response", "").strip()[:500]
+                from core.ai_config import AIRouter
+                result = AIRouter._call_ollama(prompt, "You are an SEO engine debugging expert.", 0.1)
+                if result:
+                    new_instruction = result.strip()[:500]
                     before = f"# Prompt for {target} (no specific exclusion rule for this case)"
                     after  = f"# Prompt for {target} — add this rule:\n{new_instruction}"
                     return before, after

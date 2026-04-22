@@ -38,8 +38,8 @@ logging.basicConfig(level=logging.INFO,
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Cfg:
-    OLLAMA_URL      = os.getenv("OLLAMA_URL",     "http://172.235.16.165:11434")
-    OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",   "deepseek-r1:7b")
+    OLLAMA_URL      = os.getenv("OLLAMA_URL",     "http://172.235.16.165:8080")
+    OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",   "mistral:7b-instruct-q4_K_M")
     OLLAMA_EMBED    = os.getenv("OLLAMA_EMBED",   "nomic-embed-text")
     GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL    = os.getenv("GEMINI_MODEL",   "gemini-1.5-flash")

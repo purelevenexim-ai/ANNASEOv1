@@ -206,7 +206,7 @@ class InternalLinker:
             # Summarize by type
             type_counts: dict[str, int] = {}
             for lnk in links:
-                lt = lnk[9] if len(lnk) > 9 else "unknown"
+                lt = lnk[8] if len(lnk) > 8 else "unknown"
                 type_counts[lt] = type_counts.get(lt, 0) + 1
 
             return {"links": len(links), "by_type": type_counts}

@@ -1,0 +1,266 @@
+/**
+ * Phase 1 — Business Analysis.
+ * User provides domain + optional manual inputs, AI analyzes and builds profile.
+ */
+import React, { useState, useEffect } from "react"
+import useKw2Store from "./store"
+import * as api from "./api"
+import { Card, RunButton, Badge, StatsRow, usePhaseRunner, PhaseResult, NotificationList } from "./shared"
+
+export default function Phase1({ projectId, sessionId, onComplete }) {
+  const { profile, setProfile, setActivePhase } = useKw2Store()
+  const { loading, setLoading, error, setError, notifications, log, toast } = usePhaseRunner("P1")
+  const [suggesting, setSuggesting] = useState(false)
+
+  const [form, setForm] = useState({
+    domain: "",
+    pillars: "",
+    product_catalog: "",
+    modifiers: "",
+    negative_scope: "",
+    audience: "",
+    geo_scope: "",
+    business_type: "",
+    competitor_urls: "",
+  })
+
+  useEffect(() => {
+    if (profile) {
+      setForm((f) => ({
+        ...f,
+        domain: profile.domain || "",
+        pillars: (profile.pillars || []).join(", "),
+        product_catalog: (profile.product_catalog || []).join(", "),
+        modifiers: (profile.modifiers || []).join(", "),
+        negative_scope: (profile.negative_scope || []).join(", "),
+        audience: (profile.audience || []).join(", "),
+        geo_scope: profile.geo_scope || "",
+        business_type: profile.business_type || "",
+      }))
+    }
+  }, [profile])
+
+  const suggestAI = async () => {
+    if (!form.domain && !form.pillars) {
+      toast("Enter domain or pillars before getting AI suggestions", "error")
+      return
+    }
+    setSuggesting(true)
+    log("✨ Requesting AI suggestions for audience, modifiers, negative scope...", "info")
+    try {
+      const { suggestions } = await api.suggestFields(projectId, {
+        domain: form.domain.trim(),
+        business_type: form.business_type.trim(),
+        pillars: form.pillars.split(",").map((s) => s.trim()).filter(Boolean),
+        product_catalog: form.product_catalog.split(",").map((s) => s.trim()).filter(Boolean),
+        geo_scope: form.geo_scope.trim(),
+      })
+      setForm((f) => ({
+        ...f,
+        audience: suggestions.audience?.join(", ") || f.audience,
+        modifiers: suggestions.modifiers?.join(", ") || f.modifiers,
+        negative_scope: suggestions.negative_scope?.join(", ") || f.negative_scope,
+      }))
+      log(`✅ AI suggestions applied — Audience: ${(suggestions.audience || []).length}, Modifiers: ${(suggestions.modifiers || []).length}, Negative Scope: ${(suggestions.negative_scope || []).length}`, "success")
+      toast("AI suggestions applied to form fields", "success")
+    } catch (e) {
+      log(`❌ Suggestion failed: ${e.message}`, "error")
+      toast("AI suggest failed — try again", "error")
+    }
+    setSuggesting(false)
+  }
+
+  const run = async () => {
+    setLoading(true)
+    setError(null)
+    log(`▶ Phase 1 started — analyzing ${form.domain || "business"}`, "info")
+    log("  10% — Preparing business context...", "progress")
+
+    const done = { current: false }
+    const progressSteps = [
+      [4000,  "  20% — Crawling domain homepage and meta tags..."],
+      [10000, "  35% — Extracting products, brand signals, entity mentions..."],
+      [18000, "  55% — Running AI business analysis (pillars, audience, modifiers)..."],
+      [26000, "  75% — Analyzing competitor context and positioning..."],
+      [34000, "  90% — Computing confidence score and building profile..."],
+    ]
+    const timers = progressSteps.map(([delay, msg]) =>
+      setTimeout(() => { if (!done.current) log(msg, "progress") }, delay)
+    )
+
+    try {
+      const body = {
+        domain: form.domain.trim(),
+        pillars: form.pillars.split(",").map((s) => s.trim()).filter(Boolean),
+        product_catalog: form.product_catalog.split(",").map((s) => s.trim()).filter(Boolean),
+        modifiers: form.modifiers.split(",").map((s) => s.trim()).filter(Boolean),
+        negative_scope: form.negative_scope.split(",").map((s) => s.trim()).filter(Boolean),
+        audience: form.audience.split(",").map((s) => s.trim()).filter(Boolean),
+        geo_scope: form.geo_scope.trim(),
+        business_type: form.business_type.trim(),
+        competitor_urls: form.competitor_urls.split(",").map((s) => s.trim()).filter(Boolean),
+      }
+      const { profile: result } = await api.runPhase1(projectId, sessionId, body)
+      done.current = true
+      timers.forEach(clearTimeout)
+      // Normalize array fields from raw API response (may be strings, counts, or arrays)
+      const toArr = (v) => Array.isArray(v) ? v : typeof v === "string" && v ? v.split(",").map((s) => s.trim()).filter(Boolean) : []
+      const pillarArr = toArr(result.pillars)
+      const productArr = toArr(result.product_catalog)
+      const modifierArr = toArr(result.modifiers)
+      const audienceArr = toArr(result.audience)
+      setProfile(result)
+      const pillars = pillarArr.length
+      const products = productArr.length
+      const modifiers = modifierArr.length
+      const audience = audienceArr.length
+      const confidence = ((result.confidence_score || 0) * 100).toFixed(0)
+      log(`✅ 100% — Phase 1 complete`, "success")
+      log(`   Pillars: ${pillars} | Products: ${products} | Modifiers: ${modifiers} | Audience: ${audience}`, "info")
+      log(`   Confidence: ${confidence}% | Business type: ${result.business_type || "detected"} | Geo: ${result.geo_scope || "—"}`, "info")
+      if (pillars > 0) log(`   Pillars detected: ${pillarArr.slice(0, 5).join(", ")}${pillars > 5 ? ` +${pillars - 5} more` : ""}`, "info")
+      toast(`Business analysis complete — ${pillars} pillars, ${confidence}% confidence`, "success")
+      onComplete()
+    } catch (e) {
+      done.current = true
+      timers.forEach(clearTimeout)
+      const detail = e?.detail || e?.data?.detail || e.message || "Unknown error"
+      const status = e?.status ? ` [HTTP ${e.status}]` : ""
+      log(`❌ Phase 1 failed${status}: ${detail}`, "error")
+      if (e?.data?.detail && e.data.detail !== e.message) log(`   Detail: ${e.data.detail}`, "error")
+      setError(typeof detail === "string" ? detail : JSON.stringify(detail))
+      toast(`Phase 1 failed: ${typeof detail === "string" ? detail.slice(0, 80) : "Analysis error"}`, "error")
+    }
+    setLoading(false)
+  }
+
+  const fieldStyle = {
+    width: "100%", padding: "8px 10px", border: "1px solid #d1d5db",
+    borderRadius: 6, fontSize: 13, marginBottom: 8,
+  }
+
+  return (
+    <Card title="Phase 1: Business Analysis" actions={
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={suggestAI}
+          disabled={suggesting || loading}
+          style={{
+            padding: "8px 14px", borderRadius: 6, border: "1px solid #8b5cf6",
+            background: suggesting ? "#ede9fe" : "#f5f3ff", color: "#7c3aed",
+            fontSize: 13, fontWeight: 600, cursor: suggesting ? "not-allowed" : "pointer",
+          }}
+        >
+          {suggesting ? "✨ Suggesting..." : "✨ AI Suggest"}
+        </button>
+        <RunButton onClick={run} loading={loading} disabled={!form.domain}>
+          Analyze Business
+        </RunButton>
+      </div>
+    }>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Domain *</label>
+          <input style={fieldStyle} placeholder="https://example.com" value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Business Type</label>
+          <select style={fieldStyle} value={form.business_type} onChange={(e) => setForm({ ...form, business_type: e.target.value })}>
+            <option value="">Auto-detect</option>
+            <option value="Ecommerce">Ecommerce</option>
+            <option value="B2B">B2B</option>
+            <option value="D2C">D2C</option>
+            <option value="SaaS">SaaS</option>
+            <option value="Local">Local</option>
+          </select>
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Pillars (comma-sep)</label>
+          <input style={fieldStyle} placeholder="organic spices, whole spices" value={form.pillars} onChange={(e) => setForm({ ...form, pillars: e.target.value })} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Geo Scope</label>
+          <input style={fieldStyle} placeholder="India, USA" value={form.geo_scope} onChange={(e) => setForm({ ...form, geo_scope: e.target.value })} />
+        </div>
+        <div style={{ gridColumn: "1 / -1" }}>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Product Catalog (comma-sep)</label>
+          <input style={fieldStyle} placeholder="turmeric powder, cardamom pods" value={form.product_catalog} onChange={(e) => setForm({ ...form, product_catalog: e.target.value })} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "flex", alignItems: "center", gap: 6 }}>
+            Modifiers
+            <span style={{ fontSize: 10, color: "#8b5cf6", fontWeight: 500 }}>✨ AI Suggest fills these</span>
+          </label>
+          <input style={fieldStyle} placeholder="organic, wholesale, bulk" value={form.modifiers} onChange={(e) => setForm({ ...form, modifiers: e.target.value })} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "flex", alignItems: "center", gap: 6 }}>
+            Audience
+            <span style={{ fontSize: 10, color: "#8b5cf6", fontWeight: 500 }}>✨ AI Suggest fills these</span>
+          </label>
+          <input style={fieldStyle} placeholder="restaurant owners, home cooks" value={form.audience} onChange={(e) => setForm({ ...form, audience: e.target.value })} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "flex", alignItems: "center", gap: 6 }}>
+            Negative Scope
+            <span style={{ fontSize: 10, color: "#8b5cf6", fontWeight: 500 }}>✨ AI Suggest fills these</span>
+          </label>
+          <input style={fieldStyle} placeholder="recipe, benefits, how to" value={form.negative_scope} onChange={(e) => setForm({ ...form, negative_scope: e.target.value })} />
+        </div>
+        <div>
+          <label style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Competitor URLs</label>
+          <input style={fieldStyle} placeholder="https://competitor.com" value={form.competitor_urls} onChange={(e) => setForm({ ...form, competitor_urls: e.target.value })} />
+        </div>
+      </div>
+
+      {error && <p style={{ color: "#dc2626", marginTop: 8, fontSize: 13 }}>{error}</p>}
+
+      {profile && (
+        <div style={{ marginTop: 16 }}>
+          <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>Business Profile</h4>
+          <StatsRow items={[
+            { label: "Pillars", value: (profile.pillars || []).length, color: "#3b82f6" },
+            { label: "Products", value: (profile.product_catalog || []).length, color: "#10b981" },
+            { label: "Modifiers", value: (profile.modifiers || []).length, color: "#8b5cf6" },
+            { label: "Confidence", value: `${((profile.confidence_score || 0) * 100).toFixed(0)}%`, color: profile.confidence_score >= 0.7 ? "#10b981" : "#f59e0b" },
+          ]} />
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <Badge color="blue">{profile.universe || "Universe"}</Badge>
+            <Badge color="green">{profile.business_type || "Unknown type"}</Badge>
+            {profile.geo_scope && <Badge color="gray">{profile.geo_scope}</Badge>}
+          </div>
+          <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.7 }}>
+            {(profile.pillars || []).length > 0 && (
+              <div style={{ marginBottom: 6 }}>
+                <strong>Pillars:</strong>{" "}
+                {(profile.pillars || []).map((p, i) => <Badge key={i} color="blue">{p}</Badge>).reduce((a, b) => [a, " ", b])}
+              </div>
+            )}
+            {(profile.product_catalog || []).length > 0 && (
+              <div style={{ marginBottom: 6 }}><strong>Products:</strong> {profile.product_catalog.join(", ")}</div>
+            )}
+            {(profile.modifiers || []).length > 0 && (
+              <div style={{ marginBottom: 6 }}><strong>Modifiers:</strong> {profile.modifiers.join(", ")}</div>
+            )}
+            {(profile.audience || []).length > 0 && (
+              <div style={{ marginBottom: 6 }}><strong>Audience:</strong> {profile.audience.join(", ")}</div>
+            )}
+          </div>
+
+          <PhaseResult
+            phaseNum={1}
+            stats={[
+              { label: "Pillars", value: (profile.pillars || []).length, color: "#3b82f6" },
+              { label: "Products", value: (profile.product_catalog || []).length, color: "#10b981" },
+              { label: "Confidence", value: `${((profile.confidence_score || 0) * 100).toFixed(0)}%`, color: "#8b5cf6" },
+            ]}
+            nextLabel="Continue to Business Intelligence →"
+            onNext={() => setActivePhase("BI")}
+          />
+        </div>
+      )}
+
+      <NotificationList notifications={notifications} title="Run Notifications" />
+    </Card>
+  )
+}

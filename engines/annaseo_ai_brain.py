@@ -47,8 +47,8 @@ except ImportError:
 class BrainCfg:
     GROQ_KEY    = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL  = os.getenv("GROQ_MODEL",   "llama-3.1-8b-instant")
-    OLLAMA_URL  = os.getenv("OLLAMA_URL",   "http://172.235.16.165:11434")
-    OLLAMA_MODEL= os.getenv("OLLAMA_MODEL", "deepseek-r1:7b")
+    OLLAMA_URL  = os.getenv("OLLAMA_URL",   "http://172.235.16.165:8080")
+    OLLAMA_MODEL= os.getenv("OLLAMA_MODEL", "mistral:7b-instruct-q4_K_M")
     CLAUDE_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
     CLAUDE_MODEL= os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
     CLAUDE_MAX_TOKENS = 1000
@@ -135,40 +135,10 @@ class AnnaBrain:
 
     def _call_ollama(self, prompt: str, system: str = "You are an SEO expert.",
                      temperature: float = 0.2) -> str:
-        """Call Ollama/DeepSeek locally. Returns text."""
-        import requests as req
-
-        def _extract_ollama_text(data: Any) -> str:
-            if not isinstance(data, dict):
-                return ""
-            if isinstance(data.get("response"), str) and data.get("response").strip():
-                return data["response"].strip()
-            msg = data.get("message")
-            if isinstance(msg, dict) and isinstance(msg.get("content"), str) and msg.get("content").strip():
-                return msg["content"].strip()
-            choices = data.get("choices")
-            if isinstance(choices, list) and choices:
-                first = choices[0]
-                if isinstance(first, dict):
-                    if isinstance(first.get("message"), dict) and isinstance(first["message"].get("content"), str):
-                        return first["message"]["content"].strip()
-                    if isinstance(first.get("text"), str):
-                        return first["text"].strip()
-            if isinstance(data.get("text"), str):
-                return data["text"].strip()
-            return ""
-
+        """Call Ollama via central AIRouter (handles health check, semaphore, 620s timeout)."""
         try:
-            combined = f"{system}\n\n{prompt}" if system else prompt
-            r = req.post(f"{BrainCfg.OLLAMA_URL}/api/generate", json={
-                "model": BrainCfg.OLLAMA_MODEL, "stream": False,
-                "options": {"temperature": temperature},
-                "prompt": combined
-            }, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            text = data.get("response", "").strip()
-            return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+            from core.ai_config import AIRouter
+            return AIRouter._call_ollama(prompt, system, temperature)
         except Exception as e:
             log.warning(f"[Brain] Ollama error: {e}")
             return ""

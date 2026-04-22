@@ -3,13 +3,15 @@
  * AI-powered SEO strategy based on full pipeline results.
  */
 import React, { useCallback, useEffect } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import useKw2Store from "./store"
 import * as api from "./api"
-import { Card, RunButton, Badge, usePhaseRunner, PhaseResult, NotificationList, ConsolePanel } from "./shared"
+import { Card, RunButton, Badge, usePhaseRunner, PhaseResult, NotificationList } from "./shared"
 
-export default function Phase9({ projectId, sessionId, onComplete }) {
+export default function Phase9({ projectId, sessionId, onComplete, autoRun, hideRunButton }) {
   const { strategy, setStrategy } = useKw2Store()
   const { loading, setLoading, error, setError, notifications, log, toast } = usePhaseRunner("P9")
+  const qc = useQueryClient()
 
   const run = useCallback(async () => {
     setLoading(true)
@@ -20,6 +22,9 @@ export default function Phase9({ projectId, sessionId, onComplete }) {
       setStrategy(data.strategy)
       log("SEO strategy generated successfully", "success")
       toast("SEO strategy generated!", "success")
+      // Invalidate Strategy Hub cache so it immediately reflects the new strategy
+      qc.invalidateQueries({ queryKey: ["kw2-strategy-sessions", projectId] })
+      qc.invalidateQueries({ queryKey: ["kw2-session-strategy", projectId, sessionId] })
       onComplete()
     } catch (e) {
       setError(e.message)
@@ -39,8 +44,10 @@ export default function Phase9({ projectId, sessionId, onComplete }) {
     load()
   }, [])
 
+  useEffect(() => { if (autoRun) run() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
-    <Card title="Phase 9: SEO Strategy" actions={<RunButton onClick={run} loading={loading}>Generate Strategy</RunButton>}>
+    <Card title="Phase 9: SEO Strategy" actions={hideRunButton ? null : <RunButton onClick={run} loading={loading}>Generate Strategy</RunButton>}>
       {error && <p style={{ color: "#dc2626", fontSize: 13 }}>{error}</p>}
 
       {strategy && (
@@ -67,9 +74,12 @@ export default function Phase9({ projectId, sessionId, onComplete }) {
             <div style={{ marginBottom: 12 }}>
               <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Priority Pillars</h4>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {strategy.priority_pillars.map((p, i) => (
-                  <Badge key={i} color={i === 0 ? "green" : "blue"}>{i + 1}. {p}</Badge>
-                ))}
+                {strategy.priority_pillars.map((p, i) => {
+                  const label = typeof p === "string" ? p : p.pillar || p.name || JSON.stringify(p)
+                  return (
+                    <Badge key={i} color={i === 0 ? "green" : "blue"}>{i + 1}. {label}</Badge>
+                  )
+                })}
               </div>
             </div>
           )}
@@ -89,7 +99,7 @@ export default function Phase9({ projectId, sessionId, onComplete }) {
             <div style={{ marginBottom: 12 }}>
               <h4 style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Content Gaps</h4>
               <ul style={{ margin: 0, paddingLeft: 20 }}>
-                {strategy.content_gaps.map((g, i) => <li key={i} style={{ fontSize: 12, color: "#374151" }}>{g}</li>)}
+                {strategy.content_gaps.map((g, i) => <li key={i} style={{ fontSize: 12, color: "#374151" }}>{typeof g === "string" ? g : g.topic || g.gap || g.title || ""}</li>)}
               </ul>
             </div>
           )}
@@ -105,7 +115,7 @@ export default function Phase9({ projectId, sessionId, onComplete }) {
                     </div>
                     {(week.articles || []).map((a, i) => (
                       <div key={i} style={{ fontSize: 12, color: "#374151", marginLeft: 12 }}>
-                        • {a.title} <span style={{ color: "#9ca3af" }}>({a.primary_keyword})</span>
+                        • {typeof a === "string" ? a : a.title || a.keyword || JSON.stringify(a)} {a.primary_keyword ? <span style={{ color: "#9ca3af" }}>({a.primary_keyword})</span> : null}
                       </div>
                     ))}
                   </div>
@@ -129,7 +139,6 @@ export default function Phase9({ projectId, sessionId, onComplete }) {
       )}
 
       <NotificationList notifications={notifications} />
-      <ConsolePanel filterBadge="P9" />
     </Card>
   )
 }

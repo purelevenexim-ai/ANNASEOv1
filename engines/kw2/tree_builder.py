@@ -9,7 +9,7 @@ Provides lazy AI explanation per keyword.
 import json
 import logging
 
-from engines.kw2.constants import CATEGORY_CAPS
+from engines.kw2.constants import CATEGORY_CAPS, NEGATIVE_PATTERNS
 from engines.kw2.prompts import KEYWORD_EXPLAIN_SYSTEM, KEYWORD_EXPLAIN_USER
 from engines.kw2.ai_caller import kw2_ai_call
 from engines.kw2 import db
@@ -55,8 +55,18 @@ class TreeBuilder:
 
         # Select balanced top 100
         top100 = self._select_top100(keywords)
+        top100_ids = {kw["id"] for kw in top100}
 
-        # Map pages
+        # Phase-5 quality spot-check: flag any top-20 that slip past negative scope
+        negative_scope = profile.get("negative_scope", [])
+        if isinstance(negative_scope, str):
+            try:
+                negative_scope = json.loads(negative_scope) if negative_scope else []
+            except Exception:
+                negative_scope = []
+        self._spot_check_top20(top100[:20], negative_scope, session_id)
+
+        # Map pages for top100
         for kw in top100:
             kw["mapped_page"] = self._map_page(kw["keyword"], kw.get("intent", ""))
 
@@ -72,9 +82,15 @@ class TreeBuilder:
         finally:
             conn.close()
 
-        # Build tree structure
+        # Mark top100 membership on ALL keywords for tree display
+        for kw in keywords:
+            kw["in_top100"] = kw["id"] in top100_ids
+            if not kw.get("mapped_page"):
+                kw["mapped_page"] = self._map_page(kw["keyword"], kw.get("intent", ""))
+
+        # Build tree structure from ALL validated keywords (not just top100)
         tree = self._build_tree_structure(
-            universe_name, pillars, cluster_rows, top100, session_id, project_id
+            universe_name, pillars, cluster_rows, keywords, session_id, project_id
         )
 
         # Update session
@@ -99,6 +115,7 @@ class TreeBuilder:
                 "final_score": kw.get("final_score", 0),
                 "mapped_page": kw.get("mapped_page", ""),
                 "source": kw.get("source", ""),
+                "spot_check_warning": kw.get("spot_check_warning"),
             }
             for kw in top100
         ]
@@ -118,7 +135,7 @@ class TreeBuilder:
             return {}
 
         nodes = [dict(r) for r in rows]
-        return self._assemble_nested(nodes)
+        return self._assemble_nested(nodes, session_id)
 
     def explain_keyword(self, keyword_id: str, ai_provider: str = "auto") -> str:
         """Lazy-load and cache AI explanation for a keyword."""
@@ -184,6 +201,50 @@ class TreeBuilder:
         }
 
     # ── Private helpers ──────────────────────────────────────────────────
+
+    def _spot_check_top20(
+        self, top20: list[dict], negative_scope: list[str], session_id: str
+    ) -> None:
+        """
+        Rule-based quality spot-check on the top-20 keywords of the top-100 selection.
+        Flags any keyword that matches NEGATIVE_PATTERNS or the session's negative_scope.
+        Writes a warning string to kw2_validated_keywords.spot_check_warning (advisory only,
+        no keywords are removed).
+        """
+        if not top20:
+            return
+
+        # Build combined negative pattern set
+        neg_patterns = set(p.lower() for p in NEGATIVE_PATTERNS)
+        neg_patterns.update(p.lower() for p in (negative_scope or []))
+
+        updates = []
+        for kw in top20:
+            text = kw.get("keyword", "").lower()
+            matched = [p for p in neg_patterns if p and p in text]
+            if matched:
+                reason = f"Contains negative-scope term(s): {', '.join(matched[:3])}"
+                updates.append((reason, kw["id"]))
+                log.warning(
+                    "[Phase5/SpotCheck] Top-20 keyword flagged (warning only): "
+                    "'%s' — %s", kw.get("keyword"), reason
+                )
+            else:
+                # Clear any stale warning from a previous run
+                updates.append((None, kw["id"]))
+
+        if not updates:
+            return
+
+        conn = db.get_conn()
+        try:
+            conn.executemany(
+                "UPDATE kw2_validated_keywords SET spot_check_warning=? WHERE id=?",
+                updates,
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def _select_top100(self, keywords: list[dict]) -> list[dict]:
         """Select balanced top 100 using CATEGORY_CAPS."""
@@ -262,7 +323,7 @@ class TreeBuilder:
             )
 
             # Group top100 by pillar → cluster
-            tree_dict = {"name": universe_name, "pillars": []}
+            tree_dict = {"name": universe_name, "type": "universe", "pillars": []}
 
             # Detect pillar for each cluster
             cluster_pillar_map = {}
@@ -291,7 +352,7 @@ class TreeBuilder:
                     cl = kw.get("cluster", "unclustered")
                     cluster_kws.setdefault(cl, []).append(kw)
 
-                pillar_dict = {"name": pillar, "clusters": []}
+                pillar_dict = {"name": pillar, "type": "pillar", "clusters": []}
                 for cluster_name, ckws in cluster_kws.items():
                     cluster_id = db._uid("tn_")
                     conn.execute(
@@ -299,7 +360,7 @@ class TreeBuilder:
                         (cluster_id, session_id, project_id, "cluster", cluster_name, pillar_id, 0, now),
                     )
 
-                    cluster_dict = {"name": cluster_name, "keywords": []}
+                    cluster_dict = {"name": cluster_name, "type": "cluster", "keywords": []}
                     for kw in ckws:
                         kw_node_id = db._uid("tn_")
                         conn.execute(
@@ -308,10 +369,12 @@ class TreeBuilder:
                              cluster_id, kw["id"], kw.get("mapped_page", ""), kw.get("final_score", 0), now),
                         )
                         cluster_dict["keywords"].append({
-                            "keyword": kw["keyword"],
+                            "name": kw["keyword"],
+                            "type": "keyword",
                             "intent": kw.get("intent", ""),
                             "score": kw.get("final_score", 0),
                             "mapped_page": kw.get("mapped_page", ""),
+                            "top100": kw.get("in_top100", False),
                         })
                     pillar_dict["clusters"].append(cluster_dict)
                 tree_dict["pillars"].append(pillar_dict)
@@ -321,9 +384,28 @@ class TreeBuilder:
         finally:
             conn.close()
 
-    def _assemble_nested(self, nodes: list[dict]) -> dict:
+    def _assemble_nested(self, nodes: list[dict], session_id: str = "") -> dict:
         """Reconstruct nested tree dict from flat kw2_tree_nodes rows."""
-        node_map = {n["id"]: n for n in nodes}
+        # Build intent lookup and top100 set from validated keywords
+        intent_map: dict[str, str] = {}
+        top100_ids: set[str] = set()
+        if session_id:
+            conn2 = db.get_conn()
+            try:
+                rows = conn2.execute(
+                    "SELECT id, intent, final_score FROM kw2_validated_keywords "
+                    "WHERE session_id=? AND (rejected IS NULL OR rejected != 1)",
+                    (session_id,),
+                ).fetchall()
+                all_kws = [{"id": r["id"], "final_score": r["final_score"] or 0} for r in rows]
+                top100 = self._select_top100(all_kws)
+                top100_ids = {kw["id"] for kw in top100}
+                intent_map = {r["id"]: r["intent"] or "" for r in rows}
+            except Exception:
+                pass
+            finally:
+                conn2.close()
+
         children: dict[str, list] = {}
         root = None
 
@@ -342,6 +424,9 @@ class TreeBuilder:
             if node["node_type"] == "keyword":
                 result["score"] = node.get("score", 0)
                 result["mapped_page"] = node.get("mapped_page", "")
+                kw_id = node.get("keyword_id", "")
+                result["intent"] = intent_map.get(kw_id, "")
+                result["top100"] = kw_id in top100_ids
             kids = children.get(node["id"], [])
             if kids:
                 key = {

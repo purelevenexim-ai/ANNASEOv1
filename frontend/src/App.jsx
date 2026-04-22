@@ -15,7 +15,6 @@ import StrategyPage from "./StrategyPage"
 import StrategyIntelligenceHub from "./StrategyIntelligenceHub"
 import DashboardPage from "./DashboardPage"
 import ContentPage from "./ContentPage"
-import PromptEditorPage from "./PromptEditorPage"
 import KwPage from "./kw2/KwPage"
 import GscSetupPage from "./gsc/GscSetupPage"
 import GscSearchPage from "./gsc/GscSearchPage"
@@ -2554,7 +2553,6 @@ const NAV = [
   { id: "graph",        label: "System Graph" },
   { id: "seo-checker",  label: "SEO Checker" },
   { id: "quality",      label: "Quality" },
-  { id: "prompts",      label: "Prompts" },
   { id: "gsc-setup",    label: "🔍 GSC Setup" },
   { id: "gsc-search",   label: "🔎 GSC Search" },
   { id: "settings",     label: "⚙ Settings" },
@@ -3397,7 +3395,6 @@ function App() {
     graph:        <SystemGraphPage/>,
     "seo-checker":<SEOCheckerPage/>,
     quality:      <QualityDashboard/>,
-    prompts:      <PromptEditorPage/>,
     "new-project":<NewProjectPage/>,
     "gsc-setup":  <GscSetupPage projectId={activeProject}/>,
     "gsc-search": <GscSearchPage projectId={activeProject}/>,

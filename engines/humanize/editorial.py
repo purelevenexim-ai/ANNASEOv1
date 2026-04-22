@@ -520,55 +520,10 @@ def _editorial_rewrite_single(
 
 def _inject_keyword_floor(html: str, keyword: str, needed: int) -> str:
     """
-    Re-inject keyword mentions into paragraphs that lack them.
-    Targets the longest paragraphs without any mention,
-    appending a natural sentence that includes the keyword.
+    DISABLED: Template sentence injection corrupts prose and inserts generic filler.
+    Keyword density is now managed at the prompt level only.
     """
-    kw_lower = keyword.lower()
-    kw_title = keyword.title()
-    paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-    if not paras:
-        return html
-
-    # Find paragraphs WITHOUT keyword (skip first and last)
-    candidates = []
-    for i, m in enumerate(paras):
-        if i < 1 or i >= len(paras) - 1:
-            continue
-        para_text = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if kw_lower not in para_text.lower() and len(para_text.split()) >= 20:
-            candidates.append((i, len(para_text.split())))
-
-    # Sort by word count descending — inject into longest paragraphs first
-    candidates.sort(key=lambda x: x[1], reverse=True)
-
-    templates = [
-        f" This is particularly relevant when evaluating {kw_title}.",
-        f" The quality of {kw_title} makes a measurable difference here.",
-        f" When choosing {kw_title}, this factor matters most.",
-        f" This consideration applies directly to {kw_title} purchases.",
-        f" For {kw_title} specifically, this point deserves attention.",
-    ]
-
-    injected = 0
-    for para_index, _ in candidates:
-        if injected >= needed:
-            break
-        paras = list(re.finditer(r"(<p[^>]*>)(.*?)(</p>)", html, re.I | re.DOTALL))
-        if para_index < 0 or para_index >= len(paras):
-            continue
-        m = paras[para_index]
-        para_text = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if kw_lower in para_text.lower() or len(para_text.split()) < 20:
-            continue
-        para_content = m.group(2)
-        insert = templates[injected % len(templates)]
-        new_para = m.group(1) + para_content + insert + m.group(3)
-        html = html[:m.start()] + new_para + html[m.end():]
-        injected += 1
-
-    if injected > 0:
-        log.info(f"Keyword floor: injected {injected} mentions of '{keyword}' (density was too low)")
+    log.debug(f"_inject_keyword_floor called but disabled — skipping injection of '{keyword}' x{needed}")
     return html
 
 

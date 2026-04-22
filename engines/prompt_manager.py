@@ -6,14 +6,18 @@ The pipeline reads the custom block (if saved) instead of the hardcoded default.
 """
 import json
 import os
+from datetime import datetime, timezone
 
 CUSTOM_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "custom_prompts.json")
+PROMPT_VERSIONS_FILE = os.path.join(os.path.dirname(__file__), "..", "prompt_versions.json")
+_MAX_VERSIONS = 10  # per key
 
 # Default instruction blocks per step — these are what appear in the Prompt Editor
 # and what the pipeline uses when no custom block has been saved.
 PROMPT_KEYS: dict = {
     "step1_research_instructions": {
         "label": "Step 1: Research Instructions",
+        "tier": "active_v2",
         "desc": "Instructions for the research/competitor analysis step. Controls what themes, gaps, angles, and facts the AI extracts.",
         "default": """━━━ RESEARCH INSTRUCTIONS ━━━
 Analyse the keyword and any crawled competitor pages.
@@ -35,6 +39,7 @@ QUALITY REQUIREMENTS:
     },
     "step2_structure_rules": {
         "label": "Step 2: Structure Rules",
+        "tier": "active_v2",
         "desc": "Injected into structure generation — forbidden heading patterns, required question headings, power words.",
         "default": """\u2501\u2501\u2501 STRUCTURE RULES (MANDATORY) \u2501\u2501\u2501
 FORBIDDEN H2 patterns \u2014 these cause automatic content scoring failure:
@@ -76,6 +81,7 @@ Include "toc_anchors" in JSON with URL-safe IDs matching each H2.
     },
     "step6_quality_rules": {
         "label": "Step 6: Draft Quality Rules",
+        "tier": "active_v2",
         "desc": "Injected into the content drafting prompt — TOC, hook, experience, entities, authority links, etc.",
         "default": """\u2501\u2501\u2501 QUALITY RULES \u2014 ALL MANDATORY \u2501\u2501\u2501
 
@@ -165,10 +171,20 @@ CTA (R23 — 3pts, machine-checked):
 ━━━ HUMANIZATION (R35-R36 — 8pts, machine-checked) ━━━
   R35: ZERO AI fluff phrases allowed. No "furthermore", "moreover", "it's worth noting", "let's dive in".
   R36: 3+ experience signals required: "we tested", "in our experience", "we found", "hands-on".
-  Write like a knowledgeable human sharing real insights, not an AI summarizing information.""",
+  Write like a knowledgeable human sharing real insights, not an AI summarizing information.
+
+━━━ FORBIDDEN HOOK PHRASES (R47 — automatic deduction) ━━━
+  These repetitive AI paragraph-opener patterns are detected and penalised. NEVER use them:
+    ✗ "The real issue is..."       ✗ "And the catch is..."
+    ✗ "Here's the thing:"         ✗ "But here's the thing"
+    ✗ "Honestly, the catch"       ✗ "Here's what's interesting"
+    ✗ "The truth is,"             ✗ "Here's the deal"
+    ✗ "Let's be honest"           ✗ "The thing is,"
+  Use direct declarative statements instead. Start with the fact, not a meta-comment about the fact.""",
     },
     "step7_review_criteria": {
         "label": "Step 7: Review Criteria",
+        "tier": "legacy",
         "desc": "16-point evaluation criteria injected into the quality review step.",
         "default": """Evaluate these 35 criteria (all machine-checked — exact thresholds):
 1. Keyword relevance and density (1.5-2.5% target, machine-checked R06)
@@ -209,6 +225,7 @@ CTA (R23 — 3pts, machine-checked):
     },
     "step9_quality_rules": {
         "label": "Step 9: Redevelopment Quality Rules",
+        "tier": "legacy",
         "desc": "Quality rules injected into the redevelopment prompt to guide issue-fixing rewrite.",
         "default": """\u2501\u2501\u2501 QUALITY RULES \u2014 ALL MANDATORY \u2501\u2501\u2501
 
@@ -255,7 +272,7 @@ CTA (R23 — 3pts): Last 500 chars must contain: buy/shop/order/contact/learn mo
 ━━━ CONTENT INTELLIGENCE — MACHINE-CHECKED (R34-R46) ━━━
 
 R34 SEMANTIC VARIATION (4pts): Use 5+ semantic variants of keyword. Density MUST be 1.0-1.5%, NEVER >3%.
-R35 AI PATTERNS (4pts): ZERO AI fluff: no "furthermore", "moreover", "it's worth noting", "let's dive in", "when it comes to". <2 per 1000 words.
+R35 AI PATTERNS (4pts): ZERO AI fluff: no "furthermore", "moreover", "it's worth noting", "let's dive in", "when it comes to", "the real issue is", "and the catch is", "here's the thing", "the truth is,", "here's the deal", "let's be honest". <2 per 1000 words.
 R36 EXPERIENCE (4pts): 3+ of: "we tested", "we found", "in our experience", "we observed", "hands-on", "we discovered".
 R37 ENTITIES (3pts): 8+ named entities (places, products, orgs, researchers). Be specific.
 R38 SNIPPET BLOCKS (3pts): 2+ question headings followed by 30-60 word direct answer paragraphs.
@@ -272,90 +289,82 @@ PRESERVE existing links — do not remove any <a href>.""",
     },
     "step6_intelligence_rules": {
         "label": "Step 6: Content Intelligence Rules",
-        "desc": "New Content Intelligence rules (R34-R46) injected into drafting — AI detection, experience, entities, snippets, conversion.",
-        "default": """━━━ CONTENT INTELLIGENCE RULES — MACHINE-CHECKED (R34-R46) ━━━
+        "tier": "active_v2",
+        "desc": "Machine-checked content intelligence rules (R34-R46) injected into every section prompt. Controls AI detection, experience signals, entity richness, snippet structure, conversion hooks, and data credibility at generation time — before draft is written.",
+        "default": """━━━ PRE-DRAFT CONTENT INTELLIGENCE CONTRACT ━━━
+
+HOOK ENFORCEMENT (intro only):
+  The first sentence must open with ONE of these patterns — not a generic topic intro:
+    ✓ STAT SHOCK:  "If you're paying ₹500/kg more than your competitor, you're losing margin before you sell."
+    ✓ BUYER PAIN:  "Most bulk buyers discover the real cost of cardamom after their first shipment — too late."
+    ✓ DIRECT CLAIM: "In Kerala markets, prices can spike 20-40% within a single season."
+    ✗ FORBIDDEN:   "The bulk cardamom wholesale price is a significant consideration for businesses..."
+    ✗ FORBIDDEN:   "Understanding [topic] is essential for..."
+    ✗ FORBIDDEN:   "This guide will provide you with..."
+
+SECTION OUTPUT SHAPE (enforced in Step 7 validation):
+  Each section promised a specific artifact in its contract. Deliver it:
+    - "Cost Calculator" or "Cost Breakdown" → include FORMULA: Total = Base + Freight + GST + Storage + Loss
+    - "Comparison" or "vs" headings → include a <table> with ≥3 rows × ≥3 columns
+    - "FAQ" or "Questions" → each answer must be 40-60 words, direct, not padded
+    - "Factors" or "Drivers" → explain cause→effect chain, not list of names
+  Do NOT write a prose paragraph when the heading promises a calculator, table, or formula.
+
+FACT CONSISTENCY (machine-checked across all sections):
+  All numeric claims (prices, percentages, weights, quantities) must be:
+    ✓ Consistent — the same metric cannot have contradictory values in different sections
+    ✓ Range-sourced — use "₹1,800–₹3,500/kg depending on grade" not "₹2,200/kg exactly"
+    ✓ Season-qualified — "during harvest (Oct–Dec) prices dip; off-season prices spike"
+  BAD: Intro says ₹1,850–2,050/kg, FAQ answers ₹2,800–4,500/kg for the same grade
+  GOOD: Establish ONE unified range in the intro, then explain variation factors in body sections
 
 SEMANTIC VARIATION (R34 — 4pts, machine-checked):
   NEVER repeat the exact keyword phrase more than necessary (target density 1.0-1.5%).
   Use 5+ semantic variations: synonyms, related phrases, LSI terms.
-  Example for "kerala spices price":
-    ✓ "Kerala spice rates"  ✓ "cost of authentic spices"  ✓ "premium spice pricing"
-    ✓ "spice market prices"  ✓ "Kerala condiment costs"
 
 AI PATTERN AVOIDANCE (R35 — 4pts, machine-checked):
-  The scorer counts AI fluff phrases per 1000 words. Need <2 per 1000w.
-  ABSOLUTELY FORBIDDEN phrases (each costs you points):
-    ✗ "It's worth noting"  ✗ "In today's fast-paced/modern/digital"
-    ✗ "Let's dive in"  ✗ "When it comes to"  ✗ "Without further ado"
-    ✗ "Feel free to"  ✗ "Don't hesitate to"  ✗ "Furthermore,"  ✗ "Moreover,"
-    ✗ "Additionally,"  ✗ "Subsequently,"  ✗ "Nevertheless,"
-    ✗ "It is important to note"  ✗ "This comprehensive guide"
-    ✗ "In this article, we"
-  Instead: write directly, use short declarative statements, opinions, and real-world observations.
+  ABSOLUTELY FORBIDDEN phrases — each detected occurrence costs scoring points:
+    ✗ "It's worth noting"    ✗ "In today's fast-paced"    ✗ "Let's dive in"
+    ✗ "When it comes to"    ✗ "Furthermore,"              ✗ "Moreover,"
+    ✗ "Additionally,"       ✗ "It is important to note"  ✗ "This comprehensive guide"
+    ✗ "In this article, we" ✗ "The real issue is"        ✗ "Here's the thing:"
+    ✗ "The truth is,"       ✗ "Here's the deal"          ✗ "Let's be honest"
+    ✗ "significant consideration for businesses"
+  Write directly: short declarative statements, opinions, real-world observations.
+
+AUTHORITY INTEGRITY (not fake authority):
+  ✗ BAD: "In our experience..." with no backing data
+  ✗ BAD: "Research shows that..." with no named source
+  ✓ GOOD: "In Kerala auction centers, traders often hold stock to create artificial scarcity."
+  ✓ GOOD: "According to Spices Board India data, AAA-grade prices swing 20-40% between harvest and off-season."
+  If no named source exists: use industry estimates, approximate ranges, or plain prose without attribution.
+  NEVER fabricate: study names, percentages, regulatory approvals, or organization claims.
 
 EXPERIENCE SIGNALS (R36 — 4pts, machine-checked):
   Include 3+ of these EXACT phrases naturally across different sections:
     ✓ "we tested"  ✓ "we found"  ✓ "in our experience"  ✓ "we observed"
     ✓ "after trying"  ✓ "hands-on"  ✓ "first-hand"  ✓ "we discovered"
-    ✓ "our team"  ✓ "we recommend"  ✓ "we compared"  ✓ "in practice"
-    ✓ "we've seen"  ✓ "from our testing"
-  Example: "When we tested five different suppliers in Idukki, we found significant quality variation."
 
 ENTITY RICHNESS (R37 — 3pts, machine-checked):
-  Include 8+ unique named entities — specific place names, product names, organizations:
-    ✓ "Idukki"  ✓ "Wayanad"  ✓ "Malabar Coast"  ✓ "Alleppey turmeric"
-    ✓ "Panjab University"  ✓ "Spices Board India"  ✓ "Journal of Food Science"
+  Include 8+ unique named entities — specific place names, organizations, certifications:
+    ✓ "Idukki" ✓ "Wayanad" ✓ "Spices Board India" ✓ "Kerala" ✓ "Malabar"
 
 FEATURED SNIPPET BLOCKS (R38 — 3pts, machine-checked):
   After 2+ question-format headings (ending with ?), the VERY NEXT <p> must be
-  a direct answer of 30-60 words. This is what Google extracts as featured snippet.
-  Example:
-    <h2>What Is the Average Price of Kerala Cardamom?</h2>
-    <p>Premium Kerala cardamom from Idukki typically costs ₹1200-₹2000 per kilogram. Prices vary by grade, season, and whether you buy wholesale or retail. Higher grade cardamom with larger green pods commands premium prices in both domestic and international markets.</p>
+  a direct 30-60 word answer. Do not start with "Yes" or "Great question."
 
-COMPARISON TABLE QUALITY (R39 — 2pts, machine-checked):
-  At least one <table> must have ≥3 data rows AND ≥3 columns.
-  Include <thead> with column headers and <tbody> with data rows.
-
-BUYER INTENT SECTION (R40 — 3pts, machine-checked):
-  Include a decision-making section with one of these phrases:
-    ✓ "which should you"  ✓ "who should buy"  ✓ "best for"
-    ✓ "how to choose"  ✓ "buying guide"  ✓ "what to look for"
-    ✓ "before you buy"  ✓ "is it worth"  ✓ "budget vs"  ✓ "premium vs"
-
-STORYTELLING (R41 — 2pts, machine-checked):
-  Include 2+ narrative markers:
-    ✓ "when we"  ✓ "we discovered"  ✓ "the result was"  ✓ "what happened"
-    ✓ "picture this"  ✓ "here's what"  ✓ "the reality is"  ✓ "imagine this"
-
-VISUAL BREAKS (R42 — 2pts, machine-checked):
-  Include 2+ visual elements:
-    <blockquote>Key insight or expert quote</blockquote>
-    <div class="tip">Pro tip: actionable advice here</div>
-    <div class="key-takeaway">Summary of key point</div>
-
-MID-CONTENT CTA (R43 — 2pts, machine-checked):
-  Add a contextual CTA in the MIDDLE of the article (not just at end):
-    "Explore our collection" / "Browse our range" / "Check out our" with a link
+CONVERSION (R43 — 2pts, machine-checked):
+  For commercial/buyer-intent content: include a mid-content contextual CTA.
+  For FAQ sections: last answer should naturally lead to a next-step action.
 
 DATA CREDIBILITY (R44 — 3pts, machine-checked):
-  Every precise statistic (percentages like 42%, 67.5%) MUST have a source reference
-  within 150 characters. Either cite the source or use approximate ranges.
-  BAD: "58% of consumers prefer organic" (no source)
-  GOOD: "According to a 2023 USDA report, approximately 58% of consumers prefer organic"
-  GOOD: "More than half of consumers prefer organic varieties" (approximate, no source needed)
-
-UNIQUE ANGLE (R45 — 2pts, machine-checked):
-  Include at least one differentiation phrase:
-    ✓ "what most people miss"  ✓ "the real truth"  ✓ "unlike other guides"
-    ✓ "here's the difference"  ✓ "we believe"  ✓ "our perspective"
-
-FAQ ANSWER QUALITY (R46 — 2pts, machine-checked):
-  Each FAQ answer should be 40-60 words — direct, complete, snippet-optimized.
-  Too short (<25 words) = not useful. Too long (>80 words) = not extractable.""",
+  Every precise statistic (42%, 67.5%) MUST have a source reference within 150 characters.
+  Use approximate ranges ("more than half", "typically 20-40%") when no source is available.""",
     },
+
     "step3_verify_instructions": {
         "label": "Step 3: Verify Structure",
+        "tier": "active_v2",
         "desc": "Rules and criteria for verifying/refining the article structure before content generation.",
         "default": """━━━ STRUCTURE VERIFICATION RULES ━━━
 Check and fix these critical issues:
@@ -381,6 +390,7 @@ STRUCTURE RULES:
     },
     "step4_link_planning": {
         "label": "Step 4: Link Planning",
+        "tier": "active_v2",
         "desc": "Rules for planning internal links, external authority links, and Wikipedia references.",
         "default": """━━━ LINK PLANNING RULES ━━━
 
@@ -410,6 +420,7 @@ LINK PLACEMENT:
     },
     "step5_reference_rules": {
         "label": "Step 5: Reference & Citation Rules",
+        "tier": "active_v2",
         "desc": "Rules for Wikipedia, PubMed, and other reference sources used in the article.",
         "default": """━━━ REFERENCE & CITATION RULES ━━━
 
@@ -434,6 +445,7 @@ FORMAT:
     },
     "step10_scoring_rules": {
         "label": "Step 10: Final Scoring",
+        "tier": "legacy",
         "desc": "Configuration for the final scoring pass — which rule pillars matter most and minimum thresholds.",
         "default": """━━━ FINAL SCORING CONFIGURATION ━━━
 
@@ -464,6 +476,7 @@ CRITICAL RULES (must all pass): R20, R24, R25, R26, R34, R35, R36, R44""",
     },
     "step11_quality_loop": {
         "label": "Step 11: Quality Improvement Loop",
+        "tier": "legacy",
         "desc": "Instructions for the iterative quality improvement loop — what to fix and how.",
         "default": """━━━ QUALITY IMPROVEMENT LOOP ━━━
 
@@ -508,6 +521,7 @@ class PromptManager:
 
     def __init__(self):
         self._custom: dict = {}
+        self._versions: dict = {}
         self._reload()
 
     def _reload(self):
@@ -517,6 +531,12 @@ class PromptManager:
                     self._custom = json.load(f)
         except Exception:
             self._custom = {}
+        try:
+            if os.path.exists(PROMPT_VERSIONS_FILE):
+                with open(PROMPT_VERSIONS_FILE, encoding="utf-8") as f:
+                    self._versions = json.load(f)
+        except Exception:
+            self._versions = {}
 
     def _persist(self):
         try:
@@ -525,6 +545,14 @@ class PromptManager:
         except Exception as e:
             import logging
             logging.getLogger("annaseo.prompts").warning(f"Could not save custom prompts: {e}")
+
+    def _persist_versions(self):
+        try:
+            with open(PROMPT_VERSIONS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._versions, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            import logging
+            logging.getLogger("annaseo.prompts").warning(f"Could not save prompt versions: {e}")
 
     def get(self, key: str) -> str:
         """Return custom prompt block if saved, else the default."""
@@ -535,12 +563,37 @@ class PromptManager:
     def set(self, key: str, content: str):
         if key not in PROMPT_KEYS:
             raise ValueError(f"Unknown prompt key: {key!r}")
+        # Archive current version before overwriting
+        old_content = self._custom.get(key) or PROMPT_KEYS[key]["default"]
+        if key not in self._versions:
+            self._versions[key] = []
+        self._versions[key].append({
+            "content": old_content,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "label": f"v{len(self._versions[key]) + 1}",
+        })
+        # Keep only the last N versions
+        self._versions[key] = self._versions[key][-_MAX_VERSIONS:]
+        self._persist_versions()
         self._custom[key] = content
         self._persist()
 
     def reset(self, key: str):
         self._custom.pop(key, None)
         self._persist()
+
+    def get_versions(self, key: str) -> list:
+        """Return saved version history for a key (newest first)."""
+        return list(reversed(self._versions.get(key, [])))
+
+    def restore_version(self, key: str, version_index: int) -> str:
+        """Restore a version by index (0 = newest). Returns the restored content."""
+        versions = self.get_versions(key)
+        if version_index < 0 or version_index >= len(versions):
+            raise ValueError(f"Version index {version_index} out of range")
+        content = versions[version_index]["content"]
+        self.set(key, content)
+        return content
 
     def has_custom(self, key: str) -> bool:
         return key in self._custom
@@ -551,6 +604,7 @@ class PromptManager:
                 "key": k,
                 "label": v["label"],
                 "desc": v["desc"],
+                "tier": v.get("tier", "active_v2"),
                 "content": self.get(k),
                 "is_custom": self.has_custom(k),
                 "default": v["default"],

@@ -327,7 +327,7 @@ function SupportingTable({ items, pillars, onRemove, onUpdate, onMove, onMarkBad
   )
 }
 
-export default function Step2Discovery({ projectId, onComplete, onBack }) {
+export default function Step2Discovery({ projectId, onComplete, onBack, aiProvider: aiProviderProp }) {
   const notify = useNotification(s => s.notify)
   const ctx = useWorkflowContext()
 
@@ -384,7 +384,9 @@ export default function Step2Discovery({ projectId, onComplete, onBack }) {
   const [seasonalEvents, setSeasonalEvents]       = useState([])
 
   // ── AI Provider selector ───────────────────────────────────────────────────
-  const [discoveryAiProvider, setDiscoveryAiProvider] = useState("groq")
+  const [discoveryAiProvider, setDiscoveryAiProvider] = useState(aiProviderProp || "groq")
+  // Sync with parent global provider when it changes
+  useEffect(() => { if (aiProviderProp) setDiscoveryAiProvider(aiProviderProp) }, [aiProviderProp])
 
   // ── Stream state ────────────────────────────────────────────────────────────
   const [status, setStatus]     = useState(null)  // null | running | completed | failed

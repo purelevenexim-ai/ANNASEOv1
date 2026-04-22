@@ -52,7 +52,7 @@ def _GEMINI_URL() -> str:
     model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
     return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GROQ_URL     = "https://api.groq.com/openai/v1/chat/completions"
-OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://172.235.16.165:11434")
+OLLAMA_URL   = os.getenv("OLLAMA_URL", "http://172.235.16.165:8080")
 DB_PATH      = Path(os.getenv("ANNASEO_DB", "./annaseo.db"))
 
 
@@ -257,22 +257,19 @@ Format: JSON with keys title, body, meta_title, meta_desc, hreflang (e.g. "ml" f
 
     def _deepseek_localise(self, article: dict, language: str,
                              rules: dict, keyword: str) -> Optional[dict]:
-        """Free fallback using DeepSeek local."""
+        """Free fallback using central AIRouter Ollama (health check, semaphore, 620s timeout)."""
         try:
-            r = _req.post(f"{OLLAMA_URL}/api/generate",
-                json={"model":"deepseek-r1:7b",
-                      "prompt": (
-                          f"Adapt this article to {language}. Not just translate — "
-                          f"use local food culture, local spice names, local units.\n"
-                          f"Keyword: {keyword}\nRules: {json.dumps(rules)}\n"
-                          f"Original (first 1000 words): {article.get('body','')[:2000]}\n\n"
-                          f"Write article in {language}. Return JSON: "
-                          "{\"title\":\"...\",\"body\":\"...\",\"meta_title\":\"...\",\"meta_desc\":\"...\",\"hreflang\":\"\"}"
-                      ),
-                      "stream":False,"options":{"num_predict":2000}},
-                timeout=30)
-            if r.ok:
-                text = r.json().get("response","").strip()
+            from core.ai_config import AIRouter
+            prompt = (
+                f"Adapt this article to {language}. Not just translate — "
+                f"use local food culture, local spice names, local units.\n"
+                f"Keyword: {keyword}\nRules: {json.dumps(rules)}\n"
+                f"Original (first 1000 words): {article.get('body','')[:2000]}\n\n"
+                f"Write article in {language}. Return JSON: "
+                "{\"title\":\"...\",\"body\":\"...\",\"meta_title\":\"...\",\"meta_desc\":\"...\",\"hreflang\":\"\"}"
+            )
+            text = AIRouter._call_ollama(prompt, f"You are an expert localisation writer for {language}.", 0.2)
+            if text:
                 m = re.search(r'\{.*\}', text, re.DOTALL)
                 if m:
                     data = json.loads(m.group(0))

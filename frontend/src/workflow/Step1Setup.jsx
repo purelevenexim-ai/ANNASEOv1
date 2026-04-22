@@ -51,7 +51,7 @@ function ChipInput({ items, setItems, placeholder, inputValue, setInputValue }) 
 }
 
 // ─── AI Suggest Button (with optional depth label) ─────────────────────────
-function AISuggestBtn({ projectId, type, onResult, disabled, context, label }) {
+function AISuggestBtn({ projectId, type, onResult, disabled, context, label, aiProvider }) {
   const [loading, setLoading] = useState(false)
   return (
     <Btn small variant="teal" disabled={loading || disabled}
@@ -63,6 +63,7 @@ function AISuggestBtn({ projectId, type, onResult, disabled, context, label }) {
           // Pass depth and current for progressive location drill-down
           if (context?.depth !== undefined) body.depth = context.depth
           if (context?.current) body.current = context.current
+          if (aiProvider) body.preferred_provider = aiProvider
           const res = await apiCall(`/api/strategy/${projectId}/ai-suggest`, "POST", body)
           if (res?.suggestions) onResult(res.suggestions)
         } catch (e) { console.warn("AI suggest failed:", e) }
@@ -91,7 +92,7 @@ const DEPTH_LABELS = ["🌍 Countries", "🏛️ States", "🏘️ Districts", "
 const DEPTH_NEXT = ["→ States", "→ Districts", "→ Towns", "→ Areas"]
 
 // ─── Main Component ──────────────────────────────────────────────────────────
-export default function Step1Setup({ projectId, onComplete }) {
+export default function Step1Setup({ projectId, onComplete, aiProvider = "groq" }) {
   const notify = useNotification(s => s.notify)
   const ctx = useWorkflowContext()
 
@@ -338,6 +339,7 @@ export default function Step1Setup({ projectId, onComplete }) {
                 {businessLocations.length > 0 && <span style={{ fontSize: 10, color: T.purple, marginLeft: 6 }}>Level: {DEPTH_LABELS[Math.min(businessLocationDepth, 3)]}</span>}
               </label>
               <AISuggestBtn projectId={projectId} type="business_regions"
+                aiProvider={aiProvider}
                 label={businessLocations.length === 0 ? "✨ AI Suggest" : `✨ Drill ${DEPTH_NEXT[Math.min(businessLocationDepth, 3)]}`}
                 context={{ depth: businessLocationDepth, current: businessLocations }}
                 onResult={items => {
@@ -358,6 +360,7 @@ export default function Step1Setup({ projectId, onComplete }) {
                 {targetLocations.length > 0 && <span style={{ fontSize: 10, color: T.purple, marginLeft: 6 }}>Level: {DEPTH_LABELS[Math.min(targetLocationDepth, 3)]}</span>}
               </label>
               <AISuggestBtn projectId={projectId} type="regions"
+                aiProvider={aiProvider}
                 label={targetLocations.length === 0 ? "✨ AI Suggest" : `✨ Drill ${DEPTH_NEXT[Math.min(targetLocationDepth, 3)]}`}
                 context={{ depth: targetLocationDepth, current: targetLocations }}
                 onResult={items => {
@@ -374,6 +377,7 @@ export default function Step1Setup({ projectId, onComplete }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, marginTop: 10 }}>
               <label style={{ fontSize: 12, color: T.textSoft, flex: 1 }}>Languages</label>
               <AISuggestBtn projectId={projectId} type="languages"
+                aiProvider={aiProvider}
                 context={{
                   locations: targetLocations,
                   business_locations: businessLocations,
@@ -406,6 +410,7 @@ export default function Step1Setup({ projectId, onComplete }) {
                 )}
               </label>
               <AISuggestBtn projectId={projectId} type="personas"
+                aiProvider={aiProvider}
                 disabled={personas.length === 0}
                 label={personas.length === 0 ? "✨ AI Suggest" : "✨ Expand Audiences"}
                 context={{
@@ -427,6 +432,7 @@ export default function Step1Setup({ projectId, onComplete }) {
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, marginTop: 10 }}>
               <label style={{ fontSize: 12, color: T.textSoft, flex: 1 }}>Customer Reviews</label>
               <AISuggestBtn projectId={projectId} type="reviews"
+                aiProvider={aiProvider}
                 onResult={items => { const strs = items.map(x => typeof x === 'string' ? x : x.review || String(x)); setCustomerReviews(prev => prev ? prev + "\n" + strs.join("\n") : strs.join("\n")); }} />
             </div>
             <textarea value={customerReviews} onChange={e => setCustomerReviews(e.target.value)}
@@ -465,6 +471,7 @@ export default function Step1Setup({ projectId, onComplete }) {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <label style={{ fontSize: 12, color: T.textSoft, flex: 1 }}>AI Suggest</label>
           <AISuggestBtn projectId={projectId} type="supporting"
+            aiProvider={aiProvider}
             context={{
               business_type: businessType,
               industry: profile?.industry || "",

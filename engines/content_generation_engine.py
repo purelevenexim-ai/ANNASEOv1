@@ -1554,17 +1554,9 @@ Return ONLY valid JSON, no markdown fences."""
         sections_spec = ""
         for s in h2_sections:
             h3_list = ""
-            if s.get("h3s"):
-                # Defensive: some models return list of dicts ({"text": "..."}) instead of strings.
-                _h3_strs = []
-                for _h in s["h3s"]:
-                    if isinstance(_h, str):
-                        _h3_strs.append(_h)
-                    elif isinstance(_h, dict):
-                        _h3_strs.append(_h.get("text") or _h.get("h3") or _h.get("title") or "")
-                _h3_strs = [x for x in _h3_strs if x]
-                if _h3_strs:
-                    h3_list = "\n      H3s: " + ", ".join(_h3_strs)
+            _h3_strs = self._coerce_str_list(s.get("h3s"))
+            if _h3_strs:
+                h3_list = "\n      H3s: " + ", ".join(_h3_strs)
             sections_spec += f'\n    <h2 id="{s.get("anchor", "")}">{s["h2"]}</h2> (~{s.get("word_target", 200)} words){h3_list}'
 
         # Build links block
@@ -2578,10 +2570,10 @@ Return JSON: {{"themes": [...], "gaps": [...], "angles": [...], "key_facts": [..
         prompt = f"""Create a comprehensive SEO {pt_label} structure for the keyword: "{self.keyword}"
 {f'{chr(10)}{pt_ctx}{chr(10)}' if pt_ctx else ''}
 Intent: {self.intent}
-Key themes to cover: {', '.join(themes[:5]) if themes else 'General topic coverage'}
-Content gaps to fill: {', '.join(gaps[:3]) if gaps else 'In-depth analysis'}
-Unique angles: {', '.join(angles[:2]) if angles else 'Expert insights'}
-Key facts available: {', '.join(facts[:3]) if facts else 'Research-based'}
+Key themes to cover: {', '.join(self._coerce_str_list(themes)[:5]) if themes else 'General topic coverage'}
+Content gaps to fill: {', '.join(self._coerce_str_list(gaps)[:3]) if gaps else 'In-depth analysis'}
+Unique angles: {', '.join(self._coerce_str_list(angles)[:2]) if angles else 'Expert insights'}
+Key facts available: {', '.join(self._coerce_str_list(facts)[:3]) if facts else 'Research-based'}
 {"Supporting keywords to weave in: " + ', '.join(self.supporting_keywords) if self.supporting_keywords else ""}
 {"Target audience: " + self.target_audience if self.target_audience else ""}
 Content type: {self.content_type}
@@ -3667,6 +3659,27 @@ Return JSON:
         else:
             kw_usage_guide = "use naturally 2-4 times per section"
 
+        # Compute total article keyword count target (for density 1.0-1.5% across full article)
+        _word_target = getattr(self, "word_target", 2000) or 2000
+        _kw_min_count = max(10, int(_word_target / 100))   # 1.0% floor
+        _kw_max_count = max(15, int(_word_target * 1.5 / 100))  # 1.5% ceiling
+        _kw_count_guide = f"TOTAL ARTICLE keyword count: {_kw_min_count}–{_kw_max_count} times across the full article."
+
+        # B2B example block for wholesale/price/bulk/supplier keywords
+        _kw_lower_s6 = (self.keyword or "").lower()
+        _is_b2b_kw = any(t in _kw_lower_s6 for t in ("wholesale", "bulk", "supplier", "price", "pricing", "export", "import", "b2b", "trade", "distributor"))
+        _b2b_example_block = ""
+        if _is_b2b_kw:
+            _b2b_example_block = f"""
+── B2B SCENARIO EXAMPLES (use these types — not home-cook or personal use) ──
+For "{self.keyword}" use ONLY professional/commercial buyer scenarios such as:
+• "A food processing unit importing 2 tonnes monthly..."
+• "An exporter shipping 5-tonne containers to the Middle East..."
+• "A specialty grocery chain (12 stores) negotiating bulk rates..."
+• "A private-label brand sourcing for seasonal production runs..."
+DO NOT write: "a home cook", "your kitchen", "everyday cooking", personal recipes, or retail consumer scenarios.
+"""
+
         # Phase D: render intent-plan constraint block (empty string if missing)
         try:
             from engines.intent_planner import render_intent_block
@@ -3676,11 +3689,11 @@ Return JSON:
         _intent_block_section = (_intent_block + "\n\n") if _intent_block else ""
 
         # Compact rules block shared across all section prompts
-        rules_compact = f"""{_intent_block_section}KEYWORD: "{self.keyword}" — {kw_usage_guide}. Overall density target: 1.0-1.5%.
+        rules_compact = f"""{_intent_block_section}KEYWORD: "{self.keyword}" — {kw_usage_guide}. Overall density target: 1.0-1.5%. {_kw_count_guide}
 Semantic Variations: {', '.join(self._semantic_variations[:5]) if self._semantic_variations else 'use synonyms'}
 {"Entities to mention: " + ', '.join(self._target_entities[:8]) if self._target_entities else ""}
 
-── READABILITY (Flesch 60-70) ──
+{_b2b_example_block}── READABILITY (Flesch 60-70) ──
 Sentence length: Avg 15-20w. Mix short (8-12w) + medium (18-25w). Break >30w sentences. Active voice >80%. Transitions between paragraphs (However, Moreover, Additionally). Max 3 sentences/paragraph. Max 80w/paragraph.
 
 ── SENTENCE VARIETY (20+ Openers) ──
@@ -3718,6 +3731,10 @@ DO NOT write any of these SEO template patterns (they appear identically across 
 ❌ "We found it adds [benefit] to [use-case]."
 ❌ "When we analyzed [data/feedback], we discovered [insight]."
 If you need to use the keyword in a sentence, write UNIQUE phrasing specific to the actual content.
+
+── CTAs (REQUIRED) ──
+Mid-content: After the 2nd or 3rd section, add exactly one: <div class="cta-box"><p>[Action verb] {self.keyword} today — [specific benefit]. [Urgency phrase].</p></div>
+Example: <div class="cta-box"><p>Shop premium {self.keyword} today and enjoy guaranteed freshness. Limited stock — order now.</p></div>
 
 ── ANTI-STUFFING ──
 Do NOT repeat exact keyword "{self.keyword}" in every paragraph. Use in H2s, intro, conclusion. In body: pronouns ("it", "they", "this") or short references.
@@ -3761,8 +3778,8 @@ Business: {self.project_name or "the business"}
 {f'{chr(10)}{pt_ctx}{chr(10)}' if pt_ctx else ''}
 Introduction plan: {structure.get("intro_plan", "Hook + overview of what reader learns")}
 
-Key themes: {', '.join(research_themes[:5])}
-Key facts: {', '.join(key_facts[:3]) if key_facts else "Provide relevant data"}
+Key themes: {', '.join(self._coerce_str_list(research_themes)[:5])}
+Key facts: {', '.join(self._coerce_str_list(key_facts)[:3]) if key_facts else "Provide relevant data"}
 
 {research_block}
 
@@ -3807,7 +3824,8 @@ REQUIREMENTS:
             section_names = [s['h2'] for s in batch]
             sections_spec = ""
             for s in batch:
-                h3_list = "\n    - " + "\n    - ".join(s.get("h3s", [])) if s.get("h3s") else ""
+                _h3s = self._coerce_str_list(s.get("h3s"))
+                h3_list = ("\n    - " + "\n    - ".join(_h3s)) if _h3s else ""
                 # Inject S2 content_angle and authority_note so the drafter uses them
                 angle_line = f"\n    Angle: {s['content_angle']}" if s.get("content_angle") else ""
                 authority_line = f"\n    Authority: {s['authority_note']}" if s.get("authority_note") else ""
@@ -4307,6 +4325,35 @@ Write ONLY the FAQ section and conclusion. Start with the FAQ <h2>."""
         (r"\bbuy authentic [\w\s]+? online\b[^.]*\.", ""),
         (r"\bshop (?:our )?premium [\w\s]+? (?:collection|range|selection)\b[^.]*\.", ""),
     )
+
+    @staticmethod
+    def _coerce_str_list(items) -> list:
+        """Phase G.4: schema-tolerant coercion for model outputs that may return
+        list[str] (Gemini), list[dict] like [{"text":"..."}] (Mistral 7B), or
+        mixed shapes. Returns a clean list[str] with empties dropped.
+
+        Recognises common dict keys: text, title, h3, name, fact, value, content.
+        """
+        if not items:
+            return []
+        out = []
+        for it in items:
+            if it is None:
+                continue
+            if isinstance(it, str):
+                s = it.strip()
+            elif isinstance(it, dict):
+                s = (
+                    it.get("text") or it.get("title") or it.get("h3")
+                    or it.get("name") or it.get("fact") or it.get("value")
+                    or it.get("content") or ""
+                )
+                s = str(s).strip()
+            else:
+                s = str(it).strip()
+            if s:
+                out.append(s)
+        return out
 
     def _strip_forbidden_words(self, html: str) -> str:
         """Programmatically replace banned words/phrases that AI prompts
@@ -5211,32 +5258,30 @@ Return JSON of the form: {{"text": "<simplified paragraph here>"}}"""
             kw_density = (kw_count / word_count) * 100
             log.info(f"R34 density check: kw='{kw_lower}' count={kw_count} words={word_count} density={kw_density:.2f}%")
             if kw_density > 2.5 and kw_count > 5:
-                # Generate grammatically correct semantic variations
+                # Phase G.3: context-aware variations (SAFE only — no determiner prefixes)
+                # Previous version generated "such X", "these X", "this X" which created
+                # corrupted phrases like "the such options", "true these products" when
+                # replacing keywords that appeared after adjectives or articles.
                 kw_words = kw_lower.split()
                 variations = []
                 if len(kw_words) >= 3:
-                    # Multi-word (3+): drop first modifier, reorder, or paraphrase
+                    # Multi-word: drop first modifier or use last noun only
                     variations = [
-                        " ".join(kw_words[1:]),                    # drop first word: "best black pepper" → "black pepper"
-                        " ".join(kw_words[:-1]) + " options",     # "best black" + "options"
-                        "this " + kw_words[-1],                    # "this pepper"
-                        "these " + " ".join(kw_words[-2:]),        # "these black pepper"
-                        "such " + " ".join(kw_words[1:]),          # "such black pepper"
+                        " ".join(kw_words[1:]),                    # "organic spice wholesale" → "spice wholesale"
+                        kw_words[-1],                              # last noun: "price"
+                        " ".join(kw_words[-2:]),                  # last 2 words: "wholesale price"
                     ]
                 elif len(kw_words) == 2:
                     variations = [
-                        kw_words[-1] + " options",                 # "pepper options"
-                        "this " + kw_words[-1],                    # "this pepper"
-                        "such " + kw_lower,                        # "such black pepper"
-                        "these " + kw_words[-1] + " products",    # "these pepper products"
-                        kw_words[0] + " " + kw_words[-1] + " options",  # "black pepper options"
+                        kw_words[-1],                              # "pepper" from "black pepper"
+                        f"{kw_words[-1]} options",                # "pepper options"
+                        kw_words[0],                               # "black"
                     ]
                 elif len(kw_words) == 1:
                     variations = [
-                        f"this {kw_lower}",
-                        f"such {kw_lower}",
-                        f"these {kw_lower} products",
-                        f"the {kw_lower}",
+                        "it",
+                        "this option",
+                        f"{kw_lower} products",
                     ]
 
                 # Replace excess keyword occurrences (keep every 2nd, replace rest)
@@ -5245,44 +5290,56 @@ Return JSON of the form: {{"text": "<simplified paragraph here>"}}"""
                 excess = kw_count - target_count
 
                 if excess > 0 and variations:
-                    # Replace from the middle of the article outward (preserve first/last mentions)
+                    # Find all matches with STRICT word boundaries
                     positions = []
-                    start = 0
-                    kw_escaped = re.escape(self.keyword)
-                    for m in re.finditer(kw_escaped, html, re.I):
+                    kw_pattern = r"\b" + re.escape(self.keyword) + r"\b"
+                    for m in re.finditer(kw_pattern, html, re.I):
                         positions.append(m)
 
                     if len(positions) > target_count:
                         # Keep first 3 and last 2, replace from middle
                         replaceable = positions[3:-2] if len(positions) > 5 else positions[2:-1]
-                        # Cap replacements at 30% of excess to avoid heavy-handed
-                        # rewrites that change meaning. Better to leave a slight
-                        # over-density than mangle the prose.
                         replace_count = min(excess, len(replaceable), max(1, int(excess * 0.3)))
-                        # Replace from end to start to preserve positions
                         applied = 0
                         skipped = 0
+                        # Replace right-to-left to preserve offsets
                         for i, m in enumerate(reversed(replaceable[:replace_count])):
                             var = variations[i % len(variations)]
-                            # Look at the words immediately before/after the match
-                            before_ctx = html[max(0, m.start() - 20):m.start()].lower()
-                            after_ctx = html[m.end():m.end() + 20].lower()
-                            # Skip if replacement would create double-article ("the these", "these these"),
-                            # double-determiner, or follows an existing determiner badly.
-                            first_word = var.split()[0].lower() if var.split() else ""
-                            tail = re.search(r"\b(the|a|an|these|those|this|that|our|your|premium|quality|authentic)\s*$", before_ctx)
-                            if tail and first_word in {"the", "a", "an", "these", "those", "this", "that", "premium", "quality", "authentic"}:
+                            # STRICT CONTEXT CHECKS: only replace in standalone positions
+                            before_ctx = html[max(0, m.start() - 30):m.start()]
+                            after_ctx = html[m.end():m.end() + 30]
+                            
+                            # Skip if keyword appears after ANY modifier/article/adjective
+                            # Pattern: \b(word)\s+keyword → unsafe ("true organic...", "the organic...")
+                            unsafe_before = re.search(
+                                r"\b(the|a|an|this|that|these|those|such|our|your|all|any|" +
+                                r"true|real|actual|best|top|premium|quality|complete|full|" +
+                                r"new|old|first|last|main|key|primary|total)\s+$",
+                                before_ctx, re.I
+                            )
+                            if unsafe_before:
                                 skipped += 1
                                 continue
-                            # Also skip if directly preceded by a comma+space and the variation starts capitalised
-                            # mid-sentence (rare but messy)
+                            
+                            # Skip if replacement would leave orphaned article
+                            # (e.g., replacing "price" in "the price" with "it" → "the it")
+                            if var in {"it", "this", "that"} and re.search(r"\b(the|a|an)\s*$", before_ctx, re.I):
+                                skipped += 1
+                                continue
+                            
+                            # Skip if inside heading tags (preserve exact keyword in headings)
+                            heading_check = html[max(0, m.start() - 100):m.end() + 10]
+                            if re.search(r"<h[1-6][^>]*>[^<]*$", heading_check, re.I):
+                                skipped += 1
+                                continue
+                            
+                            # All checks passed — safe to replace
                             html = html[:m.start()] + var + html[m.end():]
                             applied += 1
 
-                        new_density = text_lower.count(kw_lower) / word_count * 100
                         log.info(
-                            f"R34 density fix: {kw_density:.1f}% -> replaced {applied} instance(s) "
-                            f"(skipped {skipped} unsafe), target ~{target_density}%"
+                            f"R34 density fix: {kw_density:.1f}% → replaced {applied} instance(s) "
+                            f"(skipped {skipped} unsafe contexts), target ~{target_density}%"
                         )
 
             # R34 density floor: REMOVED — injecting template phrases like
@@ -5400,18 +5457,21 @@ Return JSON of the form: {{"text": "<simplified paragraph here>"}}"""
             pattern = re.compile(r'((?:^|[.!?]\s+|<p[^>]*>)\s*)(' + re.escape(starter) + r')', re.I | re.MULTILINE)
             matches = list(pattern.finditer(html))
             if len(matches) > 3:
-                # Replace excess occurrences (keep first 2, replace rest)
-                for idx, m in enumerate(matches[2:]):
-                    replacement = replacements[idx % len(replacements)]
-                    # Preserve case of original
+                # Phase G.3 fix: original code mutated html inside the loop while still
+                # using stale match offsets from the pre-mutation scan. After the first
+                # replacement, every subsequent m.start()/m.end() pointed into the wrong
+                # location → mid-word splices like "lNotably, rmeric" (was "love turmeric")
+                # and "enviWithout question" (was "environment"). Fix: collect at most 5
+                # targets (skipping the first 2) and apply RIGHT-TO-LEFT so earlier offsets
+                # remain valid throughout the rewrite.
+                targets = matches[2:7]
+                for idx, m in enumerate(reversed(targets)):
+                    forward_idx = len(targets) - 1 - idx
+                    replacement = replacements[forward_idx % len(replacements)]
                     if m.group(2)[0].isupper():
                         replacement = replacement[0].upper() + replacement[1:]
                     html = html[:m.start(2)] + replacement + html[m.end(2):]
-                    # Recalculate matches after each replacement
-                    matches = list(pattern.finditer(html))
-                    if idx >= 4:  # Cap at 5 replacements per starter
-                        break
-                log.info(f"R19 variety fix: replaced {min(len(matches)-2, 5)} repetitive '{starter.strip()}' openers")
+                log.info(f"R19 variety fix: replaced {len(targets)} repetitive '{starter.strip()}' openers")
 
         # R55 nuance injection: REMOVED — generic filler like "real-world performance
         # of {kw} depends on sourcing quality" is identical across articles.  The S6
@@ -6003,10 +6063,12 @@ Return JSON of the form: {{"text": "<simplified paragraph here>"}}"""
                 failed_rules = [r for r in self._rule_results.get("rules", []) if not r.get("passed", True)]
             current_score = self._rule_results.get("percentage", 0) if hasattr(self, '_rule_results') and self._rule_results else 0
 
-        # Skip if score is already high enough or no failures AND no editorial instructions exist
+        # Skip if score is already good enough — Redevelop at 82%+ adds another full rewrite
+        # for marginal gain and risks voice drift. Only run when content genuinely needs it.
+        REDEVELOP_SKIP_THRESHOLD = 82
         has_edit_inst = hasattr(self.state, "editorial_instructions") and len(self.state.editorial_instructions) > 0
-        if current_score >= MIN_QUALITY_SCORE and not has_edit_inst:
-            step.summary = f"Score already {current_score}% ≥ {MIN_QUALITY_SCORE}% — skipping redevelopment"
+        if current_score >= REDEVELOP_SKIP_THRESHOLD and not has_edit_inst:
+            step.summary = f"Score {current_score}% ≥ {REDEVELOP_SKIP_THRESHOLD}% — skipping redevelopment to preserve content quality"
             return
 
         if not failed_rules and not has_edit_inst:
@@ -6295,7 +6357,7 @@ OUTPUT: Complete improved article as clean semantic HTML. No markdown, no code f
         _step_ctx_var.set({"step": 11, "step_name": "QualityLoop", "article_id": getattr(self, "article_id", None), "project_id": getattr(self, "project_id", ""), "keyword": getattr(self, "keyword", "")})
         step = self.state.steps[10]
         current_score = self.state.seo_score
-        MAX_PASSES = 3
+        MAX_PASSES = 2
 
         # Critical rules that MUST pass regardless of overall score
         CRITICAL_RULES = {"R20", "R24", "R25", "R26", "R34", "R35", "R36", "R44"}
@@ -6416,7 +6478,7 @@ KEY REQUIREMENTS:
 - SENTENCE VARIETY (CRITICAL): Use 20+ different sentence openers. Limit "The" to <20%. Questions 10%+ ("How do you?", "What makes?"). Imperatives (Do, Try, Consider, Compare). Transitional (However, Moreover, Therefore, Meanwhile). Subordinate (While, Although, Because, Since, If). Adverbs (Typically, Generally, Often). Coordinating sparingly (And, But, So <5%). NEVER 3+ consecutive same starters.
 - 6+ <h2>, 4+ <h3>, FAQ section, 1 <table>, 2+ <ul>, 1+ <ol>
 - DATA CREDIBILITY (5+ sourced stats): Format "According to [FDA/USDA/NIH/Harvard/Grand View Research] (2023-2024), [stat]..." EVERY percentage needs attribution. NEVER use vague "research shows", "studies suggest", "experts agree". If no source, use ranges ("20-30%") or state directly.
-- STORYTELLING (2+ instances): third-person customer scenarios ("a home cook sourcing X discovered Y"), before/after scenarios grounded in cited data, analogies. NO fabricated first-person testing claims.
+- STORYTELLING (2+ instances): third-person professional/commercial scenarios (e.g. "a food processor sourcing 2-tonne lots discovered Y", "an exporter shipping to the Middle East found Z"), before/after scenarios grounded in cited data, analogies. NO fabricated first-person testing claims. For wholesale/B2B keywords: NO home cook or personal use scenarios.
 - OPINION SIGNALS (2+ instances, neutral framing): "The strongest option for X is Y", "Avoid X because Y", "The best choice for [specific buyer] is...". Take clear stance WITHOUT fabricated first-person ("we recommend", "we tested" — forbidden).
 - CTAs (3 required if not present): Intro soft CTA ("Discover benefits..."), mid-content <div class="cta-box"> (after 40%), conclusion strong CTA (buy/shop/order/contact + urgency + benefit).
 - Include real numbers — percentages, years, measurements, price ranges

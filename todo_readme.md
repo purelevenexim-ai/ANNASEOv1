@@ -489,6 +489,378 @@ Response:
 
 ---
 
-**Last Updated:** March 25, 2026, 14:30 UTC  
+**Last Updated:** April 10, 2026  
 **Maintained By:** AI Development Team  
-**Next Review:** March 27, 2026 (End of Phase 1)
+**Next Review:** See Strategy v2 milestone tracker below
+
+---
+
+---
+
+# STRATEGY ENGINE V2 — DEVELOPMENT ROADMAP
+
+**Scope:** Full rebuild of Strategy Page as the application's central intelligence layer  
+**Reference:** `docs/strategyv2.md` — complete architecture, DB schema, prompts, API specs  
+**Vision:** Transform from "AI Strategy Generator" → "Autonomous SEO Intelligence Platform"
+
+## Why This Matters (Root Problems Being Solved)
+
+1. **Split-brain architecture** — UI mixes KI (old) and KW2 (new) data. Breaks trust immediately.
+2. **AI sees truncated data** — only top 30 keywords, top 20 clusters. Strategy is generic, not data-driven.
+3. **Strategy is a dead end** — Phase 9 generates, displays, stops. No feedback into pipeline.
+4. **Strategy is read-only** — user cannot edit pillar priorities, content mix, timelines.
+5. **No execution intelligence** — no "what should I do next?" based on strategy decisions.
+6. **Multiple disconnected engines** — Phase 9, Apply Strategy, Legacy Strategy all doing the same thing differently.
+
+---
+
+## MILESTONE 1 — Data Integrity (Fix Split-Brain) 🚨 IMMEDIATE
+
+**Goal:** Fix the root cause of ~40% of existing bugs. Make everything read from kw2 session data.  
+**Effort:** 2–3 days backend + 1 day frontend
+
+### Backend
+
+- [ ] **M1-B1** Fix Analysis page API → read from `kw2_validated_keywords` (not KI `keyword_strategy_briefs`)
+- [ ] **M1-B2** Fix Content Hub API → read from `kw2_calendar` + `kw2_clusters` (not KI clusters)
+- [ ] **M1-B3** Fix Overview KPIs API → read from `kw2_sessions` stats (not KI pipeline counts)
+- [ ] **M1-B4** Audit all routes in `main.py` — every route that touches strategy/content must require `session_id`
+- [ ] **M1-B5** Add `session_id` as required param to any endpoint currently using only `project_id` for content queries
+- [ ] **M1-B6** Add DB migrations for `kw2_sessions`: `geo_targets TEXT`, `audience_targets TEXT`, `intent_target TEXT` columns
+
+### Frontend
+
+- [ ] **M1-F1** Update Analysis page component to call kw2 endpoints (not KI)
+- [ ] **M1-F2** Update ContentHub component — replace KI cluster source with `kw2_clusters` + `kw2_calendar`
+- [ ] **M1-F3** Update Overview KPI cards to read session-scoped keyword/cluster counts
+
+### Verification
+
+- [ ] **M1-V1** Keyword count in UI matches `kw2_sessions.validated_count` (not KI keyword_strategy_briefs count)
+- [ ] **M1-V2** Content Hub articles are linked to a session_id
+- [ ] **M1-V3** Overview KPIs show same numbers as Strategy Page Overview tab
+
+---
+
+## MILESTONE 2 — Strategy Intelligence Engine v2 (Upgrade Phase 9)
+
+**Goal:** Upgrade existing Phase 9 to use richer data, 4 sub-modules, versioning, and editable output.  
+**Effort:** 3–4 days backend + 2 days frontend  
+**Reference:** `docs/strategyv2.md` § Phase 2
+
+### DB Migrations
+
+- [ ] **M2-DB1** Create `kw2_strategy_versions` table (versioned strategy output per session)
+- [ ] **M2-DB2** Create `kw2_strategy_edits` table (track user edits to strategy fields)
+
+### Backend — Engine Upgrade (`engines/kw2/strategy_engine.py`)
+
+- [ ] **M2-B1** Remove top-30/top-20 truncation — pass ALL validated keywords using weighted cluster summaries
+- [ ] **M2-B2** Implement Sub-Module 2A — Business Analysis (positioning, strengths, differentiation)
+  - Input: `kw2_business_profile` + `kw2_biz_intel` + `kw2_biz_pages`
+  - Output: `{positioning, strengths, opportunity, differentiation, icp_summary}`
+- [ ] **M2-B3** Implement Sub-Module 2B — Keyword Intelligence (full dataset, funnel mapping, cannibalization)
+  - Input: ALL `kw2_validated_keywords` + cluster distributions
+  - Output: `{priority_clusters, funnel_map, cannibalization_risks, quick_wins}`
+- [ ] **M2-B4** Implement Sub-Module 2C — Strategy Builder (uses 2A + 2B + competitors, generates full strategy JSON)
+- [ ] **M2-B5** Implement Sub-Module 2D — Action Mapping (keyword boosts, cluster reorder, calendar priority)
+  - Output: `{keyword_boosts, cluster_reorder, calendar_priority}` — feeds back into pipeline
+- [ ] **M2-B6** Save each generation to `kw2_strategy_versions` (not overwriting `strategy_json`)
+- [ ] **M2-B7** `GET /api/kw2/{pid}/sessions/{sid}/strategy/versions` — list all versions
+- [ ] **M2-B8** `POST /api/kw2/{pid}/sessions/{sid}/strategy/activate/{version_id}` — set active version
+- [ ] **M2-B9** `PATCH /api/kw2/{pid}/sessions/{sid}/strategy/edit` — save user edits to `kw2_strategy_edits`
+- [ ] **M2-B10** `GET /api/kw2/{pid}/sessions/{sid}/strategy/diff/{v1}/{v2}` — compare two versions
+
+### Backend — Action Mapping Feedback (close the loop)
+
+- [ ] **M2-B11** After Phase 9 completes: apply `keyword_boosts` from 2D to `kw2_validated_keywords.final_score`
+- [ ] **M2-B12** After Phase 9 completes: apply `cluster_reorder` to `kw2_clusters` sort order
+- [ ] **M2-B13** After Phase 9 completes: apply `calendar_priority` to `kw2_calendar` schedule ordering
+
+### Frontend — `SessionStrategyPage.jsx` StrategyTab Upgrades
+
+- [ ] **M2-F1** Version badge in metadata bar: "v3 · Generated 2h ago · Active"
+- [ ] **M2-F2** Version history drawer (list versions, Activate / Compare buttons)
+- [ ] **M2-F3** Edit mode toggle per strategy section (pillar priorities, content mix sliders, quick wins)
+- [ ] **M2-F4** "Regenerate section" button per strategy card (calls sub-module endpoint)
+- [ ] **M2-F5** Side-by-side diff view for two strategy versions
+
+---
+
+## MILESTONE 3 — Question Intelligence Engine (NEW)
+
+**Goal:** Build the 7-module question intelligence system that generates structured business questions from all data.  
+**Effort:** 3 days backend + 2 days frontend  
+**Reference:** `docs/strategyv2.md` § Phase 3  
+**New file:** `engines/kw2/question_engine.py`
+
+### DB Migrations
+
+- [ ] **M3-DB1** Create `kw2_intelligence_questions` table
+  - Columns: `id, session_id, project_id, source_module, question, category, why_it_matters, data_source, priority, answer, answer_confidence, expansion_depth, parent_question_id, status`
+  - Add enrichment columns: `intent, funnel_stage, audience_segment, geo_relevance, business_relevance, content_type, effort`
+  - Add scoring columns: `final_score, score_breakdown`
+  - Add clustering columns: `content_cluster_id, is_duplicate, duplicate_of`
+
+### Backend — `engines/kw2/question_engine.py`
+
+- [ ] **M3-B1** Module Q1: Business Core Questions (from `kw2_business_profile` + `kw2_biz_intel`)
+- [ ] **M3-B2** Module Q2: Audience Intelligence Questions (from `kw2_biz_intel.audience_segments` + keyword intent)
+- [ ] **M3-B3** Module Q3: Intent Mapping Questions (from ALL `kw2_validated_keywords`)
+- [ ] **M3-B4** Module Q4: Customer Journey Questions (from `buyer_readiness` + intent distribution → TOFU/MOFU/BOFU)
+- [ ] **M3-B5** Module Q5: Product/Service Deep Questions (from `kw2_biz_pages` + `products_services`)
+- [ ] **M3-B6** Module Q6: Content Opportunity Questions (educational, problem-based, comparison, authority)
+- [ ] **M3-B7** Module Q7: Competitive Intelligence Questions (from `kw2_biz_competitors` + `kw2_biz_competitor_keywords`)
+- [ ] **M3-B8** Prompt templates for each module — no hardcoding, all variables from session data
+- [ ] **M3-B9** `POST /api/kw2/{pid}/sessions/{sid}/question-engine/run` — trigger all 7 modules
+- [ ] **M3-B10** `GET /api/kw2/{pid}/sessions/{sid}/question-engine/questions` — list with filters
+- [ ] **M3-B11** `GET /api/kw2/{pid}/sessions/{sid}/question-engine/summary` — count per module + status
+- [ ] **M3-B12** `PATCH /api/kw2/{pid}/sessions/{sid}/question-engine/{qid}` — edit/annotate  
+- [ ] **M3-B13** `DELETE /api/kw2/{pid}/sessions/{sid}/question-engine/{qid}` — remove
+
+### Frontend — New "Intelligence" Tab in `SessionStrategyPage.jsx`
+
+- [ ] **M3-F1** Add `🧠 Intelligence` tab between `Keywords` and `Strategy`
+- [ ] **M3-F2** Module cards (Q1–Q7) with question counts, status badges (pending/answered/expanded)
+- [ ] **M3-F3** Question list per module: question text, category, priority badge, expandable answer panel
+- [ ] **M3-F4** Filter bar: by module, priority, answered/unanswered, category
+- [ ] **M3-F5** "Generate Questions" button → runs Phase 3 engine
+- [ ] **M3-F6** "Answer All" button → runs Phase 5 enrichment for all questions
+- [ ] **M3-F7** Add `api.runQuestionEngine()`, `api.getQuestions()`, `api.getQuestionSummary()` to `api.js`
+
+---
+
+## MILESTONE 4 — Expansion Engine + Dedup + Scoring
+
+**Goal:** Recursively expand questions across business-specific dimensions; deduplicate; score all questions.  
+**Effort:** 4 days backend + 1 day frontend  
+**Reference:** `docs/strategyv2.md` § Phases 4, 6, 7  
+**New files:** `engines/kw2/expansion_engine.py`, `engines/kw2/dedup_engine.py`, `engines/kw2/scoring_engine.py`
+
+### DB Migrations
+
+- [ ] **M4-DB1** Create `kw2_expansion_config` table (max_depth, max_per_node, dedup_threshold, max_total, discovered_dimensions)
+- [ ] **M4-DB2** Create `kw2_content_clusters` table (cluster_name, description, pillar, intent_mix, question_count, avg_score)
+- [ ] **M4-DB3** Create `kw2_scoring_config` table (per-session weights JSON)
+
+### Backend — Expansion Engine (`engines/kw2/expansion_engine.py`)
+
+- [ ] **M4-B1** Dimension discovery prompt — AI identifies geo/use-case/audience/product dimensions from session data (no hardcoding)
+- [ ] **M4-B2** Expansion prompt template — expands any question across any dimension (generic, business-agnostic)
+- [ ] **M4-B3** Recursive expansion loop: L0 (seed) → L1 → L2, controlled by config
+- [ ] **M4-B4** Config controls: `max_depth`, `max_per_node`, `max_total` (all user-configurable)
+- [ ] **M4-B5** `POST /api/kw2/{pid}/sessions/{sid}/expansion/discover-dimensions`
+- [ ] **M4-B6** `POST /api/kw2/{pid}/sessions/{sid}/expansion/run`
+- [ ] **M4-B7** `GET /api/kw2/{pid}/sessions/{sid}/expansion/status`
+- [ ] **M4-B8** `PATCH /api/kw2/{pid}/sessions/{sid}/expansion/config`
+
+### Backend — Dedup Engine (`engines/kw2/dedup_engine.py`)
+
+- [ ] **M4-B9** Pass 1: Levenshtein exact/near-exact dedup (threshold < 0.1)
+- [ ] **M4-B10** Pass 2: Semantic embedding similarity dedup (cosine > 0.85 = duplicate)
+- [ ] **M4-B11** Mark duplicates in `kw2_intelligence_questions` (`is_duplicate=1, duplicate_of=parent_id`)
+- [ ] **M4-B12** Clustering prompt: group deduplicated questions into coherent content topic clusters
+- [ ] **M4-B13** Save clusters to `kw2_content_clusters`; update `content_cluster_id` on each question
+
+### Backend — Scoring Engine (`engines/kw2/scoring_engine.py`)
+
+- [ ] **M4-B14** Generic 5-component weighted scoring formula (no hardcoding):
+  - `business_fit × w1` — AI score from enrichment × pillar match bonus
+  - `intent_value × w2` — transactional=1.0, commercial=0.8, informational=0.6, navigational=0.4
+  - `demand_potential × w3` — keyword volume signal or AI estimate
+  - `competition_ease × w4` — inverse keyword difficulty
+  - `uniqueness × w5` — penalise well-covered competitor topics; reward gap topics
+- [ ] **M4-B15** Weights stored per session in `kw2_scoring_config` (default: 0.30/0.20/0.20/0.15/0.15)
+- [ ] **M4-B16** `POST /api/kw2/{pid}/sessions/{sid}/scoring/run`
+- [ ] **M4-B17** `GET /api/kw2/{pid}/sessions/{sid}/scoring/config`
+- [ ] **M4-B18** `PATCH /api/kw2/{pid}/sessions/{sid}/scoring/config` — update weights
+- [ ] **M4-B19** `GET /api/kw2/{pid}/sessions/{sid}/scoring/ranked` — sorted by `final_score`
+
+### Frontend — Intelligence Tab Additions
+
+- [ ] **M4-F1** Expansion progress bar + status (total generated, after dedup, by cluster)
+- [ ] **M4-F2** Scoring config panel: 5 weight sliders (must sum to 1.0)
+- [ ] **M4-F3** Ranked question list with score breakdown tooltip
+- [ ] **M4-F4** Cluster view: group questions by `content_cluster_id`
+
+---
+
+## MILESTONE 5 — Content Title Engine + Selection (Phases 8 & 9)
+
+**Goal:** Select balanced top-N questions and convert them into SEO-optimised content titles.  
+**Effort:** 3 days backend + 3 days frontend  
+**Reference:** `docs/strategyv2.md` § Phases 8, 9  
+**New files:** `engines/kw2/selection_engine.py`, `engines/kw2/content_title_engine.py`
+
+### DB Migrations
+
+- [ ] **M5-DB1** Create `kw2_selected_questions` table (selection_rank, selection_reason, cluster_id, content_title_id, status)
+- [ ] **M5-DB2** Create `kw2_content_titles` table
+  - Columns: `id, session_id, project_id, question_id, title, slug, primary_keyword, meta_title, content_type, word_count_target, pillar, cluster_name, intent, funnel_stage, brief_json, article_id, status, scheduled_date`
+
+### Backend — Selection Engine (`engines/kw2/selection_engine.py`)
+
+- [ ] **M5-B1** Selection config: `target_count`, `min_per_cluster`, `max_per_cluster`, intent distribution targets
+- [ ] **M5-B2** Diversity-balanced selection algorithm (ensures geo/intent/funnel/cluster coverage)
+- [ ] **M5-B3** `POST /api/kw2/{pid}/sessions/{sid}/selection/run`
+- [ ] **M5-B4** `GET /api/kw2/{pid}/sessions/{sid}/selection/list`
+- [ ] **M5-B5** `POST /api/kw2/{pid}/sessions/{sid}/selection/include/{qid}` — manual add
+- [ ] **M5-B6** `DELETE /api/kw2/{pid}/sessions/{sid}/selection/{qid}` — manual remove
+
+### Backend — Content Title Engine (`engines/kw2/content_title_engine.py`)
+
+- [ ] **M5-B7** Title generation prompt: question → SEO title + slug + primary_keyword + meta_title (generic, no hardcoding)
+- [ ] **M5-B8** Batch processing (50 questions per AI call)
+- [ ] **M5-B9** Save to `kw2_content_titles`; link to `kw2_selected_questions`
+- [ ] **M5-B10** `POST /api/kw2/{pid}/sessions/{sid}/content-titles/generate` — batch title generation
+- [ ] **M5-B11** `GET /api/kw2/{pid}/sessions/{sid}/content-titles` — list with pillar/intent/status filters
+- [ ] **M5-B12** `POST /api/kw2/{pid}/sessions/{sid}/content-titles/{id}/brief` — generate brief (uses existing brief infrastructure)
+- [ ] **M5-B13** `POST /api/kw2/{pid}/sessions/{sid}/content-titles/{id}/article` — generate article
+- [ ] **M5-B14** `PATCH /api/kw2/{pid}/sessions/{sid}/content-titles/{id}` — edit title/slug/meta
+
+### Frontend — New "Titles" Tab in `SessionStrategyPage.jsx`
+
+- [ ] **M5-F1** Add `📝 Titles` tab between `Strategy` and `Content Plan`
+- [ ] **M5-F2** Title list: title, keyword, intent badge, funnel badge, score, status chip
+- [ ] **M5-F3** Filter bar: pillar, cluster, intent, funnel_stage, status
+- [ ] **M5-F4** Bulk action: select multiple → "Generate All Briefs"
+- [ ] **M5-F5** Article grid actions per title: Generate Brief | Edit | Schedule | Mark Published
+
+### Frontend — Content Hub Upgrade (Session-Aware)
+
+- [ ] **M5-F6** Content Hub article list reads from `kw2_content_titles` (not ad-hoc)
+- [ ] **M5-F7** Articles ordered by `selection_rank`
+- [ ] **M5-F8** "What to do next" widget: 3 actionable cards (Money priority, Quick Win, Cluster momentum)
+- [ ] **M5-F9** Pillar-based browsing: pillar → cluster → titles hierarchy
+
+---
+
+## MILESTONE 6 — Prompt Studio (Phase 12)
+
+**Goal:** Every AI prompt in the system is visible, editable, versioned, and testable by the user.  
+**Effort:** 3 days backend + 2 days frontend  
+**Reference:** `docs/strategyv2.md` § Phase 12  
+**New file:** `engines/kw2/prompt_manager.py`
+
+### DB Migrations
+
+- [ ] **M6-DB1** Create `kw2_prompts` table (prompt_key, phase, display_name, template, variables, is_system, version)
+- [ ] **M6-DB2** Create `kw2_prompt_versions` table (prompt_id, template, version, changed_by, change_note)
+
+### Backend
+
+- [ ] **M6-B1** Seed all existing prompts from `engines/kw2/prompts.py` into `kw2_prompts` table on startup
+- [ ] **M6-B2** `engines/kw2/prompt_manager.py` — CRUD helper; all AI calls read from DB instead of hardcoded strings
+- [ ] **M6-B3** Update all engines to use `prompt_manager.get_prompt(key, variables)` instead of inline templates
+- [ ] **M6-B4** `GET /api/kw2/prompts` — list all prompts
+- [ ] **M6-B5** `GET /api/kw2/prompts/{key}` — get prompt + variable documentation
+- [ ] **M6-B6** `PATCH /api/kw2/prompts/{key}` — update template (saves old version automatically)
+- [ ] **M6-B7** `POST /api/kw2/prompts/{key}/test` — test prompt with sample session data → returns AI output
+- [ ] **M6-B8** `GET /api/kw2/prompts/{key}/versions` — version history
+- [ ] **M6-B9** `POST /api/kw2/prompts/{key}/restore/{version}` — rollback
+
+### Frontend — New "Prompts" Tab in `SessionStrategyPage.jsx`
+
+- [ ] **M6-F1** Add `🔧 Prompts` tab at end of tab bar
+- [ ] **M6-F2** Prompt list grouped by phase (Phase 2 / Phase 3 / Phase 4 / etc.)
+- [ ] **M6-F3** Prompt editor: textarea + variable reference panel showing what each `{variable}` contains
+- [ ] **M6-F4** "Test Prompt" button → sends sample context → shows AI output preview
+- [ ] **M6-F5** Version history with diff view + Restore button
+- [ ] **M6-F6** Phase badge per prompt (e.g. "Phase 3 · Q2 Audience")
+
+---
+
+## MILESTONE 7 — Feedback & Learning Engine (Phase 11)
+
+**Goal:** Track published content performance and feed results back into scoring weights automatically.  
+**Effort:** 3 days backend + 2 days frontend  
+**Reference:** `docs/strategyv2.md` § Phase 11  
+**New file:** `engines/kw2/feedback_engine.py`
+
+### DB Migrations
+
+- [ ] **M7-DB1** Create `kw2_content_performance` table
+  - Columns: `id, session_id, content_title_id, article_id, tracked_date, google_position, organic_clicks, impressions, ctr, conversions, data_source`
+
+### Backend
+
+- [ ] **M7-B1** `POST /api/kw2/{pid}/sessions/{sid}/performance/record` — manual performance entry
+- [ ] **M7-B2** `GET /api/kw2/{pid}/sessions/{sid}/performance/summary`
+- [ ] **M7-B3** Feedback analysis: compare predicted score vs actual performance
+- [ ] **M7-B4** Bayesian weight adjustment (learning_rate=0.1, min 5 data points before adjusting)
+- [ ] **M7-B5** `POST /api/kw2/{pid}/sessions/{sid}/performance/apply-learnings` — update `kw2_scoring_config.weights`
+
+### Frontend
+
+- [ ] **M7-F1** Performance dashboard in Overview tab: CTR, position, clicks per content title
+- [ ] **M7-F2** Manual performance input form per article in Titles tab
+- [ ] **M7-F3** "Apply Learnings" button → shows how weights will change → confirm → applies
+
+---
+
+## PHASE SUMMARY TABLE
+
+| Milestone | Phases | New Files | Backend Items | Frontend Items | Effort |
+|---|---|---|---|---|---|
+| **M1: Data Integrity** | — | — | 6 | 3 | 3–4 days |
+| **M2: Strategy v2** | Phase 2 | `strategy_engine.py` upgrade | 13 | 5 | 5–6 days |
+| **M3: Question Engine** | Phase 3 | `question_engine.py` | 13 | 7 | 5 days |
+| **M4: Expansion+Scoring** | Phases 4,6,7 | `expansion_engine.py`, `dedup_engine.py`, `scoring_engine.py` | 19 | 4 | 5 days |
+| **M5: Titles+ContentHub** | Phases 8,9,10 | `selection_engine.py`, `content_title_engine.py` | 14 | 9 | 6 days |
+| **M6: Prompt Studio** | Phase 12 | `prompt_manager.py` | 9 | 6 | 5 days |
+| **M7: Feedback Loop** | Phase 11 | `feedback_engine.py` | 5 | 3 | 5 days |
+
+**Total new items:** ~120 tasks  
+**Total new engine files:** 7  
+**Total new DB tables:** 11  
+**Total estimated effort:** 34–36 days (building sequentially)
+
+---
+
+## NEW DB TABLES REQUIRED
+
+| Table | Milestone | Purpose |
+|---|---|---|
+| `kw2_strategy_versions` | M2 | Versioned strategy outputs |
+| `kw2_strategy_edits` | M2 | User edits to strategy fields |
+| `kw2_intelligence_questions` | M3 | All questions: seed + expanded + enriched + scored |
+| `kw2_expansion_config` | M4 | Expansion engine config per session |
+| `kw2_content_clusters` | M4 | Topic clusters from dedup phase |
+| `kw2_scoring_config` | M4 | Per-session scoring weights |
+| `kw2_selected_questions` | M5 | Top questions selected for content |
+| `kw2_content_titles` | M5 | Generated SEO titles → briefs → articles |
+| `kw2_content_performance` | M7 | Published article performance metrics |
+| `kw2_prompts` | M6 | Prompt registry with templates |
+| `kw2_prompt_versions` | M6 | Prompt version history |
+
+Full schema DDL for each table is in `docs/strategyv2.md`.
+
+---
+
+## DESIGN PRINCIPLES (Non-Negotiable)
+
+1. **No hardcoding** — every value derived from data, config or user input
+2. **Session-first** — every query requires `session_id`
+3. **Prompt visibility** — user can see and edit every prompt
+4. **Modular AI blocks** — each engine is independent; swap or skip any phase
+5. **Generic business model** — zero assumptions about business type in engine logic
+6. **Controlled expansion** — recursive growth bounded by configurable limits
+7. **Strategy drives everything** — content, calendar, briefs derive from strategy decisions
+8. **Feedback loop** — system improves based on published content performance
+
+---
+
+## UPDATED TAB STRUCTURE (After v2)
+
+```
+Current (7 tabs):
+📊 Overview | 🔑 Keywords | 🗺️ Strategy | ✍️ Content Plan | 🔗 Links | 📋 Parameters | 🎯 Goals
+
+v2 Target (10 tabs):
+📊 Overview | 🔑 Keywords | 🧠 Intelligence | 🗺️ Strategy | 📝 Titles | ✍️ Content Plan | 🔗 Links | 📋 Parameters | 🎯 Goals | 🔧 Prompts
+```
+
+---
+
+**Architecture reference:** `docs/strategyv2.md`  
+**Last Updated:** April 10, 2026
