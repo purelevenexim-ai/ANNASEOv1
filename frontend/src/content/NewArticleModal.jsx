@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react"
 import { T, api, Btn } from "../App"
+import { SYSTEM_TEMPLATES, DEFAULT_TEMPLATE_ID, expandToLegacyRouting } from "../aihub/systemRoutingTemplates"
 
 const INTENT_OPTIONS = [
-  { value: "informational", label: "Informational", desc: "Teach / explain" },
-  { value: "commercial",    label: "Commercial",    desc: "Compare / review" },
-  { value: "transactional", label: "Transactional", desc: "Buy / order" },
-  { value: "navigational",  label: "Navigational",  desc: "Find a page" },
+  { value: "informational", label: "Informational", desc: "Teach / explain (blog, guide, how-to)" },
+  { value: "commercial",    label: "Commercial",    desc: "Compare / review — includes buyer guidance, pros/cons" },
+  { value: "transactional", label: "Transactional", desc: "Buy / order — includes CTAs, conversion sections" },
+  { value: "navigational",  label: "Navigational",  desc: "Find a page / brand query" },
 ]
 const WC_OPTIONS = [1500, 2000, 3000, 4000]
 const CT_OPTIONS = ["blog", "guide", "review", "comparison", "landing"]
@@ -49,18 +50,28 @@ const AI_PROVIDERS_BASE = {
     { value: "openai_paid",    label: "ChatGPT",       desc: "OpenAI API",    color: "#10a37f" },
   ],
   other: [
-    { value: "or_qwen",        label: "OR: Qwen 3.6+",      desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_deepseek",    label: "OR: DeepSeek V3",    desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_deepseek_r1", label: "OR: DeepSeek R1",    desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_gemini_flash",label: "OR: Gemini Flash",   desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_gemini_lite", label: "OR: Gemini Lite",    desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_glm",         label: "OR: GLM Turbo",      desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_gpt4o",       label: "OR: GPT-4o",         desc: "OpenRouter paid", color: "#10a37f" },
-    { value: "or_claude",      label: "OR: Claude",         desc: "OpenRouter paid", color: "#7c3aed" },
-    { value: "or_llama",       label: "OR: Llama 4",        desc: "OpenRouter free", color: "#6366f1" },
-    { value: "or_qwen_coder",  label: "OR: Qwen Coder",     desc: "OpenRouter free", color: "#6366f1" },
-    { value: "openrouter",     label: "OpenRouter",         desc: "Default model",   color: "#6366f1" },
-    { value: "skip",           label: "Skip",               desc: "Don't run",       color: "#9ca3af" },
+    { value: "or_qwen",           label: "OR: GPT-OSS 120B",         desc: "Free",          color: "#6366f1" },
+    { value: "or_qwen_next",      label: "OR: GPT-OSS 20B",          desc: "Free",          color: "#6366f1" },
+    { value: "or_qwq",            label: "OR: QwQ 32B",              desc: "Free reasoning", color: "#6366f1" },
+    { value: "or_phi4",           label: "OR: Phi-4 Reasoning",      desc: "Free reasoning", color: "#6366f1" },
+    { value: "or_gemma3",         label: "OR: Gemma 3 27B",          desc: "Free",          color: "#6366f1" },
+    { value: "or_mistral",        label: "OR: Mistral Small 3.2",    desc: "Free",          color: "#6366f1" },
+    { value: "or_maverick_free",  label: "OR: Llama 4 Free",         desc: "Free",          color: "#6366f1" },
+    { value: "or_haiku",          label: "OR: Claude Haiku 4.5",    desc: "$0.80/M",       color: "#7c3aed" },
+    { value: "or_deepseek",       label: "OR: DeepSeek V3.2",        desc: "$0.26/M",       color: "#6366f1" },
+    { value: "or_deepseek_r1",    label: "OR: DeepSeek R1",          desc: "$0.45/M",       color: "#6366f1" },
+    { value: "or_gemini_flash",   label: "OR: Gemini 2.5 Flash",     desc: "$0.30/M",       color: "#6366f1" },
+    { value: "or_gemini_lite",    label: "OR: Gemini 2.0 Flash Lite",desc: "$0.07/M",       color: "#6366f1" },
+    { value: "or_glm",            label: "OR: GLM 5 Turbo",          desc: "$1.20/M",       color: "#6366f1" },
+    { value: "or_gemini_pro",     label: "OR: Gemini 2.5 Pro",       desc: "$1.25/M",       color: "#0f9d58" },
+    { value: "or_o4_mini",        label: "OR: o4-mini",              desc: "$1.10/M",       color: "#10a37f" },
+    { value: "or_gpt4o",          label: "OR: GPT-4o",               desc: "$2.50/M",       color: "#10a37f" },
+    { value: "or_claude",         label: "OR: Claude Sonnet 4",      desc: "$3.00/M",       color: "#7c3aed" },
+    { value: "or_claude_opus",    label: "OR: Claude Opus 4",        desc: "$15/M",         color: "#7c3aed" },
+    { value: "or_llama",          label: "OR: Llama 4 Maverick",     desc: "$0.20/M",       color: "#6366f1" },
+    { value: "or_qwen_coder",     label: "OR: Qwen3 Coder 480B",    desc: "Free",          color: "#6366f1" },
+    { value: "openrouter",        label: "OpenRouter",               desc: "Default model", color: "#6366f1" },
+    { value: "skip",              label: "Skip",                     desc: "Don't run",     color: "#9ca3af" },
   ],
 }
 function _buildProviders(ollamaServers) {
@@ -84,99 +95,272 @@ const AI_PROVIDER_OPTIONS = [
 const _providerMeta = Object.fromEntries(AI_PROVIDER_OPTIONS.map(p => [p.value, p]))
 
 const ROUTING_TASKS = [
-  { n: 1,  key: "research",    label: "Research",       icon: "🔍", desc: "Step 1: Crawl & analysis",       tier: "free" },
-  { n: 2,  key: "structure",   label: "Structure",      icon: "📐", desc: "Step 2: Outline & headings",     tier: "free" },
-  { n: 3,  key: "verify",      label: "Verify",         icon: "✅", desc: "Step 3: Structure QA",           tier: "free" },
-  { n: 4,  key: "links",       label: "Internal Links", icon: "🔗", desc: "Step 4: Link planning",          tier: "free" },
-  { n: 5,  key: "references",  label: "References",     icon: "📚", desc: "Step 5: Wikipedia references",   tier: "free" },
-  { n: 6,  key: "draft",       label: "Draft",          icon: "✍️", desc: "Step 6: Full article write",    tier: "paid" },
-  { n: 7,  key: "review",      label: "Review",         icon: "🔎", desc: "Step 7: AI quality review",      tier: "paid" },
-  { n: 8,  key: "issues",      label: "Issues",         icon: "🛠",  desc: "Step 8: 53-rule checks",         tier: "free" },
-  { n: 9,  key: "redevelop",   label: "Redevelop",      icon: "🚀", desc: "Step 9: Rewrite to fix issues",  tier: "paid" },
-  { n: 10, key: "score",       label: "Score",          icon: "📊", desc: "Step 10: Final quality scoring", tier: "free" },
-  { n: 11, key: "quality_loop",label: "Quality Loop",   icon: "🔄", desc: "Step 11: Iterate to ≥75%",      tier: "paid" },
+  { n: 1, key: "research",     label: "Research",         icon: "🔍", desc: "Step 1: Crawl & analysis",            tier: "free" },
+  { n: 2, key: "structure",    label: "Structure",        icon: "📐", desc: "Step 2: Outline & headings",          tier: "free" },
+  { n: 3, key: "verify",       label: "Blueprint",        icon: "🧠", desc: "Step 3: Blueprint & contracts",       tier: "free" },
+  { n: 4, key: "links",        label: "Internal Links",   icon: "🔗", desc: "Step 4: Link planning",               tier: "free" },
+  { n: 5, key: "references",   label: "References",       icon: "📚", desc: "Step 5: Wikipedia references",        tier: "free" },
+  { n: 6, key: "draft",        label: "Draft",            icon: "✍️", desc: "Step 6: Contract-driven generation", tier: "paid" },
+  { n: 7, key: "score",        label: "Validate & Score", icon: "📊", desc: "Step 7: 74-rule scoring + section contracts", tier: "free" },
+  { n: 8, key: "quality_loop", label: "Recovery",         icon: "🔄", desc: "Step 8: Section-level fixes + contract repair",  tier: "paid" },
 ]
-const ROUTING_PRESETS = {
-  groq_ollama: {
-    research:     { first: "groq",        second: "gemini_paid", third: "or_qwen"    },
-    structure:    { first: "groq",        second: "gemini_paid", third: "or_qwen"    },
-    verify:       { first: "groq",        second: "gemini_paid", third: "skip"       },
-    links:        { first: "groq",        second: "gemini_paid", third: "or_qwen"    },
-    references:   { first: "groq",        second: "gemini_paid", third: "or_qwen"    },
-    draft:        { first: "gemini_paid", second: "groq",        third: "or_qwen"    },
-    review:       { first: "groq",        second: "gemini_paid", third: "or_qwen"    },
-    issues:       { first: "groq",        second: "gemini_paid", third: "skip"       },
-    redevelop:    { first: "gemini_paid", second: "groq",        third: "or_qwen"    },
-    score:        { first: "groq",        second: "gemini_paid", third: "skip"       },
-    quality_loop: { first: "gemini_paid", second: "groq",        third: "or_qwen"    },
-  },
-  speed: {
-    research:     { first: "groq",   second: "gemini_paid", third: "skip"       },
-    structure:    { first: "groq",   second: "gemini_paid", third: "skip"       },
-    verify:       { first: "groq",   second: "gemini_paid", third: "skip"       },
-    links:        { first: "groq",   second: "gemini_paid", third: "skip"       },
-    references:   { first: "groq",   second: "gemini_paid", third: "skip"       },
-    draft:        { first: "groq",   second: "gemini_paid", third: "or_qwen"    },
-    review:       { first: "groq",   second: "gemini_paid", third: "skip"       },
-    issues:       { first: "groq",   second: "gemini_paid", third: "skip"       },
-    redevelop:    { first: "groq",   second: "gemini_paid", third: "or_qwen"    },
-    score:        { first: "groq",   second: "gemini_paid", third: "skip"       },
-    quality_loop: { first: "groq",   second: "gemini_paid", third: "or_qwen"    },
-  },
-  ollama_remote: {
-    research:     { first: "ollama", second: "groq",   third: "skip"         },
-    structure:    { first: "ollama", second: "groq",   third: "skip"         },
-    verify:       { first: "ollama", second: "groq",   third: "skip"         },
-    links:        { first: "ollama", second: "groq",   third: "skip"         },
-    references:   { first: "ollama", second: "groq",   third: "skip"         },
-    draft:        { first: "ollama", second: "groq",   third: "gemini_paid"  },
-    review:       { first: "ollama", second: "groq",   third: "skip"         },
-    issues:       { first: "ollama", second: "groq",   third: "skip"         },
-    redevelop:    { first: "ollama", second: "groq",   third: "gemini_paid"  },
-    score:        { first: "ollama", second: "groq",   third: "skip"         },
-    quality_loop: { first: "ollama", second: "groq",   third: "gemini_paid"  },
-  },
-  quality: {
-    research:     { first: "gemini_paid", second: "groq",        third: "ollama"       },
-    structure:    { first: "gemini_paid", second: "groq",        third: "ollama"       },
-    verify:       { first: "groq",        second: "gemini_paid", third: "skip"         },
-    links:        { first: "groq",        second: "gemini_paid", third: "ollama"       },
-    references:   { first: "groq",        second: "ollama",      third: "skip"         },
-    draft:        { first: "gemini_paid", second: "groq",        third: "ollama"       },
-    review:       { first: "groq",        second: "gemini_paid", third: "ollama"       },
-    issues:       { first: "groq",        second: "gemini_paid", third: "skip"         },
-    redevelop:    { first: "gemini_paid", second: "groq",        third: "ollama"       },
-    score:        { first: "groq",        second: "gemini_paid", third: "skip"         },
-    quality_loop: { first: "gemini_paid", second: "groq",        third: "ollama"       },
-  },
-  max_quality: {
-    research:     { first: "anthropic",   second: "gemini_paid", third: "groq"         },
-    structure:    { first: "anthropic",   second: "gemini_paid", third: "groq"         },
-    verify:       { first: "groq",        second: "anthropic",   third: "gemini_paid"  },
-    links:        { first: "groq",        second: "anthropic",   third: "gemini_paid"  },
-    references:   { first: "groq",        second: "gemini_paid", third: "skip"         },
-    draft:        { first: "anthropic",   second: "gemini_paid", third: "groq"         },
-    review:       { first: "anthropic",   second: "groq",        third: "gemini_paid"  },
-    issues:       { first: "groq",        second: "anthropic",   third: "skip"         },
-    redevelop:    { first: "anthropic",   second: "gemini_paid", third: "groq"         },
-    score:        { first: "groq",        second: "anthropic",   third: "skip"         },
-    quality_loop: { first: "anthropic",   second: "gemini_paid", third: "groq"         },
-  },
-  quality_budget: {
-    research:     { first: "groq",        second: "gemini_free", third: "ollama"       },
-    structure:    { first: "groq",        second: "gemini_free", third: "ollama"       },
-    verify:       { first: "groq",        second: "gemini_free", third: "skip"         },
-    links:        { first: "groq",        second: "gemini_free", third: "ollama"       },
-    references:   { first: "groq",        second: "ollama",      third: "skip"         },
-    draft:        { first: "gemini_paid", second: "groq",        third: "ollama"       },
-    review:       { first: "groq",        second: "gemini_free", third: "ollama"       },
-    issues:       { first: "groq",        second: "gemini_free", third: "skip"         },
-    redevelop:    { first: "gemini_paid", second: "groq",        third: "ollama"       },
-    score:        { first: "groq",        second: "gemini_free", third: "skip"         },
-    quality_loop: { first: "gemini_paid", second: "groq",        third: "ollama"       },
-  },
+const DEFAULT_ROUTING = expandToLegacyRouting(SYSTEM_TEMPLATES.find(t => t.id === DEFAULT_TEMPLATE_ID).steps)
+
+// ── Bulk topic parser ─────────────────────────────────────────────────────────
+function parseBulkText(text) {
+  if (!text?.trim()) return []
+  const INTENT_MAP = {
+    transactional: "transactional", commercial: "commercial",
+    informational: "informational", navigational: "navigational",
+    comparison: "commercial", "buy intent": "transactional", "purchase intent": "transactional",
+  }
+  const blocks = text.split(/\n(?=\s*\d+[.)]\s|[🔥🌿🛒🌶📦🌱🏆🍛⚙️✅💰🌍🌾]+\s)|\n{2,}/)
+  const seen = new Set()
+  return blocks.flatMap(block => {
+    const lines = block.split("\n").map(l => l.trim()).filter(Boolean)
+    if (!lines.length) return []
+    let keyword = lines[0]
+      .replace(/^\d+[.)]\s*/, "")
+      .replace(/^[🔥🌿🛒🌶📦🌱🏆🍛⚙️✅💰🌍🌾]+\s*/, "")
+      .replace(/[:\-–—]\s*(Structure|Intent|CTA|Keywords?).*$/i, "")
+      .trim()
+    if (!keyword || keyword.length < 3) return []
+    let intent = "informational"
+    const intentLine = lines.find(l => /^intent:/i.test(l))
+    if (intentLine) {
+      const raw = intentLine.replace(/^intent:\s*/i, "").toLowerCase().trim()
+      for (const [k, v] of Object.entries(INTENT_MAP)) { if (raw.includes(k)) { intent = v; break } }
+    }
+    const key = keyword.toLowerCase()
+    if (seen.has(key)) return []
+    seen.add(key)
+    return [{ id: Math.random().toString(36).slice(2), keyword, intent, selected: true }]
+  })
 }
-const DEFAULT_ROUTING = ROUTING_PRESETS.groq_ollama
+
+// ── Bulk Topics Tab component ─────────────────────────────────────────────────
+function BulkTopicsTab({ form, projectId, onClose }) {
+  const [bulkText, setBulkText] = useState("")
+  const [topics, setTopics] = useState([])
+  const [phase, setPhase] = useState(1)
+  const [genMode, setGenMode] = useState("sequential")
+  const [pipelineMode, setPipelineMode] = useState(form.pipeline_mode || "standard")
+  const [wordCount, setWordCount] = useState(form.word_count || 2000)
+  const [generating, setGenerating] = useState(false)
+  const [results, setResults] = useState({})
+
+  const inputStyle = {
+    width: "100%", padding: "7px 10px", borderRadius: 8,
+    border: `1px solid ${T.border}`, fontSize: 12,
+    boxSizing: "border-box", fontFamily: "inherit", outline: "none",
+  }
+  const labelStyle = { fontSize: 11, color: T.textSoft, display: "block", marginBottom: 4, fontWeight: 500 }
+
+  const selectedTopics = topics.filter(t => t.selected)
+
+  const buildPayload = (topic) => ({
+    keyword: topic.keyword,
+    intent: topic.intent,
+    pipeline_mode: pipelineMode,
+    word_count: wordCount,
+    page_type: form.page_type || "article",
+    page_inputs: form.page_inputs || {},
+    ai_routing: form.ai_routing,
+    supporting_keywords: [],
+    product_links: [],
+    step_mode: "auto",
+    project_id: projectId,
+  })
+
+  const runGenerate = async (addOnly = false) => {
+    if (!selectedTopics.length) return
+    setGenerating(true)
+    setPhase(3)
+    const go = async (topic) => {
+      try {
+        await api.post("/api/content/generate", buildPayload(topic))
+        setResults(r => ({ ...r, [topic.id]: "ok" }))
+      } catch {
+        setResults(r => ({ ...r, [topic.id]: "error" }))
+      }
+    }
+    if (genMode === "parallel" || addOnly) {
+      await Promise.allSettled(selectedTopics.map(go))
+    } else {
+      for (const t of selectedTopics) await go(t)
+    }
+    setGenerating(false)
+    if (addOnly) onClose()
+  }
+
+  const toggleTopic = id => setTopics(ts => ts.map(t => t.id === id ? { ...t, selected: !t.selected } : t))
+  const updateTopic = (id, f, v) => setTopics(ts => ts.map(t => t.id === id ? { ...t, [f]: v } : t))
+  const removeTopic = id => setTopics(ts => ts.filter(t => t.id !== id))
+  const toggleAll = val => setTopics(ts => ts.map(t => ({ ...t, selected: val })))
+
+  // Phase 1 — paste
+  if (phase === 1) return (
+    <div>
+      <div style={{ fontSize: 11, color: T.textSoft, marginBottom: 10 }}>
+        Paste topic ideas, keyword lists, or structured content briefs. The parser extracts keywords and detects search intent automatically.
+      </div>
+      <textarea
+        value={bulkText}
+        onChange={e => setBulkText(e.target.value)}
+        placeholder={"Paste your topic list here...\n\nExample:\n🔥 1. Buy Kerala Spices Online: Complete Guide\nIntent: Transactional\n\n🌿 2. Best Kerala Spices Top 10\nIntent: Commercial"}
+        style={{ ...inputStyle, minHeight: 220, resize: "vertical", fontFamily: "monospace", fontSize: 11 }}
+      />
+      <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
+        <button
+          onClick={() => { setTopics(parseBulkText(bulkText)); setPhase(2) }}
+          disabled={!bulkText.trim()}
+          style={{
+            padding: "8px 18px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+            background: bulkText.trim() ? T.purple : "#e5e7eb",
+            color: bulkText.trim() ? "#fff" : T.textSoft,
+            border: "none", cursor: bulkText.trim() ? "pointer" : "default",
+          }}
+        >Parse Topics →</button>
+      </div>
+    </div>
+  )
+
+  // Phase 2 — review + settings
+  if (phase === 2) return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "#059669" }}>✓ {topics.length} topic{topics.length !== 1 ? "s" : ""} found</span>
+        <button onClick={() => toggleAll(true)} style={{ fontSize: 10, color: T.purple, background: "none", border: "none", cursor: "pointer", padding: "2px 6px" }}>Select All</button>
+        <button onClick={() => toggleAll(false)} style={{ fontSize: 10, color: T.gray, background: "none", border: "none", cursor: "pointer", padding: "2px 6px" }}>Deselect All</button>
+        <button onClick={() => setPhase(1)} style={{ fontSize: 10, color: T.gray, background: "none", border: "none", cursor: "pointer", marginLeft: "auto", padding: "2px 6px" }}>← Edit Paste</button>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto", marginBottom: 12 }}>
+        {topics.map(t => (
+          <div key={t.id} style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "5px 8px", borderRadius: 8,
+            background: t.selected ? `${T.purple}08` : "#f9fafb",
+            border: `1px solid ${t.selected ? `${T.purple}30` : T.border}`,
+          }}>
+            <input type="checkbox" checked={t.selected} onChange={() => toggleTopic(t.id)} style={{ accentColor: T.purple, flexShrink: 0 }} />
+            <input
+              value={t.keyword}
+              onChange={e => updateTopic(t.id, "keyword", e.target.value)}
+              style={{ flex: 1, border: "none", outline: "none", fontSize: 11, background: "transparent", color: T.text, fontFamily: "inherit" }}
+            />
+            <select value={t.intent} onChange={e => updateTopic(t.id, "intent", e.target.value)}
+              style={{ fontSize: 10, border: `1px solid ${T.border}`, borderRadius: 6, padding: "2px 5px", background: "#fff", color: T.gray, cursor: "pointer", flexShrink: 0 }}>
+              {INTENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <button onClick={() => removeTopic(t.id)}
+              style={{ background: "none", border: "none", cursor: "pointer", color: T.red, fontSize: 13, padding: "0 2px", flexShrink: 0 }}>✕</button>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ padding: "10px 12px", borderRadius: 10, background: "#f9fafb", border: `1px solid ${T.border}`, marginBottom: 12 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: T.text, marginBottom: 8 }}>Settings for all topics</div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 10, color: T.textSoft, marginBottom: 4 }}>Pipeline</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[{ v: "standard", l: "⚙ Standard" }, { v: "lean", l: "⚡ Lean" }].map(m => (
+                <button key={m.v} onClick={() => setPipelineMode(m.v)} style={{
+                  padding: "4px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer",
+                  border: `1px solid ${pipelineMode === m.v ? T.purple : T.border}`,
+                  background: pipelineMode === m.v ? `${T.purple}15` : "transparent",
+                  color: pipelineMode === m.v ? T.purple : T.gray, fontWeight: pipelineMode === m.v ? 600 : 400,
+                }}>{m.l}</button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: T.textSoft, marginBottom: 4 }}>Word count</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {WC_OPTIONS.map(wc => (
+                <button key={wc} onClick={() => setWordCount(wc)} style={{
+                  padding: "4px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer",
+                  border: `1px solid ${wordCount === wc ? T.purple : T.border}`,
+                  background: wordCount === wc ? `${T.purple}15` : "transparent",
+                  color: wordCount === wc ? T.purple : T.gray, fontWeight: wordCount === wc ? 600 : 400,
+                }}>{wc.toLocaleString()}w</button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: T.textSoft, marginBottom: 4 }}>Generation mode</div>
+          <div style={{ display: "flex", gap: 12 }}>
+            {[
+              { v: "sequential", l: "Queue one by one", d: "Starts next after each completes" },
+              { v: "parallel",   l: "Launch all at once", d: "Parallel — faster, higher API load" },
+            ].map(m => (
+              <label key={m.v} style={{ display: "flex", alignItems: "flex-start", gap: 5, cursor: "pointer", flex: 1 }}>
+                <input type="radio" name="bulkGenMode" value={m.v} checked={genMode === m.v}
+                  onChange={() => setGenMode(m.v)} style={{ accentColor: T.purple, marginTop: 2, flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 500, color: T.text }}>{m.l}</div>
+                  <div style={{ fontSize: 9, color: T.textSoft }}>{m.d}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => runGenerate(true)} disabled={!selectedTopics.length}
+          style={{
+            flex: 1, padding: "8px 12px", borderRadius: 8, fontSize: 11, fontWeight: 500,
+            border: `1px solid ${T.border}`, background: "transparent",
+            color: T.gray, cursor: selectedTopics.length ? "pointer" : "default",
+          }}>Add to List Only</button>
+        <button onClick={() => runGenerate(false)} disabled={!selectedTopics.length}
+          style={{
+            flex: 2, padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+            background: selectedTopics.length ? T.purple : "#e5e7eb",
+            color: selectedTopics.length ? "#fff" : T.textSoft,
+            border: "none", cursor: selectedTopics.length ? "pointer" : "default",
+          }}>Generate {selectedTopics.length} Selected Topic{selectedTopics.length !== 1 ? "s" : ""} ✨</button>
+      </div>
+    </div>
+  )
+
+  // Phase 3 — progress / results
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 600, color: T.text, marginBottom: 12 }}>
+        {generating ? `Generating articles… (${Object.keys(results).length}/${selectedTopics.length})` : "Generation complete"}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 300, overflowY: "auto" }}>
+        {selectedTopics.map(t => {
+          const s = results[t.id]
+          return (
+            <div key={t.id} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 8,
+              background: s === "ok" ? "#f0fdf4" : s === "error" ? "#fef2f2" : "#f9fafb",
+              border: `1px solid ${s === "ok" ? "#bbf7d0" : s === "error" ? "#fecaca" : T.border}`,
+            }}>
+              <span style={{ fontSize: 14, flexShrink: 0 }}>{s === "ok" ? "✓" : s === "error" ? "✗" : "⏳"}</span>
+              <span style={{ fontSize: 11, color: T.text, flex: 1 }}>{t.keyword}</span>
+              <span style={{
+                fontSize: 9, padding: "1px 6px", borderRadius: 4,
+                background: t.intent === "transactional" ? "#fef3c7" : t.intent === "commercial" ? "#ede9fe" : "#e0f2fe",
+                color: t.intent === "transactional" ? "#d97706" : t.intent === "commercial" ? "#7c3aed" : "#0369a1",
+              }}>{t.intent}</span>
+            </div>
+          )
+        })}
+      </div>
+      {!generating && (
+        <button onClick={onClose} style={{
+          marginTop: 14, width: "100%", padding: "8px 12px", borderRadius: 8,
+          fontSize: 12, fontWeight: 600, background: T.purple, color: "#fff", border: "none", cursor: "pointer",
+        }}>Done ✓</button>
+      )}
+    </div>
+  )
+}
 
 const EMPTY_FORM = {
   page_type: "article",
@@ -188,12 +372,13 @@ const EMPTY_FORM = {
   word_count: 2000,
   target_audience: "",
   content_type: "blog",
+  pipeline_mode: "standard",  // "standard" | "lean"
   ai_routing: { ...DEFAULT_ROUTING },
   title: "",
   step_mode: "auto",
 }
 
-function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }) {
+function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "", projectId }) {
   const [form, setForm] = useState(() => initialKeyword ? { ...EMPTY_FORM, keyword: initialKeyword } : EMPTY_FORM)
   const [newLink, setNewLink] = useState({ url: "", name: "" })
   const [activeTab, setActiveTab] = useState("settings")
@@ -221,8 +406,8 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
   const setRouting = (task, rank, value) =>
     setForm(f => ({ ...f, ai_routing: { ...f.ai_routing, [task]: { ...f.ai_routing[task], [rank]: value } } }))
 
-  const applyPreset = (presetKey) =>
-    setForm(f => ({ ...f, ai_routing: { ...ROUTING_PRESETS[presetKey] } }))
+  const applyPreset = (tpl) =>
+    setForm(f => ({ ...f, ai_routing: expandToLegacyRouting(tpl.steps) }))
 
   const addLink = () => {
     if (!newLink.url.trim()) return
@@ -265,6 +450,7 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
       page_type: form.page_type || "article",
       page_inputs: form.page_inputs || {},
       step_mode: form.step_mode || "auto",
+      pipeline_mode: form.pipeline_mode || "standard",
     }
     onGenerate(payload)
   }
@@ -303,7 +489,7 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
 
         {/* Tab bar */}
         <div style={{ display: "flex", borderBottom: `1px solid ${T.border}`, padding: "0 24px" }}>
-          {[{ key: "settings", label: "Settings" }, { key: "routing", label: "AI Routing" }].map(tab => (
+          {[{ key: "settings", label: "Settings" }, { key: "routing", label: "AI Routing" }, { key: "bulk", label: "📋 Bulk Topics" }].map(tab => (
             <button key={tab.key} onClick={() => setActiveTab(tab.key)} style={{
               padding: "10px 16px", fontSize: 12, fontWeight: activeTab === tab.key ? 600 : 400,
               color: activeTab === tab.key ? T.purple : T.textSoft,
@@ -339,6 +525,31 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
                   display: "flex", alignItems: "center", gap: 4,
                 }}>
                   <span>{pt.icon}</span> {pt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Pipeline mode selector */}
+          <div style={sectionStyle}>
+            <label style={labelStyle}>Pipeline Mode</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              {[
+                { value: "standard", label: "⚙️ Standard", desc: "12-step quality pipeline · rules-first draft · ~$0.50–$1.50" },
+                { value: "lean",     label: "⚡ Lean",     desc: "3-call budget pipeline · fast · ~$0.08–$0.20" },
+              ].map(m => (
+                <button key={m.value} onClick={() => set("pipeline_mode", m.value)} style={{
+                  flex: 1, padding: "10px 12px", borderRadius: 10, cursor: "pointer",
+                  border: `2px solid ${form.pipeline_mode === m.value ? (m.value === "lean" ? "#10b981" : T.purple) : T.border}`,
+                  background: form.pipeline_mode === m.value
+                    ? (m.value === "lean" ? "#10b98115" : `${T.purple}15`)
+                    : "transparent",
+                  textAlign: "left",
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: form.pipeline_mode === m.value ? (m.value === "lean" ? "#059669" : T.purple) : T.text }}>
+                    {m.label}
+                  </div>
+                  <div style={{ fontSize: 10, color: T.textSoft, marginTop: 2 }}>{m.desc}</div>
                 </button>
               ))}
             </div>
@@ -602,26 +813,26 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
 
           </>}
 
+          {activeTab === "bulk" && (
+            <BulkTopicsTab form={form} projectId={projectId} onClose={onClose} />
+          )}
+
           {activeTab === "routing" && <>
-            {/* Preset buttons */}
+            {/* System Template presets */}
             <div style={sectionStyle}>
-              <label style={labelStyle}>Quick Presets</label>
+              <label style={labelStyle}>System Templates</label>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {[
-                  { key: "groq_ollama", label: "⚡🦙 Groq + Ollama", desc: "Groq for light tasks, Ollama remote for heavy", color: "#f59e0b" },
-                  { key: "speed",       label: "⚡ Max Speed",        desc: "Groq primary for everything",                   color: "#0369a1" },
-                  { key: "local",       label: "🖥 Local Only",       desc: "Ollama local + remote — no cloud APIs",          color: T.gray    },
-                  { key: "quality",       label: "✅ Quality",          desc: "Gemini Paid for draft · Groq for fast steps",    color: "#0f9d58" },
-                  { key: "max_quality",   label: "🏆 Max Quality",      desc: "Claude + Gemini Paid — best output",              color: "#7c3aed" },
-                  { key: "quality_budget",label: "💎 Quality Budget",   desc: "Gemini Paid draft/redevelop · Groq rest",         color: "#0891b2" },
-                ].map(p => (
-                  <button key={p.key} onClick={() => applyPreset(p.key)} style={{
+                {SYSTEM_TEMPLATES.map(tpl => (
+                  <button key={tpl.id} onClick={() => applyPreset(tpl)} style={{
                     flex: "1 1 120px", padding: "8px 10px", borderRadius: 8, fontSize: 11,
-                    cursor: "pointer", border: `1px solid ${p.color}40`,
-                    background: `${p.color}08`, color: p.color, textAlign: "center",
+                    cursor: "pointer",
+                    border: tpl.id === DEFAULT_TEMPLATE_ID ? "1px solid #7c3aed80" : `1px solid ${T.border}`,
+                    background: tpl.id === DEFAULT_TEMPLATE_ID ? "#7c3aed08" : "transparent",
+                    color: tpl.id === DEFAULT_TEMPLATE_ID ? "#7c3aed" : T.gray,
+                    textAlign: "center",
                   }}>
-                    <div style={{ fontWeight: 600 }}>{p.label}</div>
-                    <div style={{ fontSize: 9, color: T.textSoft, marginTop: 2 }}>{p.desc}</div>
+                    <div style={{ fontWeight: 600 }}>{tpl.name}</div>
+                    <div style={{ fontSize: 9, color: T.textSoft, marginTop: 2 }}>{tpl.description}</div>
                   </button>
                 ))}
               </div>
@@ -812,45 +1023,47 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
           display: "flex", gap: 8, alignItems: "center",
         }}>
           <Btn onClick={onClose} style={{ flex: 1 }}>Cancel</Btn>
-          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-            <label style={{ fontSize: 10, color: T.textSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 3 }}>
-              <input type="checkbox" checked={form.step_mode === "pause"}
-                onChange={e => set("step_mode", e.target.checked ? "pause" : "auto")}
-                style={{ accentColor: T.purple }} />
-              Step-by-step
-            </label>
-          </div>
-          {!showPlan ? (
-            <>
-              <Btn
-                onClick={generatePlan}
-                disabled={!form.keyword.trim() || planLoading}
-                style={{ flex: 1 }}
-              >
-                {planLoading ? "Planning…" : "Preview Plan 📋"}
-              </Btn>
-              <Btn
-                onClick={handleSubmit}
-                variant="primary"
-                disabled={!form.keyword.trim() || isPending}
-                style={{ flex: 2 }}
-              >
-                {isPending ? "Starting pipeline…" : `Generate ${PAGE_TYPE_OPTIONS.find(p => p.value === form.page_type)?.label || "Article"} ✨`}
-              </Btn>
-            </>
-          ) : (
-            <>
-              <Btn onClick={() => setShowPlan(false)} style={{ flex: 1 }}>Edit Plan</Btn>
-              <Btn
-                onClick={handleSubmit}
-                variant="primary"
-                disabled={!form.keyword.trim() || isPending}
-                style={{ flex: 2 }}
-              >
-                {isPending ? "Starting pipeline…" : "Approve & Generate ✨"}
-              </Btn>
-            </>
-          )}
+          {activeTab !== "bulk" && <>
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+              <label style={{ fontSize: 10, color: T.textSoft, cursor: "pointer", display: "flex", alignItems: "center", gap: 3 }}>
+                <input type="checkbox" checked={form.step_mode === "pause"}
+                  onChange={e => set("step_mode", e.target.checked ? "pause" : "auto")}
+                  style={{ accentColor: T.purple }} />
+                Step-by-step
+              </label>
+            </div>
+            {!showPlan ? (
+              <>
+                <Btn
+                  onClick={generatePlan}
+                  disabled={!form.keyword.trim() || planLoading}
+                  style={{ flex: 1 }}
+                >
+                  {planLoading ? "Planning…" : "Preview Plan 📋"}
+                </Btn>
+                <Btn
+                  onClick={handleSubmit}
+                  variant="primary"
+                  disabled={!form.keyword.trim() || isPending}
+                  style={{ flex: 2 }}
+                >
+                  {isPending ? "Starting pipeline…" : `Generate ${PAGE_TYPE_OPTIONS.find(p => p.value === form.page_type)?.label || "Article"} ✨`}
+                </Btn>
+              </>
+            ) : (
+              <>
+                <Btn onClick={() => setShowPlan(false)} style={{ flex: 1 }}>Edit Plan</Btn>
+                <Btn
+                  onClick={handleSubmit}
+                  variant="primary"
+                  disabled={!form.keyword.trim() || isPending}
+                  style={{ flex: 2 }}
+                >
+                  {isPending ? "Starting pipeline…" : "Approve & Generate ✨"}
+                </Btn>
+              </>
+            )}
+          </>}
         </div>
       </div>
     </div>
@@ -858,6 +1071,6 @@ function NewArticleModal({ onClose, onGenerate, isPending, initialKeyword = "" }
 }
 
 // Named exports for constants needed by other files
-export { AI_PROVIDERS_BASE, AI_PROVIDER_OPTIONS, _buildProviders, _providerMeta, ROUTING_PRESETS, DEFAULT_ROUTING }
+export { AI_PROVIDERS_BASE, AI_PROVIDER_OPTIONS, _buildProviders, _providerMeta, DEFAULT_ROUTING }
 // Default export
 export default NewArticleModal

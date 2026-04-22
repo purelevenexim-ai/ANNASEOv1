@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { T, api, useStore, Badge } from "./App"
 import { ContentPipelineTab } from "./App"
 import AIHub from "./AIHub"
+import AIAnalyticsDashboard from "./content/AIAnalyticsDashboard"
 import MetaEditModal from "./content/MetaEditModal"
 import PromptsDrawer from "./content/PromptsDrawer"
+import PromptStudio from "./content/PromptStudio"
 import ArticleListPanel from "./content/ArticleListPanel"
 import EditorPanel from "./content/EditorPanel"
 import { useArticlePolling } from "./hooks/useArticlePolling"
@@ -26,6 +28,15 @@ export default function ContentPage() {
 
   // Queries — share the same cache key as ArticleListPanel via useArticlePolling
   const { data: articles } = useArticlePolling(activeProject)
+
+  // kw2 business profile — for writing context banner
+  const { data: profileData } = useQuery({
+    queryKey: ["kw2-profile-content", activeProject],
+    queryFn: () => api.get(`/api/kw2/${activeProject}/profile`),
+    enabled: !!activeProject,
+    staleTime: 120_000,
+    retry: false,
+  })
 
   // Mutations
   const generate = useMutation({
@@ -72,8 +83,17 @@ export default function ContentPage() {
           {tabBtn("articles", "Articles")}
           {tabBtn("pipeline", "Pipeline")}
           {tabBtn("aihub", "AI Hub")}
+          {tabBtn("ai-analytics", "AI Cost")}
+          {tabBtn("prompt-studio", "Prompt Studio")}
         </div>
       </div>
+
+      {/* Prompt Studio tab */}
+      {tab === "prompt-studio" && (
+        <div style={{ flex: 1, overflow: "hidden", borderRadius: 12, border: `1px solid ${T.border}`, background: "#fff" }}>
+          <PromptStudio />
+        </div>
+      )}
 
       {/* Pipeline tab */}
       {tab === "pipeline" && (
@@ -89,8 +109,57 @@ export default function ContentPage() {
         </div>
       )}
 
+      {/* AI Analytics tab */}
+      {tab === "ai-analytics" && (
+        <div style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}>
+          <AIAnalyticsDashboard />
+        </div>
+      )}
+
       {/* Articles tab */}
       {tab === "articles" && (
+        <>
+          {/* Business Profile Context Banner */}
+          {profileData?.profile && (() => {
+            const p = profileData.profile
+            const mi = p.manual_input || {}
+            const usp = p.usp || mi.usp || ""
+            const locs = (p.target_locations || mi.target_locations || []).slice(0, 3)
+            const audience = (p.audience || []).slice(0, 3)
+            const negScope = (p.negative_scope || []).slice(0, 3)
+            const hasCtx = usp || locs.length > 0 || audience.length > 0
+            if (!hasCtx) return null
+            return (
+              <div style={{
+                background: "#fff", borderRadius: 8, border: `1px solid ${T.border}`,
+                padding: "8px 14px", marginBottom: 8, flexShrink: 0,
+                display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8,
+              }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: T.textSoft, textTransform: "uppercase", letterSpacing: 0.4, flexShrink: 0 }}>
+                  Writing Profile
+                </span>
+                {usp && (
+                  <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 12,
+                    background: T.purpleLight, color: T.purpleDark, fontWeight: 600 }}>
+                    💡 {usp.slice(0, 55)}{usp.length > 55 ? "…" : ""}
+                  </span>
+                )}
+                {locs.map(loc => (
+                  <span key={loc} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 12,
+                    background: "#f0fdf4", color: T.teal }}>📍 {loc}</span>
+                ))}
+                {audience.map(a => (
+                  <span key={a} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 12,
+                    background: "rgba(139,92,246,0.1)", color: "#7c3aed" }}>👥 {a}</span>
+                ))}
+                {negScope.map(ns => (
+                  <span key={ns} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 12,
+                    background: "rgba(239,68,68,0.08)", color: T.red }}>🚫 {ns}</span>
+                ))}
+              </div>
+            )
+          })()}
+
         <div style={{ display: "flex", flex: 1, gap: 0, overflow: "hidden", borderRadius: 12, border: `1px solid ${T.border}`, background: "#fff" }}>
 
           {/* Left: article list */}
@@ -161,17 +230,29 @@ export default function ContentPage() {
               )}
             </div>
           ) : (
-            /* No article selected — placeholder */
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textSoft }}>
-              <div style={{ fontSize: 18, fontWeight: 600, color: T.gray, marginBottom: 8 }}>
+            /* No article selected — helpful placeholder */
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: T.textSoft, gap: 12 }}>
+              <div style={{ fontSize: 40, opacity: 0.15 }}>📝</div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: T.gray }}>
                 Select an article
               </div>
-              <div style={{ fontSize: 13 }}>
-                Choose an article from the list to open the editor.
+              <div style={{ fontSize: 12, maxWidth: 280, textAlign: "center", lineHeight: 1.6 }}>
+                Choose an article from the list to edit, review, or humanize it. Or create a new one.
               </div>
+              <button
+                onClick={() => setShowGenModal(true)}
+                style={{
+                  marginTop: 8, padding: "8px 20px", borderRadius: 8,
+                  background: T.purple, color: "#fff", border: "none",
+                  fontSize: 12, fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                + New Article
+              </button>
             </div>
           )}
         </div>
+        </>
       )}
 
       {/* Meta edit modal */}
@@ -202,6 +283,7 @@ export default function ContentPage() {
           onGenerate={(payload) => generate.mutate(payload)}
           isPending={generate.isPending}
           initialKeyword={testKeyword}
+          projectId={activeProject}
         />
       )}
     </div>
