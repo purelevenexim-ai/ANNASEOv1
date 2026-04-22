@@ -1722,6 +1722,11 @@ def _build_routing(body):
     # Handle v2 canonical routing format → expand to legacy for processing
     if raw.get("version") == 2 and "steps" in raw:
         from core.routing_adapter import normalize_template, adapt_template_to_legacy
+        # Backward-compatible guard: some callers send v2 templates without
+        # a required "name" field. Fill a deterministic fallback instead of
+        # failing the entire generation run.
+        if not raw.get("name"):
+            raw = {**raw, "name": "runtime_override"}
         raw = adapt_template_to_legacy(normalize_template(raw))
     
     # Normalize legacy provider IDs → canonical IDs
@@ -2305,7 +2310,7 @@ async def pipeline_continue(article_id: str, request: dict = None, user=Depends(
     request = request or {}
     pipeline = _active_pipelines.get(article_id)
     if not pipeline:
-        raise HTTPException(404, "No active pipeline for this article")
+        return {"status": "not_running", "detail": "Pipeline not active"}
     switch_auto = request.get("auto", False)
     pipeline.resume(switch_to_auto=switch_auto)
     return {"status": "resumed", "mode": "auto" if switch_auto else pipeline._step_mode}
@@ -2332,7 +2337,7 @@ async def pipeline_cancel(article_id: str, user=Depends(current_user)):
     """Cancel a running/paused pipeline."""
     pipeline = _active_pipelines.get(article_id)
     if not pipeline:
-        raise HTTPException(404, "No active pipeline for this article")
+        return {"status": "not_running", "detail": "Pipeline not active"}
     pipeline.cancel()
     return {"status": "cancelled"}
 
@@ -2353,7 +2358,7 @@ async def pipeline_pause(article_id: str, user=Depends(current_user)):
     The pipeline will pause after the currently running step completes."""
     pipeline = _active_pipelines.get(article_id)
     if not pipeline:
-        raise HTTPException(404, "No active pipeline for this article")
+        return {"status": "not_running", "detail": "Pipeline not active"}
     pipeline.pause()
     return {"status": "pausing", "mode": "pause"}
 
@@ -2520,6 +2525,9 @@ async def retry_article(article_id: str, bg: BackgroundTasks, user=Depends(curre
         title=r.get("title") or None, intent=r.get("intent") or "informational",
         word_count=r.get("word_count") or 2000,
     )
+    old_pipeline = _active_pipelines.get(article_id)
+    if old_pipeline:
+        old_pipeline.cancel()
     bg.add_task(_gen_article, article_id, body_ns)
     return {"article_id": article_id, "status": "generating"}
 
@@ -2733,6 +2741,24 @@ async def _gen_article(article_id, body, step_mode: str = "auto", start_step: in
             page_inputs=getattr(body, "page_inputs", {}) or {},
             pipeline_mode=getattr(body, "pipeline_mode", "standard") or "standard",
         )
+        # Rerun safeguard: when restarting from step 10+ (score/quality/redevelop),
+        # hydrate runtime state from the persisted article body so those steps do
+        # not run against empty HTML.
+        if int(start_step or 1) > 9:
+            try:
+                _ar = db.execute(
+                    "SELECT body, title, meta_title, meta_desc, word_count FROM content_articles WHERE article_id=?",
+                    (article_id,),
+                ).fetchone()
+                if _ar and _ar["body"]:
+                    pipeline.state.draft_html = _ar["body"]
+                    pipeline.state.final_html = _ar["body"]
+                    pipeline.state.title = _ar["title"] or pipeline.state.title
+                    pipeline.state.meta_title = _ar["meta_title"] or pipeline.state.meta_title
+                    pipeline.state.meta_desc = _ar["meta_desc"] or pipeline.state.meta_desc
+                    pipeline.state.word_count = int(_ar["word_count"] or pipeline.state.word_count or 0)
+            except Exception as _hydrate_err:
+                log.warning(f"Rerun hydrate skipped for {article_id}: {_hydrate_err}")
         # Load Ollama servers from DB so engine can resolve ollama_remote_{id}
         try:
             _ensure_ollama_servers_table(db)

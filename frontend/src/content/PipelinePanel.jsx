@@ -126,6 +126,12 @@ function PipelineProgress({ articleId, onComplete }) {
   const [expandedStep, setExpandedStep] = useState(null)
   const [ollamaServers, setOllamaServers] = useState([])
   const [recoveryProvider, setRecoveryProvider] = useState("groq")
+  const [ctrlMsg, setCtrlMsg] = useState({ text: "", isError: false })
+
+  const flash = (text, isError = false) => {
+    setCtrlMsg({ text, isError })
+    setTimeout(() => setCtrlMsg({ text: "", isError: false }), 4000)
+  }
 
   // Fetch remote ollama servers
   useEffect(() => {
@@ -171,15 +177,31 @@ function PipelineProgress({ articleId, onComplete }) {
   // Mutations
   const continuePipeline = useMutation({
     mutationFn: (auto) => api.post(`/api/content/${articleId}/pipeline/continue`, { auto }),
-    onSuccess: () => qc.invalidateQueries(["pipeline", articleId]),
+    onSuccess: (res) => {
+      if (res?.status === "not_running") flash("Pipeline already finished")
+      else flash("Resumed")
+      qc.invalidateQueries(["pipeline", articleId])
+    },
+    onError: () => flash("Resume failed \u2014 try refreshing", true),
   })
   const cancelPipeline = useMutation({
     mutationFn: () => api.post(`/api/content/${articleId}/pipeline/cancel`),
-    onSuccess: () => qc.invalidateQueries(["pipeline", articleId]),
+    onSuccess: (res) => {
+      if (res?.status === "not_running") flash("Already stopped")
+      else flash("Stopping after current step\u2026")
+      qc.invalidateQueries(["pipeline", articleId])
+      qc.invalidateQueries(["articles"])
+    },
+    onError: () => flash("Stop failed \u2014 try refreshing", true),
   })
   const pausePipeline = useMutation({
     mutationFn: () => api.post(`/api/content/${articleId}/pipeline/pause`),
-    onSuccess: () => qc.invalidateQueries(["pipeline", articleId]),
+    onSuccess: (res) => {
+      if (res?.status === "not_running") flash("Pipeline already finished", true)
+      else flash("Pausing after current step\u2026")
+      qc.invalidateQueries(["pipeline", articleId])
+    },
+    onError: () => flash("Pause failed \u2014 try refreshing", true),
   })
   const updateStepAI = useMutation({
     mutationFn: (payload) => api.post(`/api/content/${articleId}/pipeline/update-step`, payload),
@@ -236,19 +258,19 @@ function PipelineProgress({ articleId, onComplete }) {
         {/* Step-by-Step / Auto toggle */}
         {stepMode === "auto" && !isPaused ? (
           <button onClick={() => pausePipeline.mutate()} disabled={pausePipeline.isPending}
-            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.purple}40`, background: `${T.purple}08`, cursor: "pointer", color: T.purple, fontWeight: 600, flexShrink: 0 }}>
-            ⏸ Pause
+            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.purple}40`, background: `${T.purple}08`, cursor: pausePipeline.isPending ? "default" : "pointer", color: T.purple, fontWeight: 600, flexShrink: 0, opacity: pausePipeline.isPending ? 0.6 : 1 }}>
+            {pausePipeline.isPending ? "Pausing…" : "⏸ Pause"}
           </button>
         ) : isPaused ? (
           <button onClick={() => continuePipeline.mutate(true)} disabled={continuePipeline.isPending}
-            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.amber}40`, background: `${T.amber}08`, cursor: "pointer", color: T.amber, fontWeight: 600, flexShrink: 0 }}>
-            ⏩ Resume
+            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.amber}40`, background: `${T.amber}08`, cursor: continuePipeline.isPending ? "default" : "pointer", color: T.amber, fontWeight: 600, flexShrink: 0, opacity: continuePipeline.isPending ? 0.6 : 1 }}>
+            {continuePipeline.isPending ? "Resuming…" : "⏩ Resume"}
           </button>
         ) : null}
         {data?.status === "generating" && (
           <button onClick={() => cancelPipeline.mutate()} disabled={cancelPipeline.isPending}
-            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid #ef444440`, background: `#ef444408`, cursor: "pointer", color: "#ef4444", fontWeight: 600, flexShrink: 0 }}>
-            ✕ Stop
+            style={{ fontSize: 9, padding: "4px 8px", borderRadius: 6, border: `1px solid #ef444440`, background: `#ef444408`, cursor: cancelPipeline.isPending ? "default" : "pointer", color: "#ef4444", fontWeight: 600, flexShrink: 0, opacity: cancelPipeline.isPending ? 0.6 : 1 }}>
+            {cancelPipeline.isPending ? "Stopping…" : "✕ Stop"}
           </button>
         )}
         <button onClick={() => runHealthCheck(true)} disabled={healthLoading}
@@ -256,6 +278,18 @@ function PipelineProgress({ articleId, onComplete }) {
           {healthLoading ? "..." : "↻ Health"}
         </button>
       </div>
+
+      {/* ── Control feedback message ── */}
+      {ctrlMsg.text && (
+        <div style={{
+          marginBottom: 8, padding: "5px 10px", borderRadius: 6, fontSize: 10, fontWeight: 500,
+          background: ctrlMsg.isError ? "#fef2f2" : "#f0fdf4",
+          color: ctrlMsg.isError ? "#dc2626" : "#15803d",
+          border: `1px solid ${ctrlMsg.isError ? "#fecaca" : "#bbf7d0"}`,
+        }}>
+          {ctrlMsg.isError ? "⚠️ " : "✓ "}{ctrlMsg.text}
+        </div>
+      )}
 
       {/* ── Progress bar ── */}
       <div style={{ height: 5, background: `${T.gray}12`, borderRadius: 99, overflow: "hidden", marginBottom: 14 }}>

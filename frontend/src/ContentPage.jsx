@@ -193,12 +193,10 @@ export default function ContentPage() {
                     <Badge color="amber">generating</Badge>
                     <button
                       onClick={() => {
-                        if (window.confirm("Stop generation and keep current progress?")) {
-                          api.post(`/api/content/${selected.article_id}/pipeline/cancel`).then(() => {
-                            qclient.invalidateQueries(["pipeline", selected.article_id])
-                            qclient.invalidateQueries(["articles", activeProject])
-                          })
-                        }
+                        api.post(`/api/content/${selected.article_id}/pipeline/cancel`).then(() => {
+                          qclient.invalidateQueries(["pipeline", selected.article_id])
+                          qclient.invalidateQueries(["articles", activeProject])
+                        })
                       }}
                       style={{ background: "none", border: `1px solid ${T.red}`, borderRadius: 6,
                         cursor: "pointer", color: T.red, fontSize: 11, padding: "2px 8px" }}>
