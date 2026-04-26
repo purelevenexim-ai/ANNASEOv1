@@ -83,6 +83,8 @@ def check_all_rules(
     has_faq = bool(re.search(r"frequently asked|<h2[^>]*>.*?faq.*?</h2>", body_html, re.I))
     external_a = len(re.findall(r'href="http', body_html))
     internal_a = len(re.findall(r'href="/', body_html))
+    # Pre-compute locations list here so it's available everywhere in the function
+    _locations = [loc.strip().lower() for loc in (target_locations or "").split(",") if loc.strip()]
     # Also count absolute links to customer's own domain as internal
     if customer_url:
         _cu = customer_url.replace("https://", "").replace("http://", "").replace("www.", "").rstrip("/")
@@ -119,6 +121,10 @@ def check_all_rules(
     kw_density = (kw_count / word_count * 100) if (word_count > 0 and kw_lower) else 0.0
     # But for display/normalization pass the raw density
     kw_density_raw = raw_density
+    # R06 uses per-phrase occurrence density (kw_density = occurrences/total_words).
+    # Thresholds are already scaled above by 1/√(kw_word_len) so single-word
+    # and multi-word keywords are judged on the same effective word-exposure basis.
+    kw_density_check = kw_density
 
     # ── Runtime quality profile (blueprint-aligned thresholds) ───────────────
     qp = quality_profile or {}
@@ -142,6 +148,20 @@ def check_all_rules(
     kw_min_req = float(kd_cfg.get("min", 1.0) or 1.0)
     kw_max_req = float(kd_cfg.get("max", 3.0) or 3.0)
     kw_max_req = max(kw_max_req, kw_min_req + 0.25)
+    # Scale density thresholds for multi-word keywords.
+    # Standard SEO density (1-3%) is calibrated for single-word terms.
+    # For N-word phrases the optimal per-phrase occurrence rate decreases because
+    # each repeat consumes N word-slots.  Dividing by √N keeps the underlying
+    # "word-exposure" equivalent, yielding sensible targets:
+    #   single word : 1.00 – 3.00 %
+    #   2-word phrase: 0.71 – 2.12 %  (e.g. "organic spices")
+    #   3-word phrase: 0.58 – 1.73 %  (e.g. "kerala organic spices")
+    if kw_word_len >= 2:
+        import math as _math_kd
+        _kd_scale = 1.0 / _math_kd.sqrt(kw_word_len)
+        kw_min_req = round(kw_min_req * _kd_scale, 3)
+        kw_max_req = round(kw_max_req * _kd_scale, 3)
+        kw_max_req = max(kw_max_req, kw_min_req + 0.1)
 
     elem_cfg = qp.get("elements", {}) if isinstance(qp, dict) else {}
     table_required = bool(elem_cfg.get("table_required", True))
@@ -208,19 +228,19 @@ def check_all_rules(
     seo = 0
 
     r06_name = f"Keyword Density {kw_min_req:.1f}-{kw_max_req:.1f}%"
-    if kw_min_req <= kw_density <= kw_max_req:
+    if kw_min_req <= kw_density_check <= kw_max_req:
         seo += rule("R06", r06_name, "seo", 6, 6, True)
-    elif max(0.4, kw_min_req - 0.5) <= kw_density < kw_min_req:
+    elif max(0.4, kw_min_req - 0.5) <= kw_density_check < kw_min_req:
         seo += rule("R06", r06_name, "seo", 3, 6, False,
-                    "high", f"Keyword density {kw_density:.1f}% — too low (target {kw_min_req:.1f}-{kw_max_req:.1f}%)",
+                    "high", f"Keyword density {kw_density_check:.1f}% — too low (target {kw_min_req:.1f}-{kw_max_req:.1f}%)",
                     f"Add '{keyword}' more naturally in paragraphs")
-    elif kw_density > kw_max_req:
+    elif kw_density_check > kw_max_req:
         seo += rule("R06", r06_name, "seo", 0, 6, False,
-                    "critical", f"Keyword density {kw_density:.1f}% — KEYWORD STUFFING detected",
+                    "critical", f"Keyword density {kw_density_check:.1f}% — KEYWORD STUFFING detected",
                     "Remove forced repetitions, use synonyms and semantic variations")
     else:
         seo += rule("R06", r06_name, "seo", 0, 6, False,
-                    "critical", f"Keyword density {kw_density:.1f}% — keyword barely present",
+                    "critical", f"Keyword density {kw_density_check:.1f}% — keyword barely present",
                     f"Add '{keyword}' naturally throughout the article (target {kw_min_req:.1f}-{kw_max_req:.1f}%)")
 
     first_100 = " ".join(words[:100]).lower()
@@ -241,9 +261,27 @@ def check_all_rules(
                     "medium", "Keyword/variations missing from H2 headings",
                     "Include keyword or variations in at least 1-2 H2 headings")
 
-    kw_words = [w for w in kw_lower.split() if len(w) > 3] if kw_lower else []
+    # Strip trailing punctuation (e.g. "export:" → "export") so colons/commas
+    # in long-tail keywords don't cause false-zero word counts.
+    # Also exclude common English stop-words that appear naturally too infrequently
+    # to be meaningful SEO signals (e.g. "need", "know", "everything" from
+    # "Everything You Need to Know" article-title keywords).
+    _r09_stopwords = {
+        "need", "know", "want", "good", "best", "find", "that", "have", "this",
+        "what", "when", "will", "your", "than", "more", "some", "also", "then",
+        "take", "does", "over", "look", "much", "them", "just", "case", "goes",
+        "very", "even", "only", "help", "give", "such", "come", "fact", "last",
+        "tell", "each", "both", "most", "long", "everything", "guide", "tips",
+        "make", "made", "made", "kind", "time", "ways", "step", "gets",
+    }
+    kw_words = [
+        w.rstrip('.,;:!?') for w in kw_lower.split()
+        if len(w.rstrip('.,;:!?')) > 3 and w.rstrip('.,;:!?') not in _r09_stopwords
+    ] if kw_lower else []
     lsi_hits = sum(1 for w in kw_words if text_lower.count(w) > 3)
-    if not kw_words or lsi_hits >= len(kw_words):
+    # Pass if 80%+ of significant keyword words appear 4+ times (allows 1 non-frequent word)
+    _r09_threshold = max(1, round(len(kw_words) * 0.8)) if kw_words else 0
+    if not kw_words or lsi_hits >= _r09_threshold:
         seo += rule("R09", "LSI/Semantic Variations", "seo", 3, 3, True)
     else:
         seo += rule("R09", "LSI/Semantic Variations", "seo", 0, 3, False,
@@ -630,24 +668,64 @@ def check_all_rules(
                    "critical", f"High AI detectability: {ai_pattern_hits} patterns ({per_1k:.1f}/1000w)",
                    "Rewrite to remove robotic phrases, vary sentence structure, add human tone")
 
-    # R36: Experience Signals — first-person real-world experience markers
+    # R36: Experience Signals — third-person real-world proof signals (anti-fabrication)
+    # We avoid first-person “we tested” style claims unless the publisher can prove them.
+    # These are exact-string matches (machine-checked), so keep phrases common + defensible.
     experience_signals = [
-        "we tested", "we found", "in our experience", "we observed",
-        "i noticed", "after trying", "hands-on", "first-hand",
-        "we discovered", "our team", "we recommend", "we compared",
-        "in practice", "real-world", "we've seen", "from our testing",
+        "in practice",
+        "case study",
+        "real-world example",
+        "from a buyer perspective",
+        "in procurement",
+        "quality control",
+        "quality assurance",
+        "third-party",
+        "lab report",
+        "certificate of analysis",
     ]
     exp_hits = sum(1 for s in experience_signals if s in text_lower)
     if exp_hits >= 3:
         ci += rule("R36", "Experience Signals (3+)", "content_intelligence", 4, 4, True)
     elif exp_hits >= 1:
         ci += rule("R36", "Experience Signals (3+)", "content_intelligence", 2, 4, False,
-                   "high", f"Only {exp_hits} experience signal(s) — need 3+ for E-E-A-T",
-                   "Add 'we tested', 'in our experience', 'we found', 'after trying' naturally")
+                   "high", f"Only {exp_hits} real-world proof signal(s) — need 3+",
+                   "Add real-world proof phrasing (e.g., 'In practice', 'Case study', 'Real-world example') without first-person fabrication")
     else:
         ci += rule("R36", "Experience Signals (3+)", "content_intelligence", 0, 4, False,
-                   "critical", "No first-person experience signals — weak E-E-A-T",
-                   "Add authentic experience: 'we tested', 'in our experience', 'we observed', 'hands-on'")
+                   "critical", "No real-world proof signals — weak E-E-A-T",
+                   "Add third-person proof signals: 'In practice', 'Case study', 'Real-world example' (avoid 'we tested' unless verifiable)")
+
+    # R81: GEO Fact Anchors — entity-linked statistics for LLM citability (2 pts)
+    # AI search engines (Perplexity, ChatGPT, Gemini) preferentially cite content that
+    # contains structured facts linking a named entity to a specific, measurable claim.
+    # Pattern: sentence with ≥1 number/% AND ≥1 proper noun or location entity.
+    # Example: "Kerala produces 97% of India's cardamom" → citable fact anchor.
+    _geo_fact_count = 0
+    for _sent in sentences:
+        _sent_lower = _sent.lower()
+        _has_stat = bool(re.search(
+            r'\b\d+\.?\d*\s*%|\b\d+\s+(?:times|steps|days|years|tonnes|tons|kg|varieties|farmers|countries|percent)',
+            _sent_lower
+        ))
+        if not _has_stat:
+            continue
+        # Must also contain a proper noun (Title Case word 4+ chars) or known location
+        _has_entity = bool(re.search(r'\b[A-Z][a-z]{3,}\b', _sent))
+        _has_location = _locations and any(loc in _sent_lower for loc in _locations)
+        if _has_entity or _has_location:
+            _geo_fact_count += 1
+    if _geo_fact_count >= 3:
+        ci += rule("R81", "GEO Fact Anchors (3+)", "content_intelligence", 2, 2, True)
+    elif _geo_fact_count >= 1:
+        ci += rule("R81", "GEO Fact Anchors (3+)", "content_intelligence", 1, 2, False,
+                   "high", f"Only {_geo_fact_count} entity-linked stat sentence(s) — need 3+ for LLM citability",
+                   "Add 3+ fact-anchor sentences: '[Entity/Location] [produces/accounts for/contains] [X%/number] [context]' "
+                   "e.g., 'Kerala produces 97% of India's cardamom'")
+    else:
+        ci += rule("R81", "GEO Fact Anchors (3+)", "content_intelligence", 0, 2, False,
+                   "critical", "No entity-linked fact sentences — invisible to AI search engines",
+                   "Add specific citable facts linking entities to statistics: "
+                   "'[Place/Brand] [accounts for / produces / reduces] [X%] [outcome]'")
 
     # R37: Entity Richness — named entities (locations, products, orgs, concepts)
     # Use regex patterns for common entity-like phrases
@@ -772,12 +850,18 @@ def check_all_rules(
                    "medium", "No buyer intent / decision-making section",
                    "Add a 'Which One Should You Buy?' or 'How to Choose' section with decision guidance")
 
-    # R41: Storytelling Presence — narrative markers
+    # R41: Storytelling Presence — narrative markers (third-person, non-fabricated)
     story_signals = [
-        "when we", "one day", "the moment", "we discovered",
-        "the result was", "what happened", "we were surprised",
-        "turned out", "the breakthrough", "imagine this",
-        "picture this", "here's what", "the reality is",
+        "picture this",
+        "imagine this",
+        "consider a buyer",
+        "for example, imagine",
+        "a common scenario",
+        "the result was",
+        "what happened next",
+        "on the other hand",
+        "before and after",
+        "the reality is",
     ]
     story_hits = sum(1 for s in story_signals if s in text_lower)
     if story_hits >= 2:
@@ -785,11 +869,11 @@ def check_all_rules(
     elif story_hits >= 1:
         ci += rule("R41", "Storytelling Presence (2+)", "content_intelligence", 1, 2, False,
                    "low", f"Only {story_hits} storytelling marker — target 2+",
-                   "Add narrative elements: 'when we tested...', 'picture this:', 'the result was...'")
+                   "Add narrative elements like 'Picture this:', 'Consider a buyer who...', 'The result was...' (avoid first-person testing claims)")
     else:
         ci += rule("R41", "Storytelling Presence (2+)", "content_intelligence", 0, 2, False,
                    "medium", "No storytelling elements — content feels generic",
-                   "Add stories: 'when we tested...', 'picture this:', 'here's what happened...'")
+                   "Add stories: 'Picture this:', 'For example, imagine...', 'What happened next...'")
 
     # R42: Visual Break Elements — callouts, tips, blockquotes
     visual_patterns = [
@@ -871,7 +955,7 @@ def check_all_rules(
                    "low", "No differentiation markers — content may feel generic",
                    "Add unique perspective: 'what most overlook', 'the real truth', 'our perspective'")
 
-    # R46: FAQ Answer Quality — FAQ answers should be 40-60 words
+    # R46: FAQ Answer Quality — average length + answer-first opening sentence
     faq_section = re.search(
         r"(?:<h2[^>]*>.*?(?:faq|frequently asked).*?</h2>)(.*?)(?=<h2|$)",
         body_html, re.I | re.DOTALL,
@@ -882,14 +966,61 @@ def check_all_rules(
         faq_body = faq_section.group(1)
         faq_answers = re.findall(r"<p[^>]*>(.*?)</p>", faq_body, re.I | re.DOTALL)
         if faq_answers:
-            answer_wcs = [len(re.sub(r"<[^>]+>", "", a).split()) for a in faq_answers]
-            avg_answer_wc = sum(answer_wcs) / len(answer_wcs)
-            if 25 <= avg_answer_wc <= 80:
-                ci += rule("R46", "FAQ Answer Quality (25-80w avg)", "content_intelligence", 2, 2, True)
+            answer_texts = [re.sub(r"<[^>]+>", "", a).strip() for a in faq_answers]
+            answer_wcs = [len(a.split()) for a in answer_texts if a]
+            avg_answer_wc = (sum(answer_wcs) / len(answer_wcs)) if answer_wcs else 0
+
+            def _first_sentence(text_: str) -> str:
+                parts = re.split(r"(?<=[.!?])\s+", text_)
+                return (parts[0] if parts else text_).strip()
+
+            # Answer-first heuristic: first sentence is short-ish and not a generic preamble.
+            bad_openers = (
+                "it depends",
+                "in general",
+                "generally",
+                "there are",
+                "to answer",
+                "this question",
+                "when it comes to",
+                "let's",
+                "in this section",
+            )
+            answer_first_hits = 0
+            answer_first_total = 0
+            for a in answer_texts:
+                if not a:
+                    continue
+                answer_first_total += 1
+                fs = _first_sentence(a).lower()
+                fs_wc = len(fs.split())
+                if 5 <= fs_wc <= 25 and not any(fs.startswith(b) for b in bad_openers):
+                    answer_first_hits += 1
+
+            answer_first_ratio = (answer_first_hits / answer_first_total) if answer_first_total else 1.0
+
+            length_ok = 25 <= avg_answer_wc <= 80
+            answer_first_ok = answer_first_ratio >= 0.6  # at least 60% of answers start directly
+
+            if length_ok and answer_first_ok:
+                ci += rule("R46", "FAQ Answer Quality (answer-first + 25-80w avg)", "content_intelligence", 2, 2, True)
             else:
-                ci += rule("R46", "FAQ Answer Quality (25-80w avg)", "content_intelligence", 0, 2, False,
-                           "medium", f"FAQ answers avg {avg_answer_wc:.0f} words ({'too short' if avg_answer_wc < 25 else 'too long'})",
-                           "FAQ answers should be 40-60 words — direct and complete")
+                problems = []
+                if not length_ok:
+                    problems.append(f"avg {avg_answer_wc:.0f} words")
+                if not answer_first_ok:
+                    problems.append(f"answer-first {answer_first_ratio:.0%}")
+                ci += rule(
+                    "R46",
+                    "FAQ Answer Quality (answer-first + 25-80w avg)",
+                    "content_intelligence",
+                    0,
+                    2,
+                    False,
+                    "medium",
+                    "FAQ quality issues: " + ", ".join(problems),
+                    "Make FAQ answers 40-60 words and start each answer with a direct first sentence (no preamble)",
+                )
         else:
             ci += rule("R46", "FAQ Answer Quality (25-80w avg)", "content_intelligence", 2, 2, True)
     else:
@@ -1024,7 +1155,60 @@ def check_all_rules(
                      "medium", "No comparison/decision table found",
                      "Add a comparison table (3+ rows) with features, pricing, or ratings")
 
-    # ── PILLAR 11: AI Humanization (12 pts) ──────────────────────────────────
+    # R80: Commercial Intent Hook — buyer-intercept language in first 200 words (2 pts)
+    # Only applies to commercial-intent keywords (vs/review/alternative/compare/best/worth).
+    # Lifts CTR and signals commercial relevance to search engines.
+    commercial_hooks = [
+        "before you buy", "thinking of buying", "read this first",
+        "before you order", "is it really worth", "should you buy",
+        "what most buyers miss", "don't buy until", "before switching",
+        "thinking of switching", "better option than", "tired of",
+        "disappointed with", "considering buying", "planning to buy",
+        "not sure which", "wondering if", "worth the switch",
+    ]
+    first_200_text = " ".join(words[:200]).lower()
+    has_commercial_hook = any(p in first_200_text for p in commercial_hooks)
+    _is_commercial_kw = any(t in kw_lower for t in [
+        "vs ", " vs", "review", "alternative", "alternatives", "compare",
+        "comparison", "worth", "replace", "best ",
+    ])
+    if not _is_commercial_kw:
+        conv += rule("R80", "Commercial Intent Hook in Opening", "conversion", 2, 2, True)
+    elif has_commercial_hook:
+        conv += rule("R80", "Commercial Intent Hook in Opening", "conversion", 2, 2, True)
+    else:
+        conv += rule("R80", "Commercial Intent Hook in Opening", "conversion", 0, 2, False,
+                     "high",
+                     "Opening 200 words lack a buyer-intercept hook — commercial keyword needs one",
+                     "Rewrite the opening hook to say: 'Thinking of buying X? Read this first' or "
+                     "'Before you order, here's what most buyers miss' (within first 200 words)")
+
+    # R83: Value Differentiator Language — 2+ positioning phrases vs the alternative (2 pts)
+    # Converts informational comparison articles into persuasive conversion pages.
+    differentiator_phrases = [
+        "the difference", "sets apart", "what makes", "unlike most",
+        "instead of", "rather than", "a better option", "the better choice",
+        "directly sourced", "farm-direct", "direct from", "fresher than",
+        "outperforms", "the advantage is", "one key advantage",
+        "you'll notice the difference", "taste the difference",
+        "key differentiator", "what separates", "far superior",
+    ]
+    diff_count = sum(1 for p in differentiator_phrases if p in text_lower)
+    if diff_count >= 2:
+        conv += rule("R83", "Value Differentiator Language (2+)", "conversion", 2, 2, True)
+    elif diff_count == 1:
+        conv += rule("R83", "Value Differentiator Language (2+)", "conversion", 1, 2, False,
+                     "low", "Only 1 value differentiator phrase — need 2+",
+                     "Add language that positions against alternatives: 'Unlike X, our Y...', "
+                     "'The difference is...', 'What sets apart...' (2+ times)")
+    else:
+        conv += rule("R83", "Value Differentiator Language (2+)", "conversion", 0, 2, False,
+                     "medium",
+                     "No value differentiator language — content explains instead of positioning",
+                     "Add 2+ comparison phrases: 'unlike', 'sets apart', 'the difference is', "
+                     "'the better choice', 'directly sourced'")
+
+    # ── PILLAR 11: AI Humanization (14 pts) ──────────────────────────────────
     human = 0
 
     # R54: Opinion signals — author takes a stance (2 pts)
@@ -1085,16 +1269,21 @@ def check_all_rules(
         human += rule("R56", "Sentence Length Variety (std≥5)", "ai_humanization", 2, 2, True)
 
     # R57: No template/formulaic patterns (2 pts)
+    # NOTE: text_lower is HTML-stripped plain text with all whitespace collapsed
+    # to single spaces — there are NO newlines, so re.MULTILINE has no effect
+    # here.  The old patterns used '^' anchors that only matched the very start
+    # of the entire string, making the rule effectively disabled.  Fixed: remove
+    # the '^' anchor so any occurrence anywhere in the text is caught.
     template_patterns = [
-        r"^in this (article|guide|post),?\s+we",
-        r"^let'?s (dive|explore|look|get started|begin)",
-        r"^without further ado",
-        r"^in conclusion,?\s",
-        r"^to sum up,?\s",
-        r"^in summary,?\s",
-        r"^as we'?ve (seen|discussed|explored)",
+        r"in this (article|guide|post),?\s+we",
+        r"\blet'?s (dive|explore|look|get started|begin)\b",
+        r"without further ado",
+        r"\bin conclusion[,\s]",
+        r"\bto sum up[,\s]",
+        r"\bin summary[,\s]",
+        r"as we'?ve (seen|discussed|explored)",
     ]
-    template_hits = sum(1 for p in template_patterns if re.search(p, text_lower, re.MULTILINE))
+    template_hits = sum(1 for p in template_patterns if re.search(p, text_lower))
     if template_hits == 0:
         human += rule("R57", "No Template Patterns", "ai_humanization", 2, 2, True)
     elif template_hits <= 1:
@@ -1138,6 +1327,29 @@ def check_all_rules(
         human += rule("R59", "Natural Hedging / Qualifiers (3+)", "ai_humanization", 0, 2, False,
                       "medium", "No hedging/qualifiers — content sounds overly certain",
                       "Add qualifiers: 'typically', 'it depends', 'in most cases', 'generally'")
+
+    # R82: No AI Conclusion Phrases — removes the strongest AI-detection signals (2 pts)
+    # R57 handles template openers; R82 handles mid-to-end AI conclusion patterns.
+    # These are the clearest AI giveaways that tank engagement and look robotic.
+    ai_conclusion_phrases = [
+        "key takeaways", "in conclusion", "to summarize", "in summary",
+        "as we have explored", "as we've explored", "as we have seen",
+        "as we've seen", "as we have discussed", "as we've discussed",
+        "to wrap up", "to recap", "all in all", "to conclude",
+        "this article has covered", "we have covered",
+    ]
+    ai_conc_count = sum(text_lower.count(p) for p in ai_conclusion_phrases)
+    if ai_conc_count == 0:
+        human += rule("R82", "No AI Conclusion Phrases", "ai_humanization", 2, 2, True)
+    elif ai_conc_count == 1:
+        human += rule("R82", "No AI Conclusion Phrases", "ai_humanization", 1, 2, False,
+                      "low", "1 AI conclusion phrase found ('in conclusion', 'key takeaways', etc.)",
+                      "Replace 'In conclusion / Key Takeaways / In summary' with a specific punchy closing")
+    else:
+        human += rule("R82", "No AI Conclusion Phrases", "ai_humanization", 0, 2, False,
+                      "high", f"{ai_conc_count} AI conclusion/summary phrases detected",
+                      "Remove all 'Key Takeaways', 'In conclusion', 'In summary' — replace with "
+                      "action-oriented, specific closings like 'Pick the Right Option' or 'Your Next Move'")
 
     # ── PILLAR 12: Semantic Depth (12 pts) ───────────────────────────────────
     semdeep = 0
@@ -1242,7 +1454,7 @@ def check_all_rules(
     ctx = 0
     _brand = (brand_name or "").strip().lower()
     _btype = (business_type or "").strip().lower()
-    _locations = [loc.strip().lower() for loc in (target_locations or "").split(",") if loc.strip()]
+    # _locations already pre-computed at top of function
     _audience = (target_audience or "").strip().lower()
 
     # R65: Brand mention (2–4 occurrences) (3 pts)
@@ -1443,7 +1655,7 @@ def check_all_rules(
 
     # ── Totals ───────────────────────────────────────────────────────────────
     total_earned = cq + seo + struct + read + eeat + links + aeo + lang + ci + conv + human + semdeep + ctx + snip + nc
-    max_possible = 202  # 197 + 5 (R74 numeric_consistency)
+    max_possible = 210  # 202 base + 8 new (R80:2 + R81:2 + R82:2 + R83:2)
     percentage = round(total_earned / max_possible * 100)
 
     categories = {
@@ -1455,9 +1667,9 @@ def check_all_rules(
         "links":           {"score": links,  "max": 10, "label": "Links"},
         "aeo":             {"score": aeo,    "max": 10, "label": "AI/AEO Readiness"},
         "language":        {"score": lang,   "max": 5,  "label": "Language & Style"},
-        "content_intelligence": {"score": ci, "max": 36, "label": "Content Intelligence"},
-        "conversion":      {"score": conv,   "max": 15, "label": "Conversion & Persuasion"},
-        "ai_humanization": {"score": human,  "max": 12, "label": "AI Humanization"},
+        "content_intelligence": {"score": ci, "max": 38, "label": "Content Intelligence"},
+        "conversion":      {"score": conv,   "max": 19, "label": "Conversion & Persuasion"},
+        "ai_humanization": {"score": human,  "max": 14, "label": "AI Humanization"},
         "semantic_depth":  {"score": semdeep, "max": 12, "label": "Semantic Depth"},
         "customer_context": {"score": ctx,   "max": 12, "label": "Customer Context"},
         "snippet_optimization": {"score": snip, "max": 10, "label": "Snippet Optimization"},

@@ -1,12 +1,13 @@
 // StrategyIntelligenceHub.jsx — 7-Phase SEO Strategy Dashboard
 // Framework: Semrush + Ahrefs Orchard Strategy + Backlinko 2026
-// Phases: Goals → Research → Intent/Briefs → Scoring → Quick Wins → Links → Updates
+// Phases: Goals → Research → Intent/Briefs → Scoring → Quick Wins → Links → Updates → Blueprints
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { StrategyTab } from "./kw2/shared"
 import SessionStrategyPage from "./kw2/SessionStrategyPage"
 import Kw2PromptStudio from "./kw2/Kw2PromptStudio"
+import BlueprintCard from "./components/BlueprintCard"
 
 const API = import.meta.env.VITE_API_URL || ""
 function authHeaders() {
@@ -26,6 +27,31 @@ const T = {
   gray: "#8E8E93", grayLight: "#F2F2F7", border: "rgba(60,60,67,0.12)",
   text: "#000000", textSoft: "rgba(60,60,67,0.55)",
   cardShadow: "0 1px 2px rgba(0,0,0,0.05), 0 0 0 0.5px rgba(0,0,0,0.07)",
+}
+
+const KW3_ACTIVE_TAB = "kw3:activeTab"
+const KW3_ACTIVE_SESSION = "kw3:activeSession"
+
+function inferKw3Tab(session, fallback = "business") {
+  if (!session) return fallback
+  if (session.phase9_done || session.phase8_done || session.phase7_done || session.phase6_done || session.phase5_done || session._strategy) {
+    return "strategy"
+  }
+  if (session.phase4_done || session.phase3_done || session.phase2_done || (session.validated_total || 0) > 0 || (session.universe_total || 0) > 0) {
+    return "validate"
+  }
+  if (session.phase1_done) return "generate"
+  return fallback
+}
+
+function openKw3Route(setPage, session = null, tab = null) {
+  try {
+    const sessionId = session?.id || session?.session_id || ""
+    if (sessionId) localStorage.setItem(KW3_ACTIVE_SESSION, sessionId)
+    if (tab) localStorage.setItem(KW3_ACTIVE_TAB, tab)
+    else if (session) localStorage.setItem(KW3_ACTIVE_TAB, inferKw3Tab(session))
+  } catch {}
+  if (typeof setPage === "function") setPage("kw3")
 }
 
 function Card({ children, style = {} }) {
@@ -65,6 +91,7 @@ const PHASES = [
   { id: "strategy",     label: "Strategy",           icon: "🗺️" },
   { id: "content",      label: "Content Hub",        icon: "✍️" },
   { id: "links",        label: "Link Building",      icon: "🔗" },
+  { id: "blueprints",   label: "Blueprints",         icon: "🎯" },
 ]
 
 // ── Keyword Pillars Phase (from Keyword Workflow) ────────────────────────────
@@ -270,7 +297,7 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
         </div>
         {setPage && (
           <button
-            onClick={() => setPage("kw2")}
+            onClick={() => openKw3Route(setPage, kw2Session, "business")}
             style={{
               padding: "8px 20px", borderRadius: 8, border: "none",
               background: T.purple, color: "#fff", cursor: "pointer",
@@ -328,9 +355,9 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
                     : "No keywords yet"}
               </span>
               {setPage && (
-                <button onClick={() => setPage("kw2")} style={{ padding: "5px 12px", borderRadius: 6, border: "none",
+                <button onClick={() => openKw3Route(setPage, kw2Session, "validate")} style={{ padding: "5px 12px", borderRadius: 6, border: "none",
                   background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
-                  Open in Keywords v2 →
+                  Open in Keywords V3 →
                 </button>
               )}
             </div>
@@ -481,9 +508,9 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
                   : "No keywords in this session yet. Run Phase 2 to generate the keyword universe."}
               </div>
               {setPage && (
-                <button onClick={() => setPage("kw2")} style={{ marginTop: 12, padding: "6px 18px", borderRadius: 8, border: "none",
+                <button onClick={() => openKw3Route(setPage, kw2Session, kw2Session.universe_total > 0 ? "validate" : "generate")} style={{ marginTop: 12, padding: "6px 18px", borderRadius: 8, border: "none",
                   background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 12 }}>
-                  Continue in Keywords v2 →
+                  Continue in Keywords V3 →
                 </button>
               )}
             </Card>
@@ -537,7 +564,7 @@ function KeywordPillarsPhase({ projectId, setPage, kw2Session }) {
           </button>
           {setPage && (
             <button
-              onClick={() => setPage("kw2")}
+              onClick={() => openKw3Route(setPage, kw2Session, kw2Session ? inferKw3Tab(kw2Session, "validate") : "validate")}
               style={{ padding: "5px 12px", borderRadius: 6, border: "none",
                 background: T.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 12 }}
             >
@@ -1548,17 +1575,10 @@ function StrategyPhase({ projectId, setPage, selectedSessionId, setSelectedSessi
   const routeToPage = (page) => {
     if (typeof setPage === "function") setPage(page)
   }
-  const openKw2Session = (s) => {
+  const openKw3Session = (s, tab = null) => {
+    if (!s) return
     setSelectedKw2SessionId(s.id)
-    try {
-      localStorage.setItem("annaseo_kw2_open_session", JSON.stringify({
-        projectId,
-        sessionId: s.id,
-        mode: s.mode || "brand",
-        ts: Date.now(),
-      }))
-    } catch {}
-    routeToPage("kw2")
+    openKw3Route(setPage, s, tab)
   }
   const openCalendar = (s) => {
     setSelectedKw2SessionId(s.id)
@@ -1737,7 +1757,7 @@ function StrategyPhase({ projectId, setPage, selectedSessionId, setSelectedSessi
         ) : kw2Sessions.length === 0 ? (
           <div style={{ fontSize: 12, color: T.textSoft, padding: "6px 0" }}>
             No keyword research sessions yet.{" "}
-            {setPage && <button onClick={() => routeToPage("kw2")} style={{ color: T.teal, background: "none", border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, padding: 0 }}>Start one in Keywords v2 →</button>}
+            {setPage && <button onClick={() => openKw3Route(setPage, null, "business")} style={{ color: T.teal, background: "none", border: "none", cursor: "pointer", fontWeight: 600, fontSize: 12, padding: 0 }}>Start one in Keywords V3 →</button>}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1819,9 +1839,9 @@ function StrategyPhase({ projectId, setPage, selectedSessionId, setSelectedSessi
                           <Btn
                             small
                             variant={hasStrategy ? "outline" : "primary"}
-                            onClick={(e) => { e.stopPropagation(); openKw2Session(s) }}
+                            onClick={(e) => { e.stopPropagation(); openKw3Session(s) }}
                           >
-                            {hasStrategy ? "Open in Keywords v2" : "Continue in Keywords v2 →"}
+                            {hasStrategy ? "Open in Keywords V3" : "Continue in Keywords V3 →"}
                           </Btn>
                           {hasStrategy && (
                             <>
@@ -1866,19 +1886,19 @@ function StrategyPhase({ projectId, setPage, selectedSessionId, setSelectedSessi
               Phase 9 not yet complete for &ldquo;{sessionLabel(selectedKw2Session)}&rdquo;
             </div>
             <div style={{ fontSize: 12, color: T.textSoft, marginBottom: 16 }}>
-              Complete Phase 9 in Keywords v2 to generate the AI strategy for this session.
+              Complete Phase 9 in Keywords V3 to generate the AI strategy for this session.
               The card above will automatically update when ready.
             </div>
-            <Btn variant="primary" onClick={() => openKw2Session(selectedKw2Session)}>Continue in Keywords v2 →</Btn>
+            <Btn variant="primary" onClick={() => openKw3Session(selectedKw2Session)}>Continue in Keywords V3 →</Btn>
           </Card>
         ) : (
           <Card style={{ textAlign: "center", padding: 40 }}>
             <div style={{ fontSize: 36, marginBottom: 12 }}>🗺️</div>
             <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>No strategy generated yet</div>
             <div style={{ fontSize: 13, color: T.textSoft, marginBottom: 16 }}>
-              Complete all 9 phases in Keywords v2 to generate an AI strategy for your keyword research sessions.
+              Complete all phases in Keywords V3 to generate an AI strategy for your keyword research sessions.
             </div>
-            {setPage && <Btn variant="outline" onClick={() => routeToPage("kw2")}>Go to Keywords v2 →</Btn>}
+            {setPage && <Btn variant="outline" onClick={() => openKw3Route(setPage, null, "business")}>Go to Keywords V3 →</Btn>}
           </Card>
         )
       )}
@@ -2914,7 +2934,7 @@ function KwSessionCard({ session, projectId, setPage, isSelected, onSelect, onDe
           {/* Go to Research */}
           {setPage && (
             <button
-              onClick={() => setPage("kw2")}
+              onClick={() => openKw3Route(setPage, session)}
               style={{
                 flex: 1, padding: "6px 0", borderRadius: 7,
                 border: `1px solid ${st.border}`,
@@ -2946,14 +2966,17 @@ function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSess
     setCreateError(null)
     try {
       const seeds = newForm.seeds.split(",").map(s => s.trim()).filter(Boolean)
-      await apiFetch(`/api/kw2/${projectId}/sessions`, {
+      const created = await apiFetch(`/api/kw2/${projectId}/sessions`, {
         method: "POST",
         body: JSON.stringify({ name: newForm.name || undefined, mode: newForm.mode, seed_keywords: seeds }),
       })
+      const createdSession = created?.session || created || null
+      const createdSessionId = created?.session_id || created?.id || created?.session?.id || ""
       qc.invalidateQueries(["kw2-hub-sessions", projectId])
       setShowNewPanel(false)
       setNewForm({ name: "", mode: "expand", seeds: "" })
-      if (setPage) setPage("kw2")
+      if (createdSessionId && onSelectSession) onSelectSession(createdSessionId)
+      openKw3Route(setPage, createdSessionId ? { ...createdSession, id: createdSessionId } : null, "business")
     } catch (e) {
       setCreateError(e.message || "Failed to create session")
     }
@@ -2978,7 +3001,7 @@ function KwSessionsOverview({ projectId, setPage, kw2Sessions = [], selectedSess
         </div>
         {setPage && (
           <button
-            onClick={() => setPage("kw2")}
+            onClick={() => openKw3Route(setPage, null, "business")}
             style={{
               padding: "9px 22px", borderRadius: 9, border: "none",
               background: T.purple, color: "#fff", cursor: "pointer",
@@ -3191,7 +3214,7 @@ function OverviewPhase({ projectId, strategy, onNavigate }) {
         <Card style={{ marginBottom: 16, padding: "12px 16px",
           background: `linear-gradient(135deg, ${T.purple}12, ${T.teal}08)`,
           border: `1px solid ${T.purple}30`, cursor: "pointer" }}
-          onClick={() => onNavigate("keywords")}
+          onClick={() => onNavigate("kw3")}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ fontSize: 22 }}>🔑</span>
@@ -5516,11 +5539,645 @@ function StrategyResultsPhase({ projectId, setPage }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  BLUEPRINT ENGINE PHASE — Strategy V2 blueprint generation with live console
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const ANGLE_COLORS_BP = {
+  informational: { bg: "#dbeafe", text: "#1d4ed8", label: "Informational" },
+  transactional:  { bg: "#dcfce7", text: "#15803d", label: "Transactional" },
+  commercial:     { bg: "#f3e8ff", text: "#7e22ce", label: "Commercial" },
+  navigational:   { bg: "#fef9c3", text: "#854d0e", label: "Navigational" },
+  comparison:     { bg: "#fee2e2", text: "#b91c1c", label: "Comparison" },
+  listicle:       { bg: "#ffedd5", text: "#9a3412", label: "Listicle" },
+}
+
+function KwPhaseRow({ kw, state }) {
+  const phase = state?.phase || "pending"
+  const isDone   = phase === "done"
+  const isActive = phase === "blueprints" || phase === "angles" || phase === "qa"
+  const isPending = phase === "pending" || phase === "classify"
+
+  const phaseMeta = {
+    pending:    { color: "#9ca3af", label: "Pending",           icon: "·" },
+    classify:   { color: "#2563eb", label: "Classifying…",      icon: "⟳" },
+    angles:     { color: "#7c3aed", label: "Generating angles…", icon: "⟳" },
+    blueprints: { color: "#0284c7",
+                  label: state?.blueprintsDone > 0
+                    ? `Blueprints ${state.blueprintsDone}/${state.blueprintsTotal || "?"}`
+                    : "Building blueprints…",
+                  icon: "⟳" },
+    qa:         { color: "#d97706", label: "QA scoring…",        icon: "⟳" },
+    done:       { color: "#16a34a",
+                  label: `✓ ${state?.blueprintsDone || 0} blueprint${state?.blueprintsDone !== 1 ? "s" : ""}${state?.avgScore ? ` · avg ${state.avgScore}` : ""}`,
+                  icon: "✓" },
+  }
+
+  const meta = phaseMeta[phase] || phaseMeta.pending
+  const fillPct = isDone ? 100
+    : isActive && state?.blueprintsTotal > 0
+      ? Math.round((state.blueprintsDone / state.blueprintsTotal) * 100)
+      : isActive ? 40
+      : 0
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 10,
+      padding: "7px 12px", borderRadius: 8, background: isDone ? "#f0fdf4" : isActive ? "#eff6ff" : "#f9fafb",
+      border: `1px solid ${isDone ? "#bbf7d0" : isActive ? "#bfdbfe" : "#e5e7eb"}`,
+    }}>
+      <span style={{ fontWeight: 700, fontSize: 13, color: meta.color, width: 14, textAlign: "center" }}>
+        {meta.icon}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3, gap: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "#111827", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{kw}</span>
+          <span style={{ fontSize: 11, color: meta.color, whiteSpace: "nowrap", flexShrink: 0 }}>{meta.label}</span>
+        </div>
+        <div style={{ height: 4, background: "#e5e7eb", borderRadius: 2, overflow: "hidden" }}>
+          <div style={{
+            height: "100%", borderRadius: 2,
+            background: isDone ? "#16a34a" : isActive ? "#3b82f6" : "#e5e7eb",
+            width: `${fillPct}%`,
+            transition: "width 0.4s ease",
+          }} />
+        </div>
+      </div>
+      {state?.intent && (
+        <span style={{ fontSize: 10, color: "#6b7280", flexShrink: 0, background: "#f3f4f6", padding: "1px 6px", borderRadius: 8 }}>
+          {state.intent}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function SSELogPanel({ events }) {
+  const bottomRef = useRef(null)
+  useEffect(() => {
+    setTimeout(() => {
+      if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" })
+    }, 0)
+  }, [events.length])
+  
+  // Determine text color based on event type
+  const getEventColor = (evt) => {
+    if (evt.step === "error") return "#ff7b72"
+    if (evt.step === "done" || evt.step === "all_done" || evt.step === "keyword_done") return "#3fb950"
+    if (evt.step === "fix" || evt.step === "fix_done") return "#ffa657"
+    if (evt.step?.startsWith("blueprint_")) return "#58a6ff"
+    if (evt.step === "qa" && evt.status === "done") return "#3fb950"
+    return "#c9d1d9"
+  }
+  
+  return (
+    <div style={{
+      background: "#0d1117", borderRadius: 8, padding: "12px",
+      fontFamily: "'SF Mono', 'Fira Code', monospace", fontSize: 11, lineHeight: 1.8,
+      maxHeight: 380, overflowY: "auto", color: "#8b949e",
+      border: "1px solid #30363d",
+      marginTop: 12
+    }}>
+      {events.length === 0 ? (
+        <span style={{ color: "#555" }}>⏳ Waiting for generation to start…</span>
+      ) : (
+        <div>
+          {events.map((e, i) => (
+            <div key={i} style={{ display: "flex", gap: 10 }}>
+              <span style={{ color: "#484f58", minWidth: 32, textAlign: "right", userSelect: "none", flexShrink: 0 }}>
+                {String(i + 1).padStart(2, "0")}
+              </span>
+              <span style={{
+                color: getEventColor(e),
+                flex: 1,
+                wordBreak: "break-word",
+                whiteSpace: "pre-wrap"
+              }}>
+                {e.msg || JSON.stringify(e).slice(0, 100)}
+              </span>
+            </div>
+          ))}
+          <div ref={bottomRef} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FilterChipBP({ label, active, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      padding: "4px 12px", borderRadius: 999, fontSize: 12, cursor: "pointer",
+      border: "1px solid " + (active ? "#3b82f6" : "#d1d5db"),
+      background: active ? "#3b82f6" : "#fff",
+      color: active ? "#fff" : "#374151",
+      transition: "all .15s",
+    }}>{label}</button>
+  )
+}
+
+function BlueprintEnginePhase({ projectId, setPage, kw2Session, preloadedGoals }) {
+  const sessionId = kw2Session?.id || kw2Session?.session_id || ""
+
+  // ── step: "input" | "generating" | "results" ─────────────────────────────
+  const [step, setStep]           = useState("input")
+  const [keywordsText, setKwText] = useState("")
+  const [fetchingKws, setFetchingKws] = useState(false)
+  const [showGoalsForm, setShowGoalsForm] = useState(false)
+  const [businessGoals, setBusinessGoals] = useState({
+    targetAudience: preloadedGoals?.target_audience || "",
+    businessOutcome: preloadedGoals?.business_outcome || "traffic",
+    timeframe: preloadedGoals?.timeframe || "12_months",
+  })
+
+  // generation state
+  const [sseEvents,   setSseEvents]   = useState([])   // raw event log for SSEConsole
+  const [liveCards,   setLiveCards]   = useState([])   // blueprints arriving live
+  const [genError,    setGenError]    = useState(null)
+  const [kwProgress,  setKwProgress]  = useState({})   // per-keyword state machine
+  const [totalExpected, setTotalExpected] = useState(1)
+  const [totalDone,   setTotalDone]   = useState(0)
+  const [showConsole, setShowConsole] = useState(false)
+  const abortRef = useRef(null)
+  const currentKwRef = useRef("")  // tracks active keyword; most events lack a keyword field
+
+  // results state
+  const [blueprints,   setBlueprints]   = useState([])
+  const [angleFilter,  setAngleFilter]  = useState("all")
+  const [minScore,     setMinScore]     = useState(0)
+
+  // load existing blueprints when session changes
+  useEffect(() => {
+    if (!projectId) return
+    const sid = sessionId ? `&session_id=${sessionId}` : ""
+    fetch(`${API}/api/strategy-v2/${projectId}/blueprints?limit=50${sid}`, { headers: authHeaders() })
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => {
+        const list = data.blueprints || []
+        if (list.length > 0) { setBlueprints(list); setStep("results") }
+      })
+      .catch(() => {})
+  }, [projectId, sessionId])
+
+  // auto-fill keywords from hub session
+  async function fetchSessionKeywords() {
+    if (!sessionId) return
+    setFetchingKws(true)
+    try {
+      const r = await fetch(`${API}/api/kw2/${projectId}/sessions/${sessionId}/validated`, { headers: authHeaders() })
+      if (!r.ok) throw new Error("Failed")
+      const data = await r.json()
+      const kws = (data.items || []).map(k => typeof k === "string" ? k : k.keyword).filter(Boolean)
+      setKwText(kws.slice(0, 10).join("\n"))
+    } catch { /* silent */ } finally { setFetchingKws(false) }
+  }
+
+  function fmtEvtMsg(evt) {
+    const t = evt.step || evt.type || evt.event
+    if (t === "classify")     return evt.status === "done"
+      ? `[${evt.keyword}] classified → ${evt.intent}`
+      : `[${evt.keyword}] classifying intent…`
+    if (t === "context")      return `Context: ${evt.kw2_enriched ? `KW2 enriched (${evt.pillars} pillars)` : "no KW2 enrichment"}`
+    if (t === "angles")       return evt.status === "done"
+      ? `[${evt.keyword || ""}] ${evt.count} angles generated`
+      : `[${evt.keyword || ""}] generating angles…`
+    if (t === "blueprints")   return `Starting ${evt.total || "?"} blueprints in parallel…`
+    if (t && t.startsWith("blueprint_")) return `Blueprint ${t.split("_")[1]}: "${evt.title || "?"}" — ${evt.status}`
+    if (t === "fix")          return `[auto-fix] "${evt.title}" — score before: ${evt.score_before}`
+    if (t === "fix_done")     return `[auto-fix] done — score → ${evt.score_after}`
+    if (t === "qa")           return `QA scoring ${evt.count || ""} blueprints… ${evt.status || ""}`
+    if (t === "done")         return `✓ ${evt.keyword} — ${evt.blueprints} blueprints (${evt.elapsed}s)`
+    if (t === "keyword_done") return `✓ ${evt.keyword} complete — ${(evt.blueprints || []).length} blueprints ready`
+    if (t === "all_done")     return `✅ All done — ${evt.total_blueprints} total blueprints`
+    if (t === "error")        return `✗ Error: ${evt.message || evt.error}`
+    return JSON.stringify(evt).slice(0, 120)
+  }
+
+  async function startGeneration() {
+    const keywords = keywordsText.split("\n").map(k => k.trim()).filter(Boolean).slice(0, 10)
+    if (keywords.length === 0) return
+
+    const initKwProgress = {}
+    keywords.forEach(kw => {
+      initKwProgress[kw] = { phase: "classify", intent: "", angleCount: 0, blueprintsDone: 0, blueprintsTotal: 0, scores: [], avgScore: 0 }
+    })
+
+    setStep("generating")
+    setShowConsole(true)  // Show console by default during generation
+    setSseEvents([])
+    setLiveCards([])
+    setGenError(null)
+    setKwProgress(initKwProgress)
+    setTotalExpected(keywords.length)
+    setTotalDone(0)
+
+    try {
+      const controller = new AbortController()
+      abortRef.current = controller
+
+      const resp = await fetch(`${API}/api/strategy-v2/${projectId}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ keywords, session_id: sessionId, goals: businessGoals }),
+        signal: controller.signal,
+      })
+      if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`)
+
+      const reader  = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer    = ""
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split("\n")
+        buffer = lines.pop()
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue
+          const raw = line.slice(6).trim()
+          if (!raw) continue
+          let evt
+          try { evt = JSON.parse(raw) } catch { continue }
+          handleStreamEvent(evt)
+        }
+      }
+    } catch (e) {
+      if (e.name === "AbortError") { setStep("input"); return }
+      setGenError(e.message || "Unknown error")
+    }
+  }
+
+  function handleStreamEvent(evt) {
+    const step = evt.step || evt.type || evt.event
+    // push to SSE console
+    setSseEvents(prev => [...prev, { ...evt, timestamp: Date.now(), msg: fmtEvtMsg(evt) }])
+
+    if (step === "classify") {
+      if (evt.status === "running") {
+        currentKwRef.current = evt.keyword   // set before any other events arrive
+      } else if (evt.status === "done") {
+        setKwProgress(prev => ({
+          ...prev,
+          [evt.keyword]: { ...(prev[evt.keyword] || {}), phase: "angles", intent: evt.intent },
+        }))
+      }
+    } else if (step === "angles") {
+      const kw = currentKwRef.current
+      if (evt.status === "done" && kw) {
+        const count = evt.count || 0
+        setKwProgress(prev => ({
+          ...prev,
+          [kw]: { ...(prev[kw] || {}), phase: "blueprints", angleCount: count, blueprintsTotal: count },
+        }))
+      }
+    } else if (step && step.startsWith("blueprint_")) {
+      // blueprint_1, blueprint_2, … — update the keyword currently in "blueprints" phase
+      setKwProgress(prev => {
+        const updated = { ...prev }
+        Object.keys(updated).forEach(kw => {
+          if (updated[kw].phase === "blueprints") {
+            updated[kw] = { ...updated[kw], blueprintsDone: (updated[kw].blueprintsDone || 0) + 1 }
+          }
+        })
+        return updated
+      })
+    } else if (step === "qa") {
+      const kw = currentKwRef.current
+      if (kw && evt.status === "running") {
+        setKwProgress(prev => ({
+          ...prev,
+          [kw]: { ...(prev[kw] || {}), phase: "qa" },
+        }))
+      }
+    } else if (step === "keyword_done") {
+      const all = evt.blueprints || []
+      setLiveCards(prev => [...prev, ...all])
+      setTotalDone(prev => prev + 1)
+      setKwProgress(prev => ({
+        ...prev,
+        [evt.keyword]: { ...(prev[evt.keyword] || {}), phase: "done", blueprintsDone: all.length },
+      }))
+    } else if (step === "all_done") {
+      setLiveCards(prev => {
+        setBlueprints(prev)
+        return prev
+      })
+      setTimeout(() => setStep("results"), 500)
+    } else if (step === "error") {
+      setGenError(evt.message || evt.error || "Generation failed")
+    }
+  }
+
+  function cancelGeneration() { abortRef.current?.abort() }
+
+  // derived
+  const kwList      = keywordsText.split("\n").map(k => k.trim()).filter(Boolean).slice(0, 10)
+  const pct         = Math.min(100, Math.round((totalDone / Math.max(1, totalExpected)) * 100))
+  const angleTypes  = ["all", ...new Set(blueprints.map(b => b.angle_type).filter(Boolean))]
+  const filtered    = blueprints.filter(b => {
+    const matchAngle = angleFilter === "all" || b.angle_type === angleFilter
+    const score = b.qa_overall_score ?? b.qa_score?.overall ?? b.score ?? 0
+    return matchAngle && score >= minScore
+  })
+
+  // ── styles ────────────────────────────────────────────────────────────────
+  const cardS = { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 20, marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,.04)" }
+  const inputS = { width: "100%", padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, boxSizing: "border-box" }
+  const labelS = { fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 5 }
+
+  // ── STEP: INPUT ──────────────────────────────────────────────────────────
+  if (step === "input") return (
+    <div style={{ maxWidth: 700 }}>
+      <div style={cardS}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#111827", marginBottom: 4 }}>
+          🎯 Blueprint Engine
+        </div>
+        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 18 }}>
+          Transform keywords into uniquely-angled, high-quality content blueprints. Each keyword gets classified, angle-mapped, and developed into ready-to-generate briefs.
+        </div>
+
+        {/* Keywords input */}
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelS}>Keywords (one per line, max 10)</label>
+          <textarea
+            style={{ ...inputS, resize: "vertical", minHeight: 110 }}
+            placeholder={"best cinnamon supplement\norganic turmeric powder\nblack pepper extract benefits"}
+            value={keywordsText}
+            onChange={e => setKwText(e.target.value)}
+          />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 4 }}>
+            <span style={{ fontSize: 11, color: "#9ca3af" }}>
+              {kwList.length} / 10 keywords
+            </span>
+            {sessionId && (
+              <button
+                onClick={fetchSessionKeywords}
+                disabled={fetchingKws}
+                style={{ fontSize: 11, padding: "3px 10px", borderRadius: 6, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", color: "#374151" }}
+              >
+                {fetchingKws ? "Loading…" : "↓ Pull from active session"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Business Goals (collapsible) */}
+        <div style={{ marginBottom: 16 }}>
+          <button
+            onClick={() => setShowGoalsForm(v => !v)}
+            style={{
+              display: "flex", alignItems: "center", gap: 6,
+              background: showGoalsForm ? "#eff6ff" : "#f9fafb",
+              border: `1px solid ${showGoalsForm ? "#bfdbfe" : "#e5e7eb"}`,
+              borderRadius: 7, padding: "6px 12px", fontSize: 12, fontWeight: 600,
+              color: showGoalsForm ? "#1d4ed8" : "#374151", cursor: "pointer",
+            }}
+          >
+            <span>🎯</span>
+            <span>Business Goals & Context {showGoalsForm ? "▲" : "▼"}</span>
+            {(businessGoals.businessOutcome !== "traffic" || businessGoals.targetAudience) && (
+              <span style={{ background: "#2563eb", color: "#fff", fontSize: 10, padding: "1px 6px", borderRadius: 10, fontWeight: 700 }}>set</span>
+            )}
+          </button>
+          {showGoalsForm && (
+            <div style={{ marginTop: 8, padding: "14px 16px", border: "1px solid #bfdbfe", borderRadius: 8, background: "#f8faff" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <div>
+                  <label style={labelS}>Business Outcome</label>
+                  <select
+                    style={inputS}
+                    value={businessGoals.businessOutcome}
+                    onChange={e => setBusinessGoals(g => ({ ...g, businessOutcome: e.target.value }))}
+                  >
+                    <option value="traffic">Drive Organic Traffic</option>
+                    <option value="leads">Generate B2B Leads</option>
+                    <option value="sales">Direct eCommerce Sales</option>
+                    <option value="authority">Establish Brand Authority</option>
+                    <option value="awareness">Brand Awareness</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={labelS}>Timeframe</label>
+                  <select
+                    style={inputS}
+                    value={businessGoals.timeframe}
+                    onChange={e => setBusinessGoals(g => ({ ...g, timeframe: e.target.value }))}
+                  >
+                    <option value="3_months">3 months</option>
+                    <option value="6_months">6 months</option>
+                    <option value="12_months">12 months</option>
+                    <option value="24_months">24 months</option>
+                  </select>
+                </div>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <label style={labelS}>Target Audience <span style={{ fontWeight: 400, color: "#9ca3af" }}>(optional)</span></label>
+                <input
+                  style={inputS}
+                  placeholder="e.g. Health-conscious adults 25-45 looking for natural supplements"
+                  value={businessGoals.targetAudience}
+                  onChange={e => setBusinessGoals(g => ({ ...g, targetAudience: e.target.value }))}
+                />
+              </div>
+              {kw2Session && (
+                <div style={{ marginTop: 8, fontSize: 11, color: "#4b5563", background: "#e0f2fe", padding: "6px 10px", borderRadius: 6 }}>
+                  💡 Session context (brand voice, competitors, USPs) will be automatically injected from <strong>{kw2Session.name || "active session"}</strong>.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <button
+            onClick={startGeneration}
+            disabled={kwList.length === 0}
+            style={{
+              background: kwList.length === 0 ? "#e5e7eb" : "#2563eb",
+              color: kwList.length === 0 ? "#9ca3af" : "#fff",
+              border: "none", borderRadius: 7, padding: "9px 22px", fontSize: 13, fontWeight: 700, cursor: kwList.length === 0 ? "not-allowed" : "pointer",
+            }}
+          >
+            Generate Blueprints →
+          </button>
+          {blueprints.length > 0 && (
+            <button
+              onClick={() => setStep("results")}
+              style={{ background: "#f3f4f6", color: "#374151", border: "1px solid #d1d5db", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}
+            >
+              View existing ({blueprints.length})
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+
+  // ── STEP: GENERATING ─────────────────────────────────────────────────────
+  if (step === "generating") return (
+    <div style={{ maxWidth: 820 }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>Generating Blueprints…</div>
+          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+            {totalDone} / {totalExpected} blueprints • {pct}% complete
+          </div>
+        </div>
+        <button
+          onClick={cancelGeneration}
+          style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 7, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+        >
+          Cancel
+        </button>
+      </div>
+
+      {/* Overall progress bar */}
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ height: 10, background: "#e5e7eb", borderRadius: 5, overflow: "hidden" }}>
+          <div style={{
+            height: "100%", background: pct === 100 ? "#16a34a" : "#2563eb",
+            width: `${pct}%`, borderRadius: 5,
+            transition: "width 0.5s ease",
+          }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+          <span style={{ fontSize: 11, color: "#6b7280" }}>Progress</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: pct === 100 ? "#16a34a" : "#2563eb" }}>{pct}%</span>
+        </div>
+      </div>
+
+      {/* Error */}
+      {genError && (
+        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 14px", marginBottom: 14 }}>
+          <span style={{ fontSize: 13, color: "#dc2626", fontWeight: 600 }}>Error: </span>
+          <span style={{ fontSize: 13, color: "#991b1b" }}>{genError}</span>
+          <button onClick={() => setStep("input")} style={{ marginLeft: 12, fontSize: 12, color: "#dc2626", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>← Back</button>
+        </div>
+      )}
+
+      {/* Per-keyword progress rows */}
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+          Keyword Pipeline
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {Object.entries(kwProgress).map(([kw, state]) => (
+            <KwPhaseRow key={kw} kw={kw} state={state} />
+          ))}
+        </div>
+      </div>
+
+      {/* Live blueprint cards */}
+      {liveCards.length > 0 && (
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+            Ready Blueprints ({liveCards.length})
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 14 }}>
+            {liveCards.map((bp, i) => (
+              <BlueprintCard key={bp.id || i} blueprint={bp} projectId={projectId} onContentStarted={() => {}} setPage={setPage} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* SSE Console toggle */}
+      <div style={{ marginTop: 20, borderTop: "1px solid #e5e7eb", paddingTop: 14 }}>
+        <button
+          onClick={() => setShowConsole(v => !v)}
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: showConsole ? "#1f2937" : "#6b7280",
+            background: showConsole ? "#eff6ff" : "transparent",
+            border: `1px solid ${showConsole ? "#3b82f6" : "#d1d5db"}`,
+            borderRadius: 6,
+            padding: "6px 12px",
+            cursor: "pointer",
+            marginBottom: showConsole ? 12 : 0,
+            transition: "all .15s",
+          }}
+        >
+          {showConsole ? "▼ Live Console" : "▶ Show Live Console"} ({sseEvents.length})
+        </button>
+        {showConsole && (
+          <SSELogPanel events={sseEvents} />
+        )}
+      </div>
+    </div>
+  )
+
+  // ── STEP: RESULTS ────────────────────────────────────────────────────────
+  return (
+    <div>
+      {/* Results header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <span style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>
+            {filtered.length} Blueprint{filtered.length !== 1 ? "s" : ""}
+          </span>
+          {blueprints.length !== filtered.length && (
+            <span style={{ fontSize: 12, color: "#6b7280", marginLeft: 8 }}>
+              (filtered from {blueprints.length})
+            </span>
+          )}
+        </div>
+        <button
+          onClick={() => { setStep("input"); setBlueprints([]); setLiveCards([]) }}
+          style={{ fontSize: 12, padding: "6px 14px", borderRadius: 7, border: "1px solid #d1d5db", background: "#f9fafb", cursor: "pointer", color: "#374151" }}
+        >
+          + New Generation
+        </button>
+      </div>
+
+      {/* Filter bar */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1 }}>
+          {angleTypes.map(a => (
+            <FilterChipBP
+              key={a}
+              label={a === "all" ? "All angles" : a.replace(/_/g, " ")}
+              active={angleFilter === a}
+              onClick={() => setAngleFilter(a)}
+            />
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 11, color: "#6b7280", whiteSpace: "nowrap" }}>Min score</span>
+          <input
+            type="range" min={0} max={100} step={5} value={minScore}
+            onChange={e => setMinScore(+e.target.value)}
+            style={{ width: 80 }}
+          />
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#374151", minWidth: 24 }}>{minScore}</span>
+        </div>
+      </div>
+
+      {/* Blueprint grid */}
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: "40px 20px", color: "#6b7280" }}>
+          <div style={{ fontSize: 32, marginBottom: 10 }}>📋</div>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>No blueprints match the filter</div>
+          <div style={{ fontSize: 12 }}>Try adjusting the angle filter or lowering the minimum score.</div>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))", gap: 16 }}>
+          {filtered.map((bp, i) => (
+            <BlueprintCard key={bp.id || i} blueprint={bp} projectId={projectId} onContentStarted={() => {}} setPage={setPage} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  MAIN HUB COMPONENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export default function StrategyIntelligenceHub({ projectId, setPage }) {
-  const [activePhase, setActivePhase] = useState("overview")
+export default function StrategyIntelligenceHub({ projectId, setPage, initialTab }) {
+  const [activePhase, setActivePhase] = useState(initialTab || "overview")
   const [selectedSessionId, setSelectedSessionId] = useState(null)
   const [strategySessionId, setStrategySessionId] = useState(null)
   const [showPromptStudio, setShowPromptStudio] = useState(false)
@@ -5564,6 +6221,24 @@ export default function StrategyIntelligenceHub({ projectId, setPage }) {
     enabled: !!projectId,
     retry: false,
   })
+
+  // Load goals for blueprint pre-population
+  const { data: goalProgress } = useQuery({
+    queryKey: ["si-goal-progress", projectId],
+    queryFn: () => apiFetch(`/api/si/${projectId}/goals/progress`).catch(() => null),
+    enabled: !!projectId,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const bpPreloadedGoals = (() => {
+    const g = goalProgress?.goals || strategy?.goals || null
+    if (!g) return null
+    return {
+      business_outcome: g.goal_type || g.business_outcome || "traffic",
+      target_audience: g.target_audience || "",
+      timeframe: g.timeframe_months ? `${g.timeframe_months}_months` : "12_months",
+    }
+  })()
 
   // Auto-init strategy if none exists
   const initMut = useMutation({
@@ -5683,13 +6358,14 @@ export default function StrategyIntelligenceHub({ projectId, setPage }) {
 
         {/* Main content */}
         <div style={{ flex: 1, padding: "20px 24px", overflowY: "auto" }}>
-          {activePhase === "overview"  && <KwSessionsOverview projectId={projectId} setPage={setPage} kw2Sessions={kw2Sessions} selectedSessionId={selectedSessionId} onSelectSession={setSelectedSessionId} onNavigate={setActivePhase} onDevelop={setStrategySessionId} />}
-          {activePhase === "keywords"  && <KeywordPillarsPhase projectId={projectId} setPage={setPage} kw2Session={selectedSession} />}
-          {activePhase === "analysis"  && <AnalysisPhase projectId={projectId} strategy={strategy} kw2Session={selectedSession} />}
-          {activePhase === "strategy"  && <StrategyPhase projectId={projectId} setPage={setPage} selectedSessionId={selectedSessionId} setSelectedSessionId={setSelectedSessionId} kw2Sessions={kw2Sessions} />}
-          {activePhase === "content"   && <ContentHubPhase projectId={projectId} kw2Session={selectedSession} />}
-          {activePhase === "links"     && <LinkBuildingPhase projectId={projectId} kw2Session={selectedSession} />}
-          {activePhase === "goals"     && <GoalsPhase projectId={projectId} />}
+          {activePhase === "overview"    && <KwSessionsOverview projectId={projectId} setPage={setPage} kw2Sessions={kw2Sessions} selectedSessionId={selectedSessionId} onSelectSession={setSelectedSessionId} onNavigate={setActivePhase} onDevelop={setStrategySessionId} />}
+          {activePhase === "keywords"    && <KeywordPillarsPhase projectId={projectId} setPage={setPage} kw2Session={selectedSession} />}
+          {activePhase === "analysis"    && <AnalysisPhase projectId={projectId} strategy={strategy} kw2Session={selectedSession} />}
+          {activePhase === "strategy"    && <StrategyPhase projectId={projectId} setPage={setPage} selectedSessionId={selectedSessionId} setSelectedSessionId={setSelectedSessionId} kw2Sessions={kw2Sessions} />}
+          {activePhase === "content"     && <ContentHubPhase projectId={projectId} kw2Session={selectedSession} />}
+          {activePhase === "links"       && <LinkBuildingPhase projectId={projectId} kw2Session={selectedSession} />}
+          {activePhase === "goals"       && <GoalsPhase projectId={projectId} />}
+          {activePhase === "blueprints"  && <BlueprintEnginePhase projectId={projectId} setPage={setPage} kw2Session={selectedSession} preloadedGoals={bpPreloadedGoals} />}
         </div>
       </div>
     </div>

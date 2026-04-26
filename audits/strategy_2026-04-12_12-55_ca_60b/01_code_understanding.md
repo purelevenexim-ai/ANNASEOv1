@@ -1,0 +1,15 @@
+# Code Understanding
+
+The provided code is part of a larger system called RUFLO, which is a business-agnostic strategy engine that thinks like a human strategist. The main purpose of the system is to help businesses develop strategies based on their industry and target audience.
+
+Here's an overview of the execution flow:
+
+1. Import statements: The code imports various modules such as `os`, `json`, `re`, `time`, `logging`, `datetime`, `timedelta`, `timezone`, `typing`, `dataclasses`, `enum`, `dotenv`, and `requests`. These modules are used throughout the code for various purposes, such as file handling, JSON parsing, regular expressions, time manipulation, logging, and making HTTP requests.
+2. Load environment variables: The code loads environment variables from a `.env` file using the `load_dotenv()` function from the `dotenv` module. This is done to access configuration settings such as API keys and other sensitive information securely.
+3. Define constants and functions: The code defines various constants and functions that are used throughout the code. These include constants related to time zones, logging levels, and error messages, as well as helper functions for formatting dates and times.
+4. Define classes and interfaces: The code defines several classes and interfaces that represent different components of the RUFLO system. These include `Industry`, an enum representing different industries, and various abstract classes and interfaces for different parts of the strategy development process, such as `AudienceChain`, `IntentClassification`, `PersonaElaboration`, `ContextKeywordGeneration`, and `StrategySynthesis`.
+5. Define data structures: The code defines various data structures that are used to represent different parts of the strategy development process. These include lists, dictionaries, and tuples for storing audience chains, intent classifications, persona elaborations, context keyword generations, and final strategies.
+6. Implement routing functions: The code implements several routing functions that handle different parts of the strategy development process. These include `DeepSeek`, which expands audience chains and performs intent classification and scoring, `Gemini`, which elaborates personas and generates context keywords, and `ClaudeSonnet`, which synthesizes the final strategy based on the results of the previous steps.
+7. Main function: The code defines a main function that initializes the RUFLO system, sets up logging, and starts the strategy development process. This function calls various routing functions in sequence to perform each step of the strategy development process.
+
+Overall, the provided code implements a complex business-agnostic strategy engine that thinks like a human strategist. It uses various techniques such as audience intelligence, intent classification, persona elaboration, and context keyword generation to help businesses develop strategies based on their industry and target audience.

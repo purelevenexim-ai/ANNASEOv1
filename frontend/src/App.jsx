@@ -13,9 +13,10 @@ import { create } from "zustand"
 import { useQuery, useMutation, useQueryClient, QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import StrategyPage from "./StrategyPage"
 import StrategyIntelligenceHub from "./StrategyIntelligenceHub"
+import StrategyV2Page from "./StrategyV2Page"
 import DashboardPage from "./DashboardPage"
 import ContentPage from "./ContentPage"
-import KwPage from "./kw2/KwPage"
+import KwV3Page from "./kw3/KwV3Page"
 import GscSetupPage from "./gsc/GscSetupPage"
 import GscSearchPage from "./gsc/GscSearchPage"
 import Notification from "./components/Notification"
@@ -1752,7 +1753,7 @@ function NewProjectPage() {
     onSuccess: (data) => {
       qclient.invalidateQueries(["projects"])
       setProject(data.project_id)
-      setPage("kw2")
+      setPage("kw3")
     }
   })
 
@@ -2546,8 +2547,8 @@ function SystemGraphPage() {
 
 const NAV = [
   { id: "dashboard",    label: "Dashboard" },
-  { id: "kw2",          label: "Keywords" },
-  { id: "strategy-hub", label: "Strategy Hub" },
+  { id: "kw3",          label: "✨ Keywords V3" },
+  { id: "strategy-hub", label: "🎯 Strategy Hub" },
   { id: "content",      label: "Content" },
   { id: "blogs",        label: "Content Calendar" },
   { id: "graph",        label: "System Graph" },
@@ -3387,8 +3388,9 @@ function App() {
 
   const pages = {
     dashboard:    <DashboardPage/>,
-    "kw2":        <KwPage projectId={activeProject}/>,
+    "kw3":        <KwV3Page projectId={activeProject} setPage={setPage}/>,
     strategy:     <StrategyPage projectId={activeProject} setPage={setPage}/>,
+    "strategy-v2": <StrategyIntelligenceHub projectId={activeProject} setPage={setPage} initialTab="blueprints"/>,
     "strategy-hub": <StrategyIntelligenceHub projectId={activeProject} setPage={setPage}/>,
     content:      <ContentPage/>,
     blogs:        <BlogCalendarPage/>,

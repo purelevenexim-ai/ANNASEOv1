@@ -168,7 +168,7 @@ export default function PromptStudio() {
 
   const btnStyle = (variant) => ({
     padding: "6px 16px", borderRadius: 7, fontSize: 12, fontWeight: 600,
-    cursor: "pointer", border: "none",
+    cursor: "pointer",
     background: variant === "primary" ? T.purple : variant === "danger" ? "transparent" : "transparent",
     color: variant === "primary" ? "#fff" : variant === "danger" ? T.red : T.gray,
     border: variant === "danger" ? `1px solid ${T.red}` : variant === "secondary" ? `1px solid ${T.border}` : "none",

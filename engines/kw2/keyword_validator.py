@@ -11,6 +11,7 @@ kw2 Phase 3 — AI Keyword Validation Layer (v2).
 import json
 import hashlib
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from engines.kw2.constants import (
@@ -25,6 +26,8 @@ from engines.kw2.ai_caller import kw2_ai_call, kw2_extract_json
 from engines.kw2 import db
 
 log = logging.getLogger("kw2.validator")
+
+MIN_LITERAL_VALIDATED_PER_PILLAR = 2
 
 # In-memory cache: md5(keyword+universe) → validation result
 _validation_cache: dict[str, dict] = {}
@@ -232,6 +235,7 @@ class KeywordValidator:
                 item["reject_reason"] = f"prescore:{ps}"
                 prescore_rejected.append(item)
         db.update_universe_status([r["id"] for r in prescore_rejected], "rejected", "prescore_low")
+        retention_pool = list(scored)
 
         # Sort by pre-score desc, trim per pillar
         scored.sort(key=lambda x: x["pre_score"], reverse=True)
@@ -265,6 +269,7 @@ class KeywordValidator:
             needs_ai, universe, pillars, negative_scope, ai_provider
         )
         accepted = rule_classified + accepted
+        accepted = self._ensure_literal_pillar_retention(accepted, retention_pool, pillars)
         db.update_universe_status([r["id"] for r in ai_rejected], "rejected", "ai_low_relevance")
         db.update_universe_status([a["id"] for a in accepted], "accepted")
 
@@ -356,6 +361,7 @@ class KeywordValidator:
                 item["reject_reason"] = f"prescore:{ps}"
                 prescore_rejected.append(item)
         db.update_universe_status([r["id"] for r in prescore_rejected], "rejected", "prescore_low")
+        retention_pool = list(scored)
         _elapsed = round((_time.monotonic() - _t0) * 1000)
         _ps_samples = [f"{r['keyword']} ({r['pre_score']:.0f})" for r in sorted(prescore_rejected, key=lambda x: x.get('pre_score', 0))[:3]]
         yield f'data: {json.dumps({"type": "phase", "name": "prescore", "rejected": len(prescore_rejected), "remaining": len(scored), "threshold": PRE_SCORE_THRESHOLD, "elapsed_ms": _elapsed, "samples_rejected": _ps_samples})}\n\n'
@@ -462,6 +468,8 @@ class KeywordValidator:
                 yield ev
             all_accepted.extend(pillar_accepted)
             all_ai_rejected.extend(pillar_rejected)
+
+        all_accepted = self._ensure_literal_pillar_retention(all_accepted, retention_pool, pillars)
 
         db.update_universe_status([r["id"] for r in all_ai_rejected], "rejected", "ai_low_relevance")
         db.update_universe_status([a["id"] for a in all_accepted], "accepted")
@@ -789,3 +797,74 @@ class KeywordValidator:
         if "near me" in kw or "local" in kw:
             return "local"
         return "other"
+
+    def _ensure_literal_pillar_retention(
+        self,
+        accepted: list[dict],
+        pool: list[dict],
+        pillars: list[str],
+    ) -> list[dict]:
+        if not pillars or not pool:
+            return accepted
+
+        accepted_keywords = {
+            (item.get("keyword") or "").strip().lower()
+            for item in accepted
+            if item.get("keyword")
+        }
+
+        for pillar in pillars:
+            literal_matches = [
+                item for item in accepted
+                if self._keyword_matches_pillar(item.get("keyword", ""), pillar)
+            ]
+            if len(literal_matches) >= MIN_LITERAL_VALIDATED_PER_PILLAR:
+                continue
+
+            needed = MIN_LITERAL_VALIDATED_PER_PILLAR - len(literal_matches)
+            candidates = [
+                item for item in pool
+                if (item.get("pillar", "") or "").strip().lower() == pillar.strip().lower()
+                and self._keyword_matches_pillar(item.get("keyword", ""), pillar)
+                and (item.get("keyword") or "").strip().lower() not in accepted_keywords
+            ]
+            candidates.sort(
+                key=lambda item: (float(item.get("pre_score", 0)), float(item.get("raw_score", 0))),
+                reverse=True,
+            )
+
+            for item in candidates[:needed]:
+                promoted = dict(item)
+                classification = self._rule_classify_intent(promoted.get("keyword", ""))
+                if classification:
+                    intent, buyer_readiness, ai_relevance = classification
+                    promoted["intent"] = promoted.get("intent") or intent
+                    promoted["buyer_readiness"] = max(float(promoted.get("buyer_readiness", 0)), buyer_readiness)
+                    promoted["ai_relevance"] = max(float(promoted.get("ai_relevance", 0)), ai_relevance)
+                else:
+                    intent = promoted.get("intent") or self._rule_intent(promoted.get("keyword", ""))
+                    promoted["intent"] = intent
+                    default_readiness = 0.7 if intent in ("transactional", "commercial") else 0.4
+                    promoted["buyer_readiness"] = max(float(promoted.get("buyer_readiness", 0)), default_readiness)
+                    promoted["ai_relevance"] = max(float(promoted.get("ai_relevance", 0)), 0.82)
+                accepted.append(promoted)
+                accepted_keywords.add((promoted.get("keyword") or "").strip().lower())
+
+        return accepted
+
+    def _keyword_matches_pillar(self, keyword: str, pillar: str) -> bool:
+        kw_lower = (keyword or "").strip().lower()
+        return any(term in kw_lower for term in self._pillar_terms(pillar))
+
+    def _pillar_terms(self, pillar: str) -> set[str]:
+        lowered = (pillar or "").strip().lower()
+        core = re.sub(
+            r"\b(kerala|indian|india|premium|organic|natural|pure|best|quality|buy|shop|order|online|supplier|wholesale|bulk|price)\b",
+            " ",
+            lowered,
+        )
+        core = re.sub(r"\s+", " ", core).strip()
+        terms = {lowered}
+        if len(core) >= 3:
+            terms.add(core)
+        return {term for term in terms if len(term) >= 3}

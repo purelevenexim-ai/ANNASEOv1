@@ -1,0 +1,47 @@
+{
+  "q_values": [
+    61.5,
+    60.0,
+    60.0,
+    60.0
+  ],
+  "counts": [
+    1,
+    0,
+    0,
+    0
+  ],
+  "arm_names": [
+    "light",
+    "balanced",
+    "heavy",
+    "minimal"
+  ],
+  "total_updates": 1,
+  "arms": [
+    {
+      "structure_chaos": 0.2,
+      "cognitive_noise": 0.15,
+      "persona_drift": 0.2,
+      "seed": 10
+    },
+    {
+      "structure_chaos": 0.3,
+      "cognitive_noise": 0.2,
+      "persona_drift": 0.25,
+      "seed": 20
+    },
+    {
+      "structure_chaos": 0.4,
+      "cognitive_noise": 0.3,
+      "persona_drift": 0.3,
+      "seed": 30
+    },
+    {
+      "structure_chaos": 0.25,
+      "cognitive_noise": 0.1,
+      "persona_drift": 0.15,
+      "seed": 40
+    }
+  ]
+}

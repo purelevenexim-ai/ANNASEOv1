@@ -1,0 +1,85 @@
+{
+  "timestamp": "2026-04-21",
+  "test_count": 5,
+  "results": [
+    {
+      "keyword": "buy turmeric online kerala",
+      "label": "Transactional (buyer intent)",
+      "scores": {
+        "seo": 70,
+        "aeo": 35,
+        "geo": 75,
+        "humanization": 75,
+        "intelligence": 90
+      },
+      "avg": 69.0,
+      "word_count": 3030,
+      "article_type": "buyer_guide"
+    },
+    {
+      "keyword": "best spices for cooking",
+      "label": "Commercial (comparison intent)",
+      "scores": {
+        "seo": 80,
+        "aeo": 55,
+        "geo": 55,
+        "humanization": 85,
+        "intelligence": 90
+      },
+      "avg": 73.0,
+      "word_count": 2753,
+      "article_type": "comparison_review"
+    },
+    {
+      "keyword": "how to choose kitchen spices",
+      "label": "Informational (how-to)",
+      "scores": {
+        "seo": 95,
+        "aeo": 65,
+        "geo": 70,
+        "humanization": 90,
+        "intelligence": 100
+      },
+      "avg": 84.0,
+      "word_count": 3540,
+      "article_type": "educational_guide"
+    },
+    {
+      "keyword": "alleppey vs erode turmeric",
+      "label": "Comparison (A vs B)",
+      "scores": {
+        "seo": 50,
+        "aeo": 65,
+        "geo": 50,
+        "humanization": 75,
+        "intelligence": 90
+      },
+      "avg": 66.0,
+      "word_count": 2609,
+      "article_type": "comparison_review"
+    },
+    {
+      "keyword": "organic black pepper benefits",
+      "label": "Informational (benefits)",
+      "scores": {
+        "seo": 60,
+        "aeo": 55,
+        "geo": 70,
+        "humanization": 85,
+        "intelligence": 65
+      },
+      "avg": 67.0,
+      "word_count": 2194,
+      "article_type": "educational_guide"
+    }
+  ],
+  "averages": {
+    "seo": 71.0,
+    "aeo": 55.0,
+    "geo": 64.0,
+    "humanization": 82.0,
+    "intelligence": 87.0,
+    "overall": 71.8
+  },
+  "quality_gate_passed": false
+}

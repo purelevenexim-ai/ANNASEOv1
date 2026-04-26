@@ -12,11 +12,20 @@ import EditorPanel from "./content/EditorPanel"
 import { useArticlePolling } from "./hooks/useArticlePolling"
 import NewArticleModal from "./content/NewArticleModal"
 import PipelinePanel from "./content/PipelinePanel"
+import BusinessStoryTab from "./content/BusinessStoryTab"
 
 // ── Main ContentPage ───────────────────────────────────────────────────────────
 export default function ContentPage() {
-  const { activeProject } = useStore()
+  const { activeProject, setProject } = useStore()
   const qclient = useQueryClient()
+
+  // Project list for inline selector
+  const { data: projectsData } = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => api.get("/api/projects").then(r => r?.projects || []),
+    staleTime: 60_000,
+  })
+  const projects = projectsData || []
 
   // UI state
   const [tab, setTab] = useState("articles")
@@ -57,10 +66,23 @@ export default function ContentPage() {
     }
   }, [articles]) // eslint-disable-line
 
+  // ── Inline project selector (shown when no project selected) ──────────────
   if (!activeProject) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 300, color: T.textSoft, fontSize: 13 }}>
-        Select a project to manage content.
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 300, gap: 16 }}>
+        <div style={{ fontSize: 13, color: T.textSoft }}>Select a project to manage content</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", maxWidth: 600 }}>
+          {projects.map(p => (
+            <button key={p.project_id} onClick={() => setProject(p.project_id)}
+              style={{ padding: "8px 16px", borderRadius: 8, border: `1px solid ${T.border}`,
+                background: "#fff", cursor: "pointer", fontSize: 13, color: T.text,
+                boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+              }}>
+              {p.name || p.project_id}
+            </button>
+          ))}
+          {projects.length === 0 && <div style={{ fontSize: 12, color: T.textSoft }}>No projects found. Create one from the Dashboard.</div>}
+        </div>
       </div>
     )
   }
@@ -82,11 +104,37 @@ export default function ContentPage() {
         <div style={{ display: "flex", gap: 4 }}>
           {tabBtn("articles", "Articles")}
           {tabBtn("pipeline", "Pipeline")}
+          {tabBtn("business-story", "Business Story")}
           {tabBtn("aihub", "AI Hub")}
           {tabBtn("ai-analytics", "AI Cost")}
           {tabBtn("prompt-studio", "Prompt Studio")}
         </div>
+        {/* Project switcher */}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 11, color: T.textSoft }}>Project:</span>
+          <select
+            value={activeProject || ""}
+            onChange={e => e.target.value && setProject(e.target.value)}
+            style={{
+              fontSize: 12, padding: "4px 8px", borderRadius: 6,
+              border: `1px solid ${T.border}`, background: "#fff",
+              color: T.text, cursor: "pointer", maxWidth: 180,
+            }}
+          >
+            {!activeProject && <option value="">— select —</option>}
+            {projects.map(p => (
+              <option key={p.project_id} value={p.project_id}>{p.name || p.project_id}</option>
+            ))}
+          </select>
+        </div>
       </div>
+
+      {/* Business Story tab */}
+      {tab === "business-story" && (
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          <BusinessStoryTab />
+        </div>
+      )}
 
       {/* Prompt Studio tab */}
       {tab === "prompt-studio" && (

@@ -36,8 +36,8 @@ class EditorialIntelligenceEngine:
         clues = [
             "For example, ",
             "Consider the story of ",
-            "In our experience, ",
-            "We tested ",
+            "From a buyer perspective, ",
+            "In practice, ",
             "Research shows that ",
             "A case study",
             "Consider a ",

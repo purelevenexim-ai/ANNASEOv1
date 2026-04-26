@@ -115,6 +115,189 @@ function IterationCountdown() {
   )
 }
 
+// ── Error-Pause Modal — shown when a pipeline step fails ─────────────────────
+// isLive=true  → pipeline is actively paused on this error (use ai-recovery endpoint)
+// isLive=false → pipeline moved on; user manually clicked Resolve (use rerun-step)
+function ErrorPauseModal({ articleId, stepName, stepNum, isLive, providers, healthData, onDismiss }) {
+  const qc = useQueryClient()
+  const [selectedProvider, setSelectedProvider] = useState("groq")
+  const [mode, setMode] = useState("main") // main | change_ai
+
+  const recovery = useMutation({
+    mutationFn: (payload) => api.post(`/api/content/${articleId}/pipeline/ai-recovery`, payload),
+    onSuccess: () => { qc.invalidateQueries(["pipeline", articleId]); onDismiss() },
+  })
+  const rerun = useMutation({
+    mutationFn: (payload) => api.post(`/api/content/${articleId}/pipeline/rerun-step`, payload),
+    onSuccess: () => { qc.invalidateQueries(["pipeline", articleId]); onDismiss() },
+  })
+  const cancel = useMutation({
+    mutationFn: () => api.post(`/api/content/${articleId}/pipeline/cancel`),
+    onSuccess: () => { qc.invalidateQueries(["pipeline", articleId]); qc.invalidateQueries(["articles"]); onDismiss() },
+  })
+
+  const isPending = recovery.isPending || rerun.isPending || cancel.isPending
+
+  const handleRetryLive = (provider) => recovery.mutate({ action: "retry", provider: provider || "" })
+  const handleRetryRerun = (provider) => {
+    // For step already passed: re-run from this step with updated AI if provided
+    if (provider) {
+      // Update AI routing first, then rerun
+      api.post(`/api/content/${articleId}/pipeline/update-step`, { step: stepNum, first: provider })
+        .then(() => rerun.mutate({ step: stepNum, step_mode: "auto" }))
+        .catch(() => rerun.mutate({ step: stepNum, step_mode: "auto" }))
+    } else {
+      rerun.mutate({ step: stepNum, step_mode: "auto" })
+    }
+  }
+
+  const handleRetry = () => {
+    const provider = mode === "change_ai" ? selectedProvider : ""
+    if (isLive) handleRetryLive(provider)
+    else handleRetryRerun(provider)
+  }
+  const handleSkip = () => {
+    if (isLive) recovery.mutate({ action: "skip" })
+    else onDismiss() // pipeline already moved on — just close
+  }
+  const handleCancel = () => {
+    if (isLive) recovery.mutate({ action: "cancel" })
+    else cancel.mutate()
+  }
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 1000,
+      background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div style={{
+        background: "#fff", borderRadius: 14, padding: 28, maxWidth: 440, width: "90%",
+        boxShadow: "0 24px 64px rgba(0,0,0,0.22)",
+        border: "1.5px solid #ef444420",
+      }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
+            background: "#fef2f2", border: "2px solid #ef444430",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18,
+          }}>⚠️</div>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "#111" }}>Step Failed</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              {stepName ? `Step ${stepNum}: ${stepName}` : `Step ${stepNum}`} encountered an error
+            </div>
+            {!isLive && (
+              <div style={{ fontSize: 11, marginTop: 4, padding: "3px 8px", borderRadius: 4, background: "#fef3c7", color: "#92400e", display: "inline-block" }}>
+                Pipeline has moved on — you can re-run from this step
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Change AI section */}
+        {mode === "change_ai" && (
+          <div style={{
+            marginBottom: 16, padding: "10px 12px", borderRadius: 8,
+            background: "#f8fafc", border: "1px solid #e2e8f0",
+          }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
+              Select AI provider for retry
+            </div>
+            <AISelect
+              value={selectedProvider}
+              onChange={setSelectedProvider}
+              disabled={isPending}
+              providers={providers}
+              healthData={healthData}
+            />
+          </div>
+        )}
+
+        {/* Action buttons */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {mode === "main" ? (
+            <button
+              onClick={() => setMode("change_ai")}
+              style={{
+                width: "100%", padding: "10px 16px", borderRadius: 8, border: "none",
+                background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 13,
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              }}>
+              🔄 Change AI Model &amp; Retry
+            </button>
+          ) : (
+            <button
+              onClick={handleRetry}
+              disabled={isPending}
+              style={{
+                width: "100%", padding: "10px 16px", borderRadius: 8, border: "none",
+                background: "#3b82f6", color: "#fff", fontWeight: 700, fontSize: 13,
+                cursor: isPending ? "default" : "pointer", opacity: isPending ? 0.6 : 1,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              }}>
+              {isPending ? "Retrying…" : "↻ Retry with selected model"}
+            </button>
+          )}
+
+          <button
+            onClick={handleRetry}
+            disabled={isPending || mode === "change_ai"}
+            style={{
+              width: "100%", padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+              border: "1.5px solid #d1d5db", background: "#f9fafb", color: "#374151",
+              cursor: isPending ? "default" : "pointer", opacity: (isPending || mode === "change_ai") ? 0.5 : 1,
+            }}>
+            ↻ Retry (same AI chain)
+          </button>
+
+          {isLive && (
+            <button
+              onClick={handleSkip}
+              disabled={isPending}
+              style={{
+                width: "100%", padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+                border: "1.5px solid #f59e0b40", background: "#fef3c720", color: "#92400e",
+                cursor: isPending ? "default" : "pointer", opacity: isPending ? 0.5 : 1,
+              }}>
+              ⏭ Skip this step &amp; continue
+            </button>
+          )}
+
+          <button
+            onClick={onDismiss}
+            disabled={isPending}
+            style={{
+              width: "100%", padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+              border: "1.5px solid #c4b5fd40", background: "#f5f3ff", color: "#6d28d9",
+              cursor: isPending ? "default" : "pointer", opacity: isPending ? 0.5 : 1,
+            }}>
+            {isLive ? "⏸ Wait (keep paused, decide later)" : "✕ Close"}
+          </button>
+
+          <button
+            onClick={handleCancel}
+            disabled={isPending}
+            style={{
+              width: "100%", padding: "9px 16px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+              border: "1.5px solid #ef444430", background: "#fef2f2", color: "#dc2626",
+              cursor: isPending ? "default" : "pointer", opacity: isPending ? 0.5 : 1,
+            }}>
+            ✕ Cancel pipeline
+          </button>
+        </div>
+
+        {mode === "change_ai" && (
+          <button onClick={() => setMode("main")} style={{
+            marginTop: 10, fontSize: 10, color: "#9ca3af", background: "none", border: "none",
+            cursor: "pointer", textDecoration: "underline",
+          }}>← Back</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Live pipeline progress (full panel) ──────────────────────────────────────
 function PipelineProgress({ articleId, onComplete }) {
   const qc = useQueryClient()
@@ -127,6 +310,8 @@ function PipelineProgress({ articleId, onComplete }) {
   const [ollamaServers, setOllamaServers] = useState([])
   const [recoveryProvider, setRecoveryProvider] = useState("groq")
   const [ctrlMsg, setCtrlMsg] = useState({ text: "", isError: false })
+  const [errorModalDismissed, setErrorModalDismissed] = useState(false)
+  const [manualResolveStep, setManualResolveStep] = useState(null) // step clicked to manually resolve
 
   const flash = (text, isError = false) => {
     setCtrlMsg({ text, isError })
@@ -225,6 +410,8 @@ function PipelineProgress({ articleId, onComplete }) {
   const ruleResults = data?.rule_results || null
   const isPaused = data?.is_paused || false
   const aiRecoveryNeeded = data?.ai_recovery_needed || false
+  const aiRecoveryStep = data?.ai_recovery_step || null
+  const aiRecoveryStepName = data?.ai_recovery_step_name || null
   const stepMode = data?.step_mode || "auto"
   const iteration = data?.iteration || {}
   const doneCount = steps.filter(s => s.status === "done").length
@@ -233,6 +420,22 @@ function PipelineProgress({ articleId, onComplete }) {
   const pausedStep = steps.find(s => s.status === "paused")
   const totalSteps = STEP_DEFS.length
   const pct = Math.round((doneCount / totalSteps) * 100)
+
+  // Show modal when a new error-pause is triggered
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const prevRecoveryNeeded = useRef(false)
+  useEffect(() => {
+    if (aiRecoveryNeeded && !prevRecoveryNeeded.current) {
+      setErrorModalDismissed(false) // re-show modal on new error
+    }
+    prevRecoveryNeeded.current = aiRecoveryNeeded
+  }, [aiRecoveryNeeded])
+
+  const showErrorModal = (aiRecoveryNeeded && !errorModalDismissed) || manualResolveStep !== null
+  const modalStepNum = manualResolveStep ?? aiRecoveryStep
+  const modalStepName = manualResolveStep
+    ? (STEP_DEFS.find(d => d.n === manualResolveStep)?.label || null)
+    : aiRecoveryStepName
 
   return (
     <div style={{ padding: 20, maxWidth: 620, margin: "0 auto", width: "100%" }}>
@@ -479,6 +682,18 @@ function PipelineProgress({ articleId, onComplete }) {
                   }}>{_getProviderLabel(routing.first)}</span>
                 )}
 
+                {/* Resolve button on error steps */}
+                {isError && (
+                  <button
+                    onClick={e => { e.stopPropagation(); setManualResolveStep(def.n) }}
+                    style={{
+                      fontSize: 9, padding: "3px 8px", borderRadius: 5, border: "1px solid #ef444440",
+                      background: "#fef2f2", color: "#dc2626", fontWeight: 700, cursor: "pointer", flexShrink: 0,
+                    }}>
+                    Resolve
+                  </button>
+                )}
+
                 {/* Log count */}
                 {stepLogs.length > 0 && (
                   <span style={{ fontSize: 8, color: T.textSoft, flexShrink: 0 }}>
@@ -605,6 +820,41 @@ function PipelineProgress({ articleId, onComplete }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── Error-pause notification bar (when modal is dismissed but still paused) ── */}
+      {aiRecoveryNeeded && errorModalDismissed && (
+        <div style={{
+          marginTop: 10, padding: "8px 12px", borderRadius: 8,
+          background: "#fef2f2", border: "1.5px solid #ef444430",
+          display: "flex", alignItems: "center", gap: 8,
+        }}>
+          <span style={{ fontSize: 14 }}>⚠️</span>
+          <div style={{ flex: 1, fontSize: 11, color: "#dc2626", fontWeight: 600 }}>
+            Pipeline paused on error — step {aiRecoveryStep}: {aiRecoveryStepName}
+          </div>
+          <button
+            onClick={() => setErrorModalDismissed(false)}
+            style={{
+              fontSize: 10, padding: "4px 10px", borderRadius: 6, border: "1px solid #ef444440",
+              background: "#fef2f2", color: "#dc2626", fontWeight: 700, cursor: "pointer",
+            }}>
+            Resolve
+          </button>
+        </div>
+      )}
+
+      {/* ── Error-pause modal ── */}
+      {showErrorModal && (
+        <ErrorPauseModal
+          articleId={articleId}
+          stepNum={modalStepNum}
+          stepName={modalStepName}
+          isLive={aiRecoveryNeeded && manualResolveStep === null}
+          providers={aiProviders}
+          healthData={healthData}
+          onDismiss={() => { setErrorModalDismissed(true); setManualResolveStep(null) }}
+        />
       )}
     </div>
   )

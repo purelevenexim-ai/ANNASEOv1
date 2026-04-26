@@ -30,6 +30,8 @@ from engines.kw2 import db
 
 log = logging.getLogger("kw2.generator")
 
+MIN_LITERAL_ANCHORS_PER_PILLAR = 3
+
 
 class KeywordUniverseGenerator:
     """Phase 2: Generate a keyword universe from business profile data."""
@@ -116,6 +118,11 @@ class KeywordUniverseGenerator:
         ai_kws = self._ai_expand(pillars, modifiers, universe, ai_provider)
         all_keywords.extend(ai_kws)
         stats["ai_expand"] = len(ai_kws)
+
+        anchor_kws = self._ensure_literal_pillar_anchors(all_keywords, pillars, modifiers)
+        if anchor_kws:
+            all_keywords.extend(anchor_kws)
+            stats["anchor"] = len(anchor_kws)
 
         # Filter + dedup
         passed, rejected = self._negative_filter(all_keywords, negative_scope)
@@ -340,6 +347,14 @@ class KeywordUniverseGenerator:
                 if ai_kws:
                     db.bulk_insert_universe(session_id, project_id, ai_kws)
                 yield f'data: {json.dumps({"type": "progress", "source": "ai_expand", "pillar": pillar, "count": len(ai_kws)})}\n\n'
+
+        _all_pre_filter = db.load_universe_items(session_id, status="raw")
+        _anchor_kws = self._dedup_batch(
+            self._ensure_literal_pillar_anchors(_all_pre_filter, pillars, modifiers)
+        )
+        if _anchor_kws:
+            db.bulk_insert_universe(session_id, project_id, _anchor_kws)
+            yield f'data: {json.dumps({"type": "progress", "source": "anchor", "count": len(_anchor_kws)})}\n\n'
 
         # Final: load ALL raw items from DB, filter + dedup, update statuses
         all_raw = db.load_universe_items(session_id, status="raw")
@@ -926,6 +941,7 @@ class KeywordUniverseGenerator:
         Returns (kept_count, trimmed_count).
         """
         _source_priority = {
+            "anchor": 1.0,
             "seeds": 1.0, "bi_strategy": 0.95, "bi_competitor": 0.90,
             "rules": 0.85, "attribute": 0.80, "audience": 0.75, "problem": 0.70,
         }
@@ -959,6 +975,111 @@ class KeywordUniverseGenerator:
         if trimmed_ids:
             db.update_universe_status(trimmed_ids, "trimmed")
         return len(kept_ids), len(trimmed_ids)
+
+    def _ensure_literal_pillar_anchors(
+        self,
+        keywords: list[dict],
+        pillars: list[str],
+        modifiers: list[str],
+    ) -> list[dict]:
+        """Inject a small anchor pack when a pillar has too few literal matches upstream."""
+        if not pillars:
+            return []
+
+        existing_norms = {
+            self._normalize(kw.get("keyword", ""))
+            for kw in (keywords or [])
+            if kw.get("keyword")
+        }
+
+        injected: list[dict] = []
+        for pillar in pillars:
+            terms = self._pillar_anchor_terms(pillar)
+            literal_count = sum(
+                1 for kw in (keywords or [])
+                if self._keyword_matches_terms(kw.get("keyword", ""), terms)
+            )
+            if literal_count >= MIN_LITERAL_ANCHORS_PER_PILLAR:
+                continue
+
+            needed = MIN_LITERAL_ANCHORS_PER_PILLAR - literal_count
+            for candidate in self._build_anchor_pack(pillar, modifiers):
+                norm = self._normalize(candidate["keyword"])
+                if not norm or norm in existing_norms:
+                    continue
+                existing_norms.add(norm)
+                injected.append(candidate)
+                needed -= 1
+                if needed <= 0:
+                    break
+
+        return injected
+
+    def _build_anchor_pack(self, pillar: str, modifiers: list[str]) -> list[dict]:
+        core = self._extract_core_term(pillar)
+        ordered_modifiers = self._prioritize_anchor_modifiers(modifiers)
+
+        candidates = [
+            pillar,
+            f"buy {core}",
+            f"{core} online",
+            f"{core} wholesale",
+        ]
+        if core.lower() != pillar.lower():
+            candidates.insert(1, core)
+
+        for modifier in ordered_modifiers[:4]:
+            candidates.append(f"{modifier} {pillar}")
+            candidates.append(f"{pillar} {modifier}")
+            if core.lower() != pillar.lower():
+                candidates.append(f"{modifier} {core}")
+                candidates.append(f"{core} {modifier}")
+
+        seen: set[str] = set()
+        anchor_rows: list[dict] = []
+        for keyword in candidates:
+            norm = self._normalize(keyword)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            anchor_rows.append({
+                "keyword": keyword.strip().lower(),
+                "source": "anchor",
+                "pillar": pillar,
+                "raw_score": 82.0,
+            })
+        return anchor_rows
+
+    def _prioritize_anchor_modifiers(self, modifiers: list[str]) -> list[str]:
+        priority = {
+            "organic": 0,
+            "natural": 1,
+            "premium": 2,
+            "bulk": 3,
+            "wholesale": 4,
+            "supplier": 5,
+            "online": 6,
+            "price": 7,
+        }
+        unique: list[str] = []
+        seen: set[str] = set()
+        for modifier in modifiers or []:
+            mod = str(modifier).strip().lower()
+            if mod and mod not in seen:
+                seen.add(mod)
+                unique.append(mod)
+        return sorted(unique, key=lambda mod: (priority.get(mod, 100), mod))
+
+    def _pillar_anchor_terms(self, pillar: str) -> set[str]:
+        terms = {pillar.strip().lower()}
+        core = self._extract_core_term(pillar)
+        if core:
+            terms.add(core.strip().lower())
+        return {term for term in terms if len(term) >= 3}
+
+    def _keyword_matches_terms(self, keyword: str, terms: set[str]) -> bool:
+        kw_lower = (keyword or "").strip().lower()
+        return any(term in kw_lower for term in terms)
 
     def _extract_core_term(self, pillar: str) -> str:
         """Strip weight, size, geo, promo and quality noise from a product pilar name.

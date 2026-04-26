@@ -23,7 +23,7 @@ import re
 import time
 from typing import Dict, Optional, Callable
 
-from engines.humanize.splitter import split_into_sections, reassemble_sections
+from engines.humanize.splitter import split_into_sections, reassemble_sections, depattern_sections
 from engines.humanize.auditor import analyze_ai_signals
 from engines.humanize.semantic_lock import extract_seo_anchors, validate_seo_preservation
 from engines.humanize.humanizer import humanize_section, humanize_targeted
@@ -35,8 +35,41 @@ from engines.humanize.editorial import (
     editorial_rewrite,
     normalize_keyword_density,
 )
+from engines.humanize.interrupter import apply_cognitive_interruptions, apply_burstiness_fix
+from engines.humanize.story_injector import inject_micro_story
+from engines.humanize.humanization_v2 import apply_humanization_v2, V2Config
+from engines.humanize.humanization_bandit import _bandit
 
 log = logging.getLogger("annaseo.humanize")
+
+DETECTOR_TARGET_AI_SCORE = 40
+
+
+def _infer_persona(keyword: str) -> str:
+    """Return a lightweight persona string based on keyword category.
+
+    Deterministic — no LLM call. Covers common SEO niches; returns empty
+    string for anything that doesn't match (safe fallback).
+    """
+    kw = keyword.lower()
+    # Check more specific categories first to avoid false matches
+    if any(w in kw for w in ["dog", "cat", "pet", "puppy", "kitten", "vet", "animal"]):
+        return "a veterinary technician and long-time pet owner"
+    if any(w in kw for w in ["recipe", "cook", "food", "meal", "dish", "bake", "kitchen"]):
+        return "a home cook who has made this dozens of times and knows the real shortcuts"
+    if any(w in kw for w in ["supplement", "vitamin", "protein", "fitness", "workout", "gym"]):
+        return "a certified personal trainer who recommends evidence-based products"
+    if any(w in kw for w in ["spice", "herb", "seasoning", "pepper", "cardamom", "cinnamon", "clove", "turmeric"]):
+        return "a culinary professional with 15 years sourcing and tasting specialty ingredients"
+    if any(w in kw for w in ["hair", "skin", "beauty", "serum", "moistur", "shampoo", "conditioner"]):
+        return "a licensed esthetician who tests products on real clients"
+    if any(w in kw for w in ["seo", "marketing", "content", "blog", "keyword", "traffic", "ranking"]):
+        return "a digital marketing strategist who has run hundreds of SEO campaigns"
+    if any(w in kw for w in ["invest", "stock", "finance", "budget", "saving", "money", "crypto"]):
+        return "a certified financial planner who writes for a general audience"
+    if any(w in kw for w in ["travel", "hotel", "flight", "destination", "trip", "vacation"]):
+        return "a frequent traveler who books 20+ trips a year and shares honest reviews"
+    return ""
 
 
 def run_humanize_pipeline(
@@ -97,7 +130,10 @@ def run_humanize_pipeline(
     original_score = original_audit["score"]
     progress("analyzed", 1, 1,
              f"AI score: {original_score}/100 — {len(original_audit.get('signals', []))} signals found",
-             score=original_score, signals=original_audit.get("signals", []))
+             score=original_score,
+             ai_score=original_audit.get("ai_score"),
+             risk_level=original_audit.get("risk_level"),
+             signals=original_audit.get("signals", []))
 
     if _check_stopped():
         return _stopped_result(html, original_score, start_time)
@@ -162,10 +198,23 @@ def run_humanize_pipeline(
     # Build article outline (all headings) for global context injection into each section rewrite
     article_outline = [s.get("heading", "") for s in sections if s.get("heading")]
 
+    # Auto-infer persona when caller did not supply one
+    if not persona:
+        persona = _infer_persona(keyword)
+        if persona:
+            log.debug("Auto-persona inferred: %s", persona[:80])
+
+    # Select V2 config via bandit BEFORE section loop (one config per article run)
+    try:
+        _v2_config, _v2_arm_idx = _bandit.select()
+    except Exception:
+        _v2_config, _v2_arm_idx = V2Config(), 1  # safe fallback: balanced arm
+
     # ── Step 5: Humanize each section ─────────────────────────────────────
     ai_signal_texts = [s["detail"] for s in original_audit.get("signals", [])]
     sections_processed = 0
     section_details = []
+    _section_format_cycle = ["", "qa", "bullets", "story", "comparison", "stat_lead"]
 
     for i, section in enumerate(target_sections):
         if _check_stopped():
@@ -184,6 +233,10 @@ def run_humanize_pipeline(
         # Find links in this section
         section_links = [l for l in seo_anchors["links"] if l["full"] in section["content"]]
 
+        # Rotate section format hints — skip format for first section (intro) and last section (conclusion)
+        _is_edge = (i == 0 or i == len(target_sections) - 1)
+        section_fmt = "" if _is_edge else _section_format_cycle[i % len(_section_format_cycle)]
+
         result = humanize_section(
             section["content"],
             keyword,
@@ -194,6 +247,7 @@ def run_humanize_pipeline(
             links=section_links,
             outline=article_outline,
             ai_router=ai_router,
+            section_format=section_fmt,
         )
 
         provider = result.get("provider", "none")
@@ -229,8 +283,58 @@ def run_humanize_pipeline(
         return _stopped_result(html, original_score, start_time, sections_processed, total_sections)
 
     # ── Step 5: Reassemble ────────────────────────────────────────────────
+    try:
+        sections = depattern_sections(sections)
+        progress("depattern_sections", 1, 1, "✓ Section openings and cadence de-patterned")
+    except Exception as e:
+        log.warning("Section de-patterning failed (non-fatal): %s", e)
     progress("assembling", 0, 1, "Reassembling article...")
     humanized_html = reassemble_sections(sections)
+
+    # ── Step 5.1: Burstiness fix (deterministic, no LLM) ─────────────────
+    if not _check_stopped():
+        try:
+            humanized_html = apply_burstiness_fix(humanized_html)
+            progress("burstiness", 1, 1, "✓ Sentence burstiness applied")
+        except Exception as e:
+            log.warning("Burstiness fix failed (non-fatal): %s", e)
+
+    # ── Step 5.2: Cognitive interruptions + micro-story (optional) ───────
+    if not _check_stopped() and section_index is None:
+        try:
+            humanized_html = apply_cognitive_interruptions(humanized_html)
+            progress("interruptions", 1, 1, "✓ Cognitive interruptions injected")
+        except Exception as e:
+            log.warning("Interruption injection failed (non-fatal): %s", e)
+        try:
+            humanized_html = inject_micro_story(humanized_html, keyword, ai_router=ai_router)
+            progress("micro_story", 1, 1, "✓ Micro-story pass done")
+        except Exception as e:
+            log.warning("Micro-story injection failed (non-fatal): %s", e)
+
+    # ── Step 5.3: Humanization V2 — structure chaos / noise / persona drift ──
+    if not _check_stopped():
+        try:
+            humanized_html = apply_humanization_v2(
+                humanized_html,
+                config=_v2_config,
+                detector_metrics=original_audit.get("detector_metrics", {}),
+            )
+            arm_name = _v2_config.__class__.__name__
+            try:
+                from engines.humanize.humanization_bandit import _ARM_NAMES
+                arm_name = _ARM_NAMES[_v2_arm_idx]
+            except Exception:
+                pass
+            progress(
+                "v2_mutation",
+                1,
+                1,
+                f"✓ Humanization V2 applied (arm: {arm_name})",
+                original_ai_score=original_audit.get("ai_score"),
+            )
+        except Exception as e:
+            log.warning("Humanization V2 failed (non-fatal): %s", e)
 
     # ── Step 5.5: Keyword density normalization (rule-based, no LLM) ────
     if not _check_stopped():
@@ -379,6 +483,10 @@ def run_humanize_pipeline(
                              section_index=fix_sec["index"])
 
             if fixed_count > 0:
+                try:
+                    sections = depattern_sections(sections)
+                except Exception as e:
+                    log.warning("Post-fix section de-patterning failed (non-fatal): %s", e)
                 # Reassemble with fixes applied
                 humanized_html = reassemble_sections(sections)
                 progress("iterated", fixed_count, len(sections_to_fix),
@@ -404,11 +512,89 @@ def run_humanize_pipeline(
     final_audit = analyze_ai_signals(humanized_html)
     final_score = final_audit["score"]
 
+    # ── Step 11.5: Detector validation gate — one stronger safe pass if needed ──
+    final_ai_score = final_audit.get("ai_score", 100)
+    detector_retry_applied = False
+    if (
+        section_index is None
+        and not _check_stopped()
+        and final_ai_score > DETECTOR_TARGET_AI_SCORE
+    ):
+        _wait_if_paused()
+        progress(
+            "detector_validate",
+            0,
+            1,
+            f"Detector score {final_ai_score}/100 above target {DETECTOR_TARGET_AI_SCORE} — applying stronger safe pass...",
+            ai_score=final_ai_score,
+            target=DETECTOR_TARGET_AI_SCORE,
+        )
+        retry_config = V2Config(
+            structure_chaos=min(0.55, _v2_config.structure_chaos + 0.12),
+            cognitive_noise=min(0.40, _v2_config.cognitive_noise + 0.10),
+            persona_drift=min(0.40, _v2_config.persona_drift + 0.08),
+            micro_human_signals=min(0.30, getattr(_v2_config, "micro_human_signals", 0.18) + 0.08),
+            seed=(getattr(_v2_config, "seed", 0) or 0) + 101,
+        )
+        try:
+            candidate_html = apply_humanization_v2(
+                humanized_html,
+                config=retry_config,
+                detector_metrics=final_audit.get("detector_metrics", {}),
+            )
+            try:
+                candidate_html = normalize_keyword_density(
+                    candidate_html, keyword, max_density=1.8, min_density=0.8, min_occurrences=3
+                )
+            except Exception as e:
+                log.warning("Detector retry density normalization failed: %s", e)
+
+            candidate_audit = analyze_ai_signals(candidate_html)
+            candidate_ai_score = candidate_audit.get("ai_score", final_ai_score)
+            candidate_rule_score = candidate_audit["score"]
+
+            # Accept only genuine detector improvement. Small rule-score drops are tolerable
+            # if the detector score improves materially.
+            if candidate_ai_score < final_ai_score and candidate_rule_score >= max(final_score - 8, 0):
+                humanized_html = candidate_html
+                final_audit = candidate_audit
+                final_score = candidate_rule_score
+                final_ai_score = candidate_ai_score
+                detector_retry_applied = True
+                progress(
+                    "detector_validate",
+                    1,
+                    1,
+                    f"✓ Detector safe pass accepted ({final_ai_score}/100)",
+                    ai_score=final_ai_score,
+                )
+            else:
+                progress(
+                    "detector_validate",
+                    1,
+                    1,
+                    f"No detector gain from safe pass ({candidate_ai_score}/100) — keeping prior version",
+                    ai_score=final_ai_score,
+                )
+        except Exception as e:
+            log.warning("Detector validation pass failed (non-fatal): %s", e)
+            progress("detector_validate", 1, 1, f"⚠ Detector pass skipped: {str(e)[:60]}")
+
+    # Update bandit with the final AI-detection score (only for full article runs)
+    if section_index is None:
+        try:
+            _bandit.update(_v2_arm_idx, final_score)
+        except Exception as e:
+            log.debug("Bandit update failed (non-fatal): %s", e)
+
     elapsed = round(time.time() - start_time, 1)
     improvement = final_score - original_score
     progress("done", sections_processed, len(target_sections),
              f"Score: {original_score} → {final_score} (+{improvement}) | Judge: {judge_score}/100 | {elapsed}s",
              original_score=original_score, final_score=final_score,
+             original_ai_score=original_audit.get("ai_score"),
+             final_ai_score=final_audit.get("ai_score"),
+             detector_retry_applied=detector_retry_applied,
              judge_score=judge_score, elapsed=elapsed)
 
     return {
@@ -425,6 +611,11 @@ def run_humanize_pipeline(
             "sections": section_details,
             "original_signals": original_audit.get("signals", []),
             "final_signals": final_audit.get("signals", []),
+            "original_detector_metrics": original_audit.get("detector_metrics", {}),
+            "final_detector_metrics": final_audit.get("detector_metrics", {}),
+            "original_detector_scores": original_audit.get("detector_scores", {}),
+            "final_detector_scores": final_audit.get("detector_scores", {}),
+            "detector_retry_applied": detector_retry_applied,
             "judge": judge_result,
         },
         "tokens_used": total_tokens,

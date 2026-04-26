@@ -55,6 +55,12 @@ REQUIRED \u2014 at least 3 H2s must be question-format:
 REQUIRED \u2014 H1 must contain one power word:
   best / proven / ultimate / complete / expert guide / essential / definitive
 
+VALUE-FIRST FLOW (AEO/GEO):
+  - If intent is commercial/transactional (buying/comparison/pricing): H2 #1 MUST satisfy the primary intent fast.
+    Examples: "Top [X] Options (Quick Verdict)", "Best [X] (Shortlist + Table)", "[X] Comparison (Best Overall + Best For\u2026)".
+  - Do NOT start with slow education headings ("What is\u2026", "How it works") for buyer-intent keywords.
+  - Ensure at least one early section (H2 #1 or #2) can support a comparison table (3\u00d73+) and explicit verdicts.
+
 REQUIRED \u2014 H2s must be specific with numbers or concrete details:
   BAD:  \u201cBenefits of Black Pepper\u201d
   GOOD: \u201c5 Clinically-Backed Benefits of Black Pepper for Digestion\u201d
@@ -93,8 +99,8 @@ HOOK (P7.61): The very first sentence must open with a question, specific stat, 
   BAD:  \u201cBlack pepper is a popular spice.\u201d
   GOOD: \u201cDid you know black pepper boosts curcumin absorption by 2000%?\u201d
 
-EXPERIENCE (G2): Include 2-3 authentic first-person signals:
-  \u201cWhen we tested this\u2026\u201d, \u201cIn our experience\u2026\u201d, \u201cI found that\u2026\u201d
+REAL-WORLD PROOF (G2): Include 2-3 third-person proof signals (no first-person fabrication):
+  \u201cIn practice\u2026\u201d, \u201cCase study: \u2026\u201d, \u201cReal-world example: \u2026\u201d, \u201cFrom a buyer perspective\u2026\u201d
 
 ENTITIES (G3): 6+ named entities per 1000 words \u2014 researchers, studies with year+journal, locations, companies.
   Example: \u201cA 2019 study in Critical Reviews in Food Science (Panjab University)\u2026\u201d
@@ -113,10 +119,11 @@ OBJECTIONS (P7.65): Address one reader doubt:
 LIMITATIONS (P6.60): Acknowledge one limitation:
   \u201cHowever, keep in mind\u2026\u201d / \u201cThe caveat here is\u2026\u201d / \u201cImportant to note\u2026\u201d
 
-STORYTELLING (P7.68): 2+ storytelling markers:
-  \u201cFor example, imagine\u2026\u201d / \u201cPicture this:\u201d / \u201cWhen we analysed\u2026\u201d
+STORYTELLING (P7.68): 2+ storytelling markers (third-person):
+  \u201cFor example, imagine\u2026\u201d / \u201cPicture this:\u201d / \u201cConsider a buyer who\u2026\u201d
 
-PERSONAL PRONOUNS (P7.66): Use \u201cyou/your/we/our/I\u201d \u2014 5+ total occurrences.
+ANSWER-FIRST (AEO):
+  For each section and each FAQ answer: the first sentence must directly answer the question/intent (no preamble like \u201cIt depends\u201d).
 
 QUESTION HEADINGS (G8): At least 3 H2s must be question-format:
   \u2713 \u201cWhat Is\u2026?\u201d  \u2713 \u201cHow Does\u2026?\u201d  \u2713 \u201cWhy Does\u2026?\u201d  \u2713 \u201cWhich\u2026Is Best?\u201d
@@ -170,7 +177,7 @@ CTA (R23 — 3pts, machine-checked):
 
 ━━━ HUMANIZATION (R35-R36 — 8pts, machine-checked) ━━━
   R35: ZERO AI fluff phrases allowed. No "furthermore", "moreover", "it's worth noting", "let's dive in".
-  R36: 3+ experience signals required: "we tested", "in our experience", "we found", "hands-on".
+  R36: 3+ real-world proof signals required (anti-fabrication): "in practice", "case study", "real-world example", "from a buyer perspective", "quality control".
   Write like a knowledgeable human sharing real insights, not an AI summarizing information.
 
 ━━━ FORBIDDEN HOOK PHRASES (R47 — automatic deduction) ━━━
@@ -197,7 +204,7 @@ CTA (R23 — 3pts, machine-checked):
 8. CTA in last 500 characters? ("buy", "shop", "contact", "learn more" etc. — machine-checked R23)
 9. TOC present? (required: <nav class="toc"> block for articles >1000 words)
 10. Hook quality: does the first sentence open with a question, stat, or bold claim?
-11. First-person signals: are 2+ authentic "I/we tested/found" statements present?
+11. Real-world proof signals: are 2+ third-person proof markers present (e.g., "In practice", "Case study", "Real-world example")?
 12. Named entities: are 6+ named entities per 1000 words present?
 13. External authority links: are 3+ <a href="http..."> present? (machine-checked R22/R25 — need 3+)
 14. Date references: are 2+ specific years cited in the body?
@@ -211,12 +218,12 @@ CTA (R23 — 3pts, machine-checked):
 22. Passive voice: under 20%? (machine-checked R31)
 23. Semantic variation: are 5+ keyword variants used instead of exact repetition? (machine-checked R34)
 24. AI patterns: fewer than 2 AI fluff phrases per 1000 words? (machine-checked R35)
-25. Experience signals: 3+ first-person experience markers? (machine-checked R36)
+25. Experience signals: 3+ third-person real-world proof markers? (machine-checked R36)
 26. Entity richness: 8+ unique named entities? (machine-checked R37)
 27. Featured snippet blocks: 2+ question headings with 30-60 word direct answers? (R38)
 28. Comparison table: at least one table with 3+ rows × 3+ columns? (R39)
 29. Buyer intent section: decision-making guidance present? (R40)
-30. Storytelling: 2+ narrative markers? (R41)
+30. Storytelling: 2+ third-person narrative markers? (R41)
 31. Visual breaks: 2+ blockquotes/callouts/tip boxes? (R42)
 32. Mid-content CTA: call-to-action in middle of article? (R43)
 33. Data credibility: all statistics have source attribution within 150 chars? (R44)
@@ -234,15 +241,14 @@ TOC (P3.25 \u2014 CRITICAL): Open the article body with a table of contents:
   Add matching id="section-anchor" attribute to every <h2> tag.
 
 HOOK (P7.61): The very first sentence must open with a question, specific stat, or bold claim.
-EXPERIENCE (G2): Include 2-3 authentic first-person signals: \u201cWhen we tested this\u2026\u201d, \u201cIn our experience\u2026\u201d
+REAL-WORLD PROOF (G2): Include 2-3 third-person proof signals: \u201cIn practice\u2026\u201d, \u201cCase study: \u2026\u201d, \u201cReal-world example: \u2026\u201d
 ENTITIES (G3): 6+ named entities per 1000 words \u2014 researchers, studies with year+journal, locations, companies.
 DATES (P2.14): Include 2+ specific years/dates: \u201cResearch from 2023\u2026\u201d, \u201cA 2021 Journal of Nutrition study\u2026\u201d
 CASE STUDY (P2.17): One real-world example: \u201cCase study: [scenario] \u2192 [outcome]\u201d
 AUTHORITY LINKS (P2.12): 2+ external links to PubMed, Wikipedia, .gov, or .edu
 OBJECTIONS (P7.65): Address one reader doubt: \u201cYou might wonder\u2026\u201d / \u201cSome believe X, but research shows Y\u2026\u201d
 LIMITATIONS (P6.60): Acknowledge one limitation: \u201cHowever, keep in mind\u2026\u201d / \u201cThe caveat here is\u2026\u201d
-STORYTELLING (P7.68): 2+ storytelling markers: \u201cFor example, imagine\u2026\u201d / \u201cWhen we analysed\u2026\u201d
-PERSONAL PRONOUNS (P7.66): Use \u201cyou/your/we/our/I\u201d \u2014 5+ total occurrences.
+STORYTELLING (P7.68): 2+ storytelling markers: \u201cFor example, imagine\u2026\u201d / \u201cPicture this:\u201d / \u201cConsider a buyer who\u2026\u201d
 QUESTION HEADINGS (G8): At least 3 H2s must be question-format.
 LONG-TAIL KEYWORDS (P9.88): 2+ semantic keyword variations with modifiers.
 E-E-A-T: One quotable fact per H2 (study name, percentage, year). Active voice >85%.
@@ -273,17 +279,17 @@ CTA (R23 — 3pts): Last 500 chars must contain: buy/shop/order/contact/learn mo
 
 R34 SEMANTIC VARIATION (4pts): Use 5+ semantic variants of keyword. Density MUST be 1.0-1.5%, NEVER >3%.
 R35 AI PATTERNS (4pts): ZERO AI fluff: no "furthermore", "moreover", "it's worth noting", "let's dive in", "when it comes to", "the real issue is", "and the catch is", "here's the thing", "the truth is,", "here's the deal", "let's be honest". <2 per 1000 words.
-R36 EXPERIENCE (4pts): 3+ of: "we tested", "we found", "in our experience", "we observed", "hands-on", "we discovered".
+R36 EXPERIENCE (4pts): 3+ of: "in practice", "case study", "real-world example", "from a buyer perspective", "quality control", "lab report".
 R37 ENTITIES (3pts): 8+ named entities (places, products, orgs, researchers). Be specific.
 R38 SNIPPET BLOCKS (3pts): 2+ question headings followed by 30-60 word direct answer paragraphs.
 R39 TABLE QUALITY (2pts): Table with ≥3 rows × ≥3 columns.
 R40 BUYER INTENT (3pts): Include "which should you buy" / "how to choose" / "best for" section.
-R41 STORYTELLING (2pts): 2+ narrative markers: "when we", "we discovered", "the result was", "picture this".
+R41 STORYTELLING (2pts): 2+ narrative markers: "picture this", "for example, imagine", "consider a buyer", "the result was".
 R42 VISUAL BREAKS (2pts): 2+ <blockquote> or <div class="tip"> or <div class="key-takeaway">.
 R43 MID-CTA (2pts): CTA in middle of article, not just end.
 R44 DATA CREDIBILITY (3pts): Every statistic needs source within 150 chars. No fabricated precise numbers.
 R45 UNIQUE ANGLE (2pts): "what most people miss" / "the real truth" / "our perspective".
-R46 FAQ QUALITY (2pts): FAQ answers 40-60 words each — direct and complete.
+R46 FAQ QUALITY (2pts): FAQ answers 40-60 words each — answer-first (direct first sentence) and complete.
 
 PRESERVE existing links — do not remove any <a href>.""",
     },
@@ -341,9 +347,9 @@ AUTHORITY INTEGRITY (not fake authority):
   NEVER fabricate: study names, percentages, regulatory approvals, or organization claims.
 
 EXPERIENCE SIGNALS (R36 — 4pts, machine-checked):
-  Include 3+ of these EXACT phrases naturally across different sections:
-    ✓ "we tested"  ✓ "we found"  ✓ "in our experience"  ✓ "we observed"
-    ✓ "after trying"  ✓ "hands-on"  ✓ "first-hand"  ✓ "we discovered"
+  Include 3+ of these EXACT phrases naturally across different sections (anti-fabrication, third-person):
+    ✓ "in practice"  ✓ "case study"  ✓ "real-world example"  ✓ "from a buyer perspective"
+    ✓ "quality control"  ✓ "quality assurance"  ✓ "lab report"  ✓ "certificate of analysis"
 
 ENTITY RICHNESS (R37 — 3pts, machine-checked):
   Include 8+ unique named entities — specific place names, organizations, certifications:
@@ -385,6 +391,7 @@ STRUCTURE RULES:
   ✓ Must include comparison/decision section
   ✓ Each section must serve a distinct sub-intent
   ✓ Structure must flow: intro → education → comparison → decision → FAQ
+  ✓ For commercial/transactional intent: H2 #1 should deliver a quick verdict/comparison (value-first)
 
 {customer_context}""",
     },

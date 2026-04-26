@@ -5957,7 +5957,7 @@ export default function SessionStrategyPage({ projectId, sessionId, session, onB
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           {setPage && (
             <button
-              onClick={() => setPage("kw2")}
+              onClick={() => setPage("kw3")}
               style={{ padding: "5px 12px", borderRadius: 7, border: `1px solid ${T.border}`, background: "transparent",
                 cursor: "pointer", fontSize: 12, color: T.purpleDark, fontWeight: 600 }}
             >

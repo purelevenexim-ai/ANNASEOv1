@@ -309,6 +309,9 @@ class TreeBuilder:
         session_id: str, project_id: str,
     ) -> dict:
         """Build tree nodes and persist to DB, return nested dict."""
+        def _norm_pillar(value: str) -> str:
+            return (value or "").strip().lower()
+
         now = db._now()
         conn = db.get_conn()
         try:
@@ -322,37 +325,57 @@ class TreeBuilder:
                 (universe_id, session_id, project_id, "universe", universe_name, None, 0, now),
             )
 
-            # Group top100 by pillar → cluster
+            # Group keywords by pillar and keep a stable label per normalized key.
             tree_dict = {"name": universe_name, "type": "universe", "pillars": []}
-
-            # Detect pillar for each cluster
-            cluster_pillar_map = {}
-            for cr in cluster_rows:
-                cr_dict = dict(cr)
-                cp = cr_dict.get("pillar", "")
-                cluster_pillar_map[cr_dict.get("cluster_name", "")] = cp
-
-            # Group keywords by pillar
             pillar_kws: dict[str, list[dict]] = {}
-            for kw in top100:
-                p = kw.get("pillar", "general")
-                pillar_kws.setdefault(p, []).append(kw)
+            pillar_label_by_norm: dict[str, str] = {}
 
-            for pillar in pillars:
+            for kw in top100:
+                raw_pillar = (kw.get("pillar") or "general").strip()
+                norm = _norm_pillar(raw_pillar) or "general"
+                pillar_kws.setdefault(norm, []).append(kw)
+                if norm not in pillar_label_by_norm:
+                    pillar_label_by_norm[norm] = raw_pillar or "general"
+
+            # Preserve profile pillar order first, then append keyword-derived pillars.
+            ordered_pillars: list[tuple[str, str]] = []
+            seen_norm: set[str] = set()
+            for pillar in (pillars or []):
+                raw = (pillar or "").strip()
+                if not raw:
+                    continue
+                norm = _norm_pillar(raw)
+                if norm in seen_norm:
+                    continue
+                seen_norm.add(norm)
+                ordered_pillars.append((raw, norm))
+
+            for norm, label in pillar_label_by_norm.items():
+                if norm not in seen_norm:
+                    seen_norm.add(norm)
+                    ordered_pillars.append((label, norm))
+
+            has_keyword_pillars = bool(pillar_kws)
+
+            for pillar_label, pillar_norm in ordered_pillars:
+                pkws = pillar_kws.get(pillar_norm, [])
+                if has_keyword_pillars and not pkws:
+                    # Avoid empty display pillars when keyword pillars don't exactly match profile pillars.
+                    continue
+
                 pillar_id = db._uid("tn_")
                 conn.execute(
                     "INSERT INTO kw2_tree_nodes (id, session_id, project_id, node_type, label, parent_id, score, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (pillar_id, session_id, project_id, "pillar", pillar, universe_id, 0, now),
+                    (pillar_id, session_id, project_id, "pillar", pillar_label, universe_id, 0, now),
                 )
 
-                pkws = pillar_kws.get(pillar, [])
                 # Group by cluster
                 cluster_kws: dict[str, list[dict]] = {}
                 for kw in pkws:
                     cl = kw.get("cluster", "unclustered")
                     cluster_kws.setdefault(cl, []).append(kw)
 
-                pillar_dict = {"name": pillar, "type": "pillar", "clusters": []}
+                pillar_dict = {"name": pillar_label, "type": "pillar", "clusters": []}
                 for cluster_name, ckws in cluster_kws.items():
                     cluster_id = db._uid("tn_")
                     conn.execute(

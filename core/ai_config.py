@@ -166,12 +166,17 @@ class AIRouter:
 
     @classmethod
     def call_with_tokens(cls, prompt: str, system: str = "You are an expert SEO analyst.",
-                         temperature: float = 0.2) -> Tuple[str, int]:
-        """Call AI with fallback chain. Returns (text, tokens)."""
+                         temperature: float = 0.2,
+                         skip_providers: list = None) -> Tuple[str, int]:
+        """Call AI with fallback chain. Returns (text, tokens).
+
+        skip_providers: optional list of provider names to skip, e.g. ["ollama"]
+        """
+        _skip = set(skip_providers or [])
         cls._rate_limit()
 
         # 1. Try Groq (primary) — with circuit breaker + per-provider rate limit
-        if AICfg.GROQ_KEY and cls._groq_circuit_ok():
+        if "groq" not in _skip and AICfg.GROQ_KEY and cls._groq_circuit_ok():
             groq_elapsed = time.time() - cls._last_groq_time
             if groq_elapsed < AICfg.GROQ_RATE_LIMIT:
                 time.sleep(AICfg.GROQ_RATE_LIMIT - groq_elapsed)
@@ -181,12 +186,13 @@ class AIRouter:
                 return text, tokens
 
         # 2. Try Ollama/DeepSeek (secondary)
-        text = cls._call_ollama(prompt, system, temperature)
-        if text:
-            return text, 0
+        if "ollama" not in _skip:
+            text = cls._call_ollama(prompt, system, temperature)
+            if text:
+                return text, 0
 
         # 3. Try Gemini (tertiary) — with per-provider rate limit
-        if AICfg.GEMINI_KEY:
+        if "gemini" not in _skip and AICfg.GEMINI_KEY:
             gemini_elapsed = time.time() - cls._last_gemini_time
             if gemini_elapsed < AICfg.GEMINI_RATE_LIMIT:
                 time.sleep(AICfg.GEMINI_RATE_LIMIT - gemini_elapsed)
@@ -341,6 +347,14 @@ class AIRouter:
         Returns text or "" on any error.
         """
         import requests as _req
+
+        # 0. Skip for prompts too large for OLLAMA_MAX_CTX (4096 tokens).
+        #    At ~3 chars/token, > 8000 chars means < 1300 tokens remain for output —
+        #    insufficient for full rewrites; model would 504 after the full 620s wait.
+        _max_prompt_chars = AICfg.OLLAMA_MAX_CTX * 3  # conservative chars-per-token estimate
+        if len(prompt) + len(system) > _max_prompt_chars:
+            log.info(f"[AIRouter] Ollama: prompt too large ({len(prompt)+len(system)} chars > {_max_prompt_chars}) — skipping to next provider")
+            return ""
 
         # 1. Health check (non-blocking, cached)
         if not cls._ollama_check_health():

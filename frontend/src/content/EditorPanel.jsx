@@ -10,6 +10,167 @@ const STATUS_COLOR = {
   approved: "teal", publishing: "amber", published: "teal", failed: "red",
 }
 
+// ── Story view: renders article body with light-green plot/snippet highlights ─
+function StoryView({ articleId, body }) {
+  const [score, setScore] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true); setError(null)
+    api.get(`/api/content/${articleId}/story-score`)
+      .then(d => { if (!cancelled) setScore(d) })
+      .catch(e => { if (!cancelled) setError(e?.message || "Failed to load story score") })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [articleId])
+
+  // Build a regex-safe escape
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+  // Highlight plot/snippet sentences in the body HTML
+  let highlighted = body || ""
+  if (score?.highlights?.length) {
+    score.highlights.forEach(h => {
+      if (!h.sentence) return
+      const text = h.sentence.trim().slice(0, 200)
+      // Take a substring (first 50 chars) for matching to avoid HTML interference
+      const probe = text.slice(0, 60)
+      try {
+        const re = new RegExp(`(${esc(probe)}[^<]*?\\.)`, "i")
+        const bg = h.kind === "plot" ? "#bbf7d0" : h.kind === "snippet" ? "#dcfce7" : "#f0fdf4"
+        const border = h.kind === "plot" ? "#16a34a" : "#86efac"
+        highlighted = highlighted.replace(re, (m) =>
+          `<mark style="background:${bg};border-left:3px solid ${border};padding:1px 4px;border-radius:3px;display:inline" data-story-kind="${h.kind}">${m}</mark>`
+        )
+      } catch { /* skip bad regex */ }
+    })
+  }
+
+  const totalScore = score?.score ?? 0
+  const scoreColor = totalScore >= 9 ? "#16a34a" : totalScore >= 7 ? "#65a30d" : totalScore >= 5 ? "#d97706" : "#dc2626"
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* Header strip with score */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 16, padding: "10px 16px",
+        background: "#f0fdf4", borderBottom: "1px solid #bbf7d0", flexShrink: 0,
+      }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#166534", letterSpacing: 0.5 }}>STORY PLOT INTEGRATION</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: scoreColor, lineHeight: 1 }}>
+          {loading ? "…" : `${totalScore}`}<span style={{ fontSize: 12, fontWeight: 500, color: "#666" }}>/10</span>
+        </div>
+        {score?.breakdown && (
+          <div style={{ display: "flex", gap: 8, fontSize: 10 }}>
+            {Object.entries(score.breakdown).map(([dim, v]) => (
+              <div key={dim} title={v.notes} style={{
+                padding: "3px 8px", borderRadius: 6,
+                background: v.score >= v.max * 0.7 ? "#dcfce7" : v.score >= v.max * 0.4 ? "#fef3c7" : "#fecaca",
+                color: "#374151", fontWeight: 600,
+              }}>
+                {dim.replace(/_/g, " ")}: {v.score}/{v.max}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ marginLeft: "auto", fontSize: 10, color: "#166534", fontWeight: 500 }}>
+          <span style={{ display: "inline-block", width: 10, height: 10, background: "#bbf7d0", borderRadius: 2, marginRight: 4, verticalAlign: "middle" }}></span>
+          plot lines
+          <span style={{ display: "inline-block", width: 10, height: 10, background: "#dcfce7", borderRadius: 2, margin: "0 4px 0 10px", verticalAlign: "middle" }}></span>
+          brand snippets
+        </div>
+      </div>
+
+      {/* Issues bar (if any) */}
+      {score?.issues?.length > 0 && (
+        <div style={{ padding: "6px 16px", background: "#fef3c7", borderBottom: "1px solid #fcd34d", fontSize: 11, color: "#92400e", flexShrink: 0 }}>
+          <strong>Issues:</strong> {score.issues.join(" · ")}
+        </div>
+      )}
+
+      {/* Article body with highlights */}
+      <div style={{
+        flex: 1, overflow: "auto", padding: "20px 32px",
+        fontFamily: T.bodyFont, fontSize: 15, lineHeight: 1.7, color: "#1f2937",
+      }}>
+        {error && <div style={{ color: T.red, padding: 12 }}>Failed to load story score: {error}</div>}
+        <div dangerouslySetInnerHTML={{ __html: highlighted }} className="story-view-body" />
+      </div>
+    </div>
+  )
+}
+
+function DetectorView({ body, detectorData, loading, onRemovePassage }) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  let highlighted = body || ""
+
+  if (detectorData?.flagged_passages?.length) {
+    detectorData.flagged_passages.forEach(item => {
+      const snippet = (item.snippet || "").trim()
+      if (!snippet) return
+      const probe = snippet.slice(0, 60)
+      try {
+        const re = new RegExp(`(${esc(probe)}[^<]*?[.!?]?)`, "i")
+        highlighted = highlighted.replace(re, (m) =>
+          `<mark style="background:#fee2e2;border-left:3px solid #dc2626;padding:1px 4px;border-radius:3px;display:inline" data-detector-kind="${item.issue_type}">${m}</mark>`
+        )
+      } catch {}
+    })
+  }
+
+  const scores = detectorData?.detector_scores || {}
+  const aiScore = detectorData?.ai_score ?? scores.combined_ai_score ?? 0
+  const risk = detectorData?.risk_level || "unknown"
+  const riskBg = risk === "high" ? "#fef2f2" : risk === "medium" ? "#fff7ed" : risk === "low" ? "#fefce8" : "#f0fdf4"
+  const riskColor = risk === "high" ? "#dc2626" : risk === "medium" ? "#ea580c" : risk === "low" ? "#a16207" : "#15803d"
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px", background: "#fff1f2", borderBottom: "1px solid #fecdd3", flexShrink: 0 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#9f1239", letterSpacing: 0.5 }}>DETECTOR REVIEW</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: riskColor, lineHeight: 1 }}>
+          {loading ? "…" : `${aiScore}`}<span style={{ fontSize: 12, fontWeight: 500, color: "#666" }}>/100</span>
+        </div>
+        <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", color: riskColor, background: riskBg, borderRadius: 99, padding: "3px 10px" }}>{risk}</div>
+        <div style={{ display: "flex", gap: 8, fontSize: 10 }}>
+          <div style={{ padding: "3px 8px", borderRadius: 6, background: "#fff", border: "1px solid #fecaca" }}>GPTZero: {scores.gptzero_style ?? 0}</div>
+          <div style={{ padding: "3px 8px", borderRadius: 6, background: "#fff", border: "1px solid #fecaca" }}>Turnitin: {scores.turnitin_style ?? 0}</div>
+          <div style={{ padding: "3px 8px", borderRadius: 6, background: "#fff", border: "1px solid #fecaca" }}>Originality: {scores.originality_style ?? 0}</div>
+        </div>
+        <div style={{ marginLeft: "auto", fontSize: 10, color: "#9f1239", fontWeight: 500 }}>
+          <span style={{ display: "inline-block", width: 10, height: 10, background: "#fee2e2", borderRadius: 2, marginRight: 4, verticalAlign: "middle", border: "1px solid #fca5a5" }}></span>
+          dehumanized areas highlighted
+        </div>
+      </div>
+
+      {!!detectorData?.flagged_passages?.length && (
+        <div style={{ padding: "8px 16px", background: "#fff", borderBottom: "1px solid #fecdd3", display: "flex", flexDirection: "column", gap: 6, maxHeight: 180, overflow: "auto", flexShrink: 0 }}>
+          {detectorData.flagged_passages.map((item, idx) => (
+            <div key={`${item.issue_type}-${idx}`} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 11, color: T.text }}>
+              <span style={{ fontSize: 9, fontWeight: 700, color: "#fff", background: item.severity === "high" ? "#dc2626" : "#ea580c", borderRadius: 4, padding: "2px 5px", textTransform: "uppercase", marginTop: 1 }}>{item.severity}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ color: T.text }}>{item.reason}</div>
+                <div style={{ color: T.textSoft, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{item.snippet}</div>
+              </div>
+              {item.removable && (
+                <button onClick={() => onRemovePassage?.(item)} style={{ padding: "4px 8px", borderRadius: 6, fontSize: 10, fontWeight: 600, border: "1px solid #fca5a5", background: "#fff", color: "#b91c1c", cursor: "pointer" }}>
+                  Remove
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 32px", fontFamily: T.bodyFont, fontSize: 15, lineHeight: 1.7, color: "#1f2937" }}>
+        <div dangerouslySetInnerHTML={{ __html: highlighted || "<p><em>No content yet.</em></p>" }} />
+      </div>
+    </div>
+  )
+}
+
 // ── AI Review panel ────────────────────────────────────────────────────────────
 const SEV_COLORS = { critical: "#dc2626", high: "#ea580c", medium: "#d97706", low: "#9ca3af" }
 
@@ -466,7 +627,7 @@ function RulesPanel({ articleId, data, sectionScores, loading, onReAnalyze }) {
 
 export default function EditorPanel({ article, projectId, onStatusChange }) {
   // ── Editor state ───────────────────────────────────────────────────────────
-  const [viewMode, setViewMode] = useState("editor") // "editor" | "html" | "logs"
+  const [viewMode, setViewMode] = useState("editor") // "editor" | "html" | "logs" | "story"
   const [htmlContent, setHtmlContent] = useState("")
   const [isDirty, setIsDirty] = useState(false)
   const [reviewData, setReviewData] = useState(null)
@@ -478,6 +639,8 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
   const [sectionScores, setSectionScores] = useState([])
   const [analyzingRules, setAnalyzingRules] = useState(false)
   const [logs, setLogs] = useState(null)
+  const [detectorData, setDetectorData] = useState(null)
+  const [detectorLoading, setDetectorLoading] = useState(false)
 
   // Bug #9 — mutual exclusion: one panel open at a time
   const [openPanel, setOpenPanel] = useState(null) // "review" | "rules" | "humanize" | null
@@ -516,6 +679,7 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
     setLogs(null)
     setRuleDiff(null)
     setArticleCost(null)
+    setDetectorData(null)
 
     // Clear pending auto-save timer from previous article
     if (saveTimer.current) {
@@ -528,6 +692,16 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
 
     // Fetch pipeline logs from schema_json
     if (article?.article_id) {
+      setDetectorLoading(true)
+      api.get(`/api/content/${article.article_id}`)
+        .then(data => {
+          if (!cancelled && data?.detector_analysis) {
+            setDetectorData(data.detector_analysis)
+          }
+        })
+        .catch(() => {})
+        .finally(() => { if (!cancelled) setDetectorLoading(false) })
+
       api.get(`/api/content/${article.article_id}/pipeline`)
         .then(data => {
           if (!cancelled && data?.logs) {
@@ -853,6 +1027,36 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
     })
   }
 
+  const removeDetectorPassage = async (item) => {
+    if (!item?.snippet || !article?.article_id) return
+    const currentHtml = editorRef.current ? editorRef.current.getHTML() : (article.body || "")
+    let newBody = currentHtml
+
+    if (newBody.includes(item.snippet)) {
+      newBody = newBody.replace(item.snippet, "")
+    } else {
+      const probe = item.snippet.slice(0, 80)
+      const idx = newBody.indexOf(probe)
+      if (idx === -1) {
+        alert("Could not locate the highlighted passage in the current article body.")
+        return
+      }
+      newBody = newBody.slice(0, idx) + newBody.slice(idx + probe.length)
+    }
+
+    newBody = newBody.replace(/<p>\s*<\/p>/g, "")
+    try {
+      await api.put(`/api/content/${article.article_id}`, { body: newBody })
+      if (editorRef.current) editorRef.current.commands.setContent(newBody, false)
+      setIsDirty(false)
+      const refreshed = await api.get(`/api/content/${article.article_id}`)
+      setDetectorData(refreshed?.detector_analysis || null)
+      onStatusChange?.()
+    } catch (e) {
+      alert(`Remove failed: ${e?.message || "Unknown error"}`)
+    }
+  }
+
   return (
     <>
       {/* Editor header toolbar */}
@@ -893,7 +1097,7 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
 
         {/* View mode toggle */}
         <div style={{ display: "flex", gap: 2, background: T.grayLight, borderRadius: 8, padding: 2 }}>
-          {[["editor", "Editor"], ["html", "HTML"], ["logs", "Logs"]].map(([m, label]) => (
+          {[["editor", "Editor"], ["html", "HTML"], ["preview", "Preview"], ["story", "Story"], ["detector", "Detector"], ["logs", "Logs"]].map(([m, label]) => (
             <button key={m} onClick={() => {
               if (m === "html") switchToHtml()
               else if (m === "editor") switchToEditor()
@@ -1051,6 +1255,38 @@ export default function EditorPanel({ article, projectId, onStatusChange }) {
                 }}
               />
             </>
+          ) : viewMode === "preview" ? (
+            <div style={{ flex: 1, overflowY: "auto", padding: "32px 48px", background: "#fff" }}>
+              <article style={{ maxWidth: 720, margin: "0 auto", fontFamily: "Georgia, 'Times New Roman', serif", color: "#1a1a1a", lineHeight: 1.8 }}>
+                <style>{`
+                  .blog-preview h1 { font-size: 2.2em; font-weight: 700; line-height: 1.3; margin: 0 0 12px; color: #111; }
+                  .blog-preview h2 { font-size: 1.5em; font-weight: 700; margin: 2em 0 0.6em; color: #222; border-bottom: 2px solid #f0f0f0; padding-bottom: 4px; }
+                  .blog-preview h3 { font-size: 1.15em; font-weight: 600; margin: 1.4em 0 0.4em; color: #333; }
+                  .blog-preview p { margin: 0.8em 0; font-size: 1.05em; }
+                  .blog-preview ul, .blog-preview ol { margin: 0.6em 0 0.6em 1.4em; }
+                  .blog-preview li { margin: 0.3em 0; }
+                  .blog-preview table { width: 100%; border-collapse: collapse; margin: 1.4em 0; font-size: 0.93em; font-family: sans-serif; }
+                  .blog-preview th { background: #f5f5f5; font-weight: 600; text-align: left; padding: 8px 12px; border: 1px solid #e0e0e0; }
+                  .blog-preview td { padding: 7px 12px; border: 1px solid #e0e0e0; }
+                  .blog-preview blockquote { border-left: 4px solid #7c3aed; margin: 1.2em 0; padding: 10px 16px; background: #faf8ff; color: #444; font-style: italic; border-radius: 0 6px 6px 0; }
+                  .blog-preview a { color: #7c3aed; }
+                  .blog-preview strong { color: #111; }
+                  .blog-preview .key-takeaway, .blog-preview [class*="takeaway"] { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 12px 16px; margin: 1em 0; }
+                  .blog-preview nav.toc { background: #f8f8f8; border: 1px solid #eee; border-radius: 8px; padding: 14px 18px; margin: 1em 0; font-size: 0.9em; font-family: sans-serif; }
+                `}</style>
+                <div className="blog-preview" dangerouslySetInnerHTML={{ __html: article.body || "<p><em>No content yet.</em></p>" }} />
+              </article>
+            </div>
+          ) : viewMode === "story" ? (
+            /* Story View — article body with light-green plot/snippet highlights */
+            <StoryView articleId={article.article_id} body={article.body || ""} />
+          ) : viewMode === "detector" ? (
+            <DetectorView
+              body={article.body || ""}
+              detectorData={detectorData}
+              loading={detectorLoading}
+              onRemovePassage={removeDetectorPassage}
+            />
           ) : (
             /* Logs View — shows pipeline logs from polling + stored logs */
             <PipelineLogsView articleId={article.article_id} storedLogs={logs} />

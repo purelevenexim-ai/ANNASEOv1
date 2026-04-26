@@ -27,6 +27,15 @@ from pydantic import BaseModel
 
 from services import job_tracker
 from services.db_utils import row_to_dict, rows_to_dicts
+from services.growth_os import (
+    semantic_cluster_keywords,
+    persist_keyword_embeddings,
+    find_prospects,
+    extract_email,
+    generate_outreach_email,
+    send_email_smtp,
+    generate_multilingual_map,
+)
 from services.job_control import PauseExecution, pause_job, resume_job, cancel_job, check_control_state
 from services.job_tracker import create_strategy_job, get_strategy_job, update_strategy_job, run_strategy_pipeline
 from services.quota import check_and_consume_quota
@@ -324,6 +333,8 @@ def get_db() -> sqlite3.Connection:
     CREATE TABLE IF NOT EXISTS strategy_sessions(session_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,engine_type TEXT DEFAULT 'audience',status TEXT DEFAULT 'pending',input_json TEXT DEFAULT '{}',result_json TEXT DEFAULT '{}',confidence REAL DEFAULT 0,tokens_used INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS strategy_jobs(id TEXT PRIMARY KEY,project_id TEXT,job_type TEXT DEFAULT 'generic',status TEXT DEFAULT 'pending',progress INTEGER DEFAULT 0,current_step TEXT DEFAULT '',current_step_name TEXT DEFAULT '',step_started_at TEXT DEFAULT '',input_payload TEXT DEFAULT '{}',result_payload TEXT DEFAULT '{}',raw_llm_response TEXT DEFAULT '',error_message TEXT DEFAULT '',error_type TEXT DEFAULT '',lock_key TEXT DEFAULT '',is_locked INTEGER DEFAULT 0,last_completed_step INTEGER DEFAULT 0,execution_mode TEXT DEFAULT 'multi_step',last_heartbeat TEXT DEFAULT '',locked_at TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,started_at TEXT DEFAULT '',completed_at TEXT DEFAULT '',retry_count INTEGER DEFAULT 0,max_retries INTEGER DEFAULT 3,control_state TEXT DEFAULT 'running',cancel_requested INTEGER DEFAULT 0,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS serp_cache(keyword TEXT, location TEXT DEFAULT 'global', device TEXT DEFAULT 'desktop', results TEXT, fetched_at TEXT, provider TEXT DEFAULT '', cost REAL DEFAULT 0, PRIMARY KEY(keyword,location,device));
+    CREATE TABLE IF NOT EXISTS strategy_v2_blueprints(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,session_id TEXT DEFAULT '',keyword TEXT NOT NULL,intent TEXT DEFAULT '',angle_type TEXT DEFAULT '',title TEXT DEFAULT '',hook TEXT DEFAULT '',sections_json TEXT DEFAULT '[]',story TEXT DEFAULT '',cta TEXT DEFAULT '',qa_seo_score REAL DEFAULT 0,qa_aeo_score REAL DEFAULT 0,qa_conversion_score REAL DEFAULT 0,qa_depth_score REAL DEFAULT 0,qa_overall_score REAL DEFAULT 0,qa_gaps_json TEXT DEFAULT '[]',qa_fixes_json TEXT DEFAULT '[]',status TEXT DEFAULT 'draft',content_article_id TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE INDEX IF NOT EXISTS ix_sv2bp_project ON strategy_v2_blueprints(project_id);
     CREATE TABLE IF NOT EXISTS strategy_experiments(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, variants TEXT NOT NULL, payload_json TEXT DEFAULT '{}', status TEXT DEFAULT 'running', forced_variant TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS strategy_experiment_assignments(id INTEGER PRIMARY KEY AUTOINCREMENT, experiment_id INTEGER NOT NULL, variant TEXT NOT NULL, assigned_at TEXT DEFAULT CURRENT_TIMESTAMP, active INTEGER DEFAULT 1);
     CREATE TABLE IF NOT EXISTS strategy_experiment_results(id INTEGER PRIMARY KEY AUTOINCREMENT, experiment_id INTEGER NOT NULL, variant TEXT NOT NULL, job_id TEXT, roi REAL, status TEXT DEFAULT 'completed', created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -333,6 +344,9 @@ def get_db() -> sqlite3.Connection:
     CREATE TABLE IF NOT EXISTS global_strategy_memory(id INTEGER PRIMARY KEY AUTOINCREMENT, pattern_hash TEXT UNIQUE, pattern_json TEXT, total_samples INTEGER DEFAULT 0, successes INTEGER DEFAULT 0, failures INTEGER DEFAULT 0, avg_roi REAL DEFAULT 0, variance REAL DEFAULT 0, niche TEXT DEFAULT 'global', country TEXT DEFAULT 'global', intent TEXT DEFAULT 'all', last_seen TEXT DEFAULT CURRENT_TIMESTAMP, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS meta_learning(id INTEGER PRIMARY KEY AUTOINCREMENT, feature_json TEXT UNIQUE, avg_roi REAL DEFAULT 0, samples INTEGER DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS content_blogs(blog_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,pillar TEXT DEFAULT '',cluster TEXT DEFAULT '',keyword TEXT NOT NULL,title TEXT DEFAULT '',body TEXT DEFAULT '',meta_desc TEXT DEFAULT '',schema_type TEXT DEFAULT 'Article',language TEXT DEFAULT 'english',status TEXT DEFAULT 'draft',frozen_at TEXT DEFAULT '',scheduled_date TEXT DEFAULT '',published_url TEXT DEFAULT '',internal_links TEXT DEFAULT '[]',word_count INTEGER DEFAULT 0,seo_score REAL DEFAULT 0,version INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS keyword_embeddings(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT DEFAULT '', keyword TEXT NOT NULL, embedding_json TEXT DEFAULT '[]', cluster_id INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS outreach(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT DEFAULT '', site TEXT, email TEXT, status TEXT DEFAULT 'pending', response TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS multilingual_content(id INTEGER PRIMARY KEY AUTOINCREMENT, article_id TEXT DEFAULT '', project_id TEXT DEFAULT '', language_code TEXT NOT NULL, language_name TEXT DEFAULT '', localized_body TEXT DEFAULT '', localized_url TEXT DEFAULT '', hreflang_json TEXT DEFAULT '[]', created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS content_freeze_queue(id INTEGER PRIMARY KEY AUTOINCREMENT,blog_id TEXT NOT NULL,project_id TEXT NOT NULL,pillar TEXT DEFAULT '',scheduled_date TEXT NOT NULL,published INTEGER DEFAULT 0,published_at TEXT DEFAULT '');
     CREATE TABLE IF NOT EXISTS ranking_predictions(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,keyword TEXT NOT NULL,pillar TEXT DEFAULT '',predicted_rank REAL DEFAULT 0,predicted_month TEXT DEFAULT '',confidence REAL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS audience_profiles(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL UNIQUE,website_url TEXT DEFAULT '',target_locations TEXT DEFAULT '[]',target_religions TEXT DEFAULT '[]',target_languages TEXT DEFAULT '[]',personas TEXT DEFAULT '[]',business_type TEXT DEFAULT 'B2C',usp TEXT DEFAULT '',products TEXT DEFAULT '[]',customer_reviews TEXT DEFAULT '',ad_copy TEXT DEFAULT '',seasonal_events TEXT DEFAULT '[]',competitor_urls TEXT DEFAULT '[]',pillar_support_map TEXT DEFAULT '{}',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -354,6 +368,112 @@ def get_db() -> sqlite3.Connection:
     CREATE INDEX IF NOT EXISTS ix_ss_project ON strategy_sessions(project_id);
     CREATE INDEX IF NOT EXISTS ix_cb_project ON content_blogs(project_id);
     CREATE INDEX IF NOT EXISTS ix_rp_project ON ranking_predictions(project_id);
+    -- Business Story Engine (R1: Foundation) ──────────────────────────────────
+    CREATE TABLE IF NOT EXISTS business_profiles(
+        project_id TEXT PRIMARY KEY,
+        brand_name TEXT DEFAULT '',
+        founder_name TEXT DEFAULT '',
+        founder_story TEXT DEFAULT '',
+        origin_story TEXT DEFAULT '',
+        mission TEXT DEFAULT '',
+        values_text TEXT DEFAULT '',
+        region TEXT DEFAULT '',
+        state TEXT DEFAULT '',
+        country TEXT DEFAULT '',
+        brand_voice TEXT DEFAULT 'friendly',
+        what_we_dont_do TEXT DEFAULT '',
+        free_text_extras TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS business_processes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        process_key TEXT NOT NULL,
+        name TEXT DEFAULT '',
+        description TEXT DEFAULT '',
+        is_manual INTEGER DEFAULT 1,
+        is_traditional INTEGER DEFAULT 1,
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS process_benefits(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        process_id INTEGER NOT NULL,
+        benefit_key TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS ix_bproc_project ON business_processes(project_id);
+    CREATE INDEX IF NOT EXISTS ix_pbenefit_process ON process_benefits(process_id);
+    -- Business Knowledge Engine (R2) ─────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS bs_products(
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        type TEXT DEFAULT 'product',
+        category TEXT DEFAULT '',
+        tagline TEXT DEFAULT '',
+        sort_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS bs_snippets(
+        id TEXT PRIMARY KEY,
+        product_id TEXT DEFAULT '',
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'other',
+        text TEXT NOT NULL DEFAULT '',
+        tags TEXT DEFAULT '[]',
+        confidence TEXT DEFAULT 'verified',
+        source TEXT DEFAULT 'founder_input',
+        is_active INTEGER DEFAULT 1,
+        usage_count INTEGER DEFAULT 0,
+        avg_performance REAL DEFAULT 0.5,
+        last_used_at TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS bs_plots(
+        id TEXT PRIMARY KEY,
+        product_id TEXT DEFAULT '',
+        project_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        thesis TEXT DEFAULT '',
+        snippet_ids TEXT DEFAULT '[]',
+        plot_type TEXT DEFAULT 'supporting',
+        conflicts_with TEXT DEFAULT '[]',
+        priority INTEGER DEFAULT 3,
+        status TEXT DEFAULT 'active',
+        used_count INTEGER DEFAULT 0,
+        avg_performance REAL DEFAULT 0.5,
+        continuity_notes TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS bs_plot_usage(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plot_id TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        stage TEXT DEFAULT 'intro',
+        used_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS bs_bandit_state(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        context_key TEXT NOT NULL,
+        plot_id TEXT NOT NULL,
+        success_count INTEGER DEFAULT 1,
+        failure_count INTEGER DEFAULT 1,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(context_key, plot_id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_bs_snip_product ON bs_snippets(product_id);
+    CREATE INDEX IF NOT EXISTS ix_bs_snip_project ON bs_snippets(project_id);
+    CREATE INDEX IF NOT EXISTS ix_bs_plots_product ON bs_plots(product_id);
+    CREATE INDEX IF NOT EXISTS ix_bs_usage_plot ON bs_plot_usage(plot_id);
+    CREATE INDEX IF NOT EXISTS ix_bs_bandit_ctx ON bs_bandit_state(context_key);
     """
 
     if os.getenv("ANNASEO_TESTING"):
@@ -464,6 +584,10 @@ def get_db() -> sqlite3.Connection:
         "ALTER TABLE blog_versions ADD COLUMN humanize_score REAL DEFAULT 0",
         "CREATE TABLE IF NOT EXISTS humanize_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,article_id TEXT NOT NULL,project_id TEXT NOT NULL,status TEXT DEFAULT 'pending',tone TEXT DEFAULT 'natural',style TEXT DEFAULT 'conversational',persona TEXT DEFAULT '',original_body TEXT DEFAULT '',humanized_body TEXT DEFAULT '',original_score REAL DEFAULT 0,final_score REAL DEFAULT 0,sections_processed INTEGER DEFAULT 0,sections_total INTEGER DEFAULT 0,ai_provider TEXT DEFAULT '',tokens_used INTEGER DEFAULT 0,error TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP,completed_at TEXT DEFAULT '')",
         "CREATE INDEX IF NOT EXISTS ix_humanize_article ON humanize_sessions(article_id)",
+        "CREATE TABLE IF NOT EXISTS content_events(id INTEGER PRIMARY KEY AUTOINCREMENT,article_id TEXT NOT NULL,session_id TEXT DEFAULT '',event_type TEXT NOT NULL,value REAL DEFAULT 0,ip_hash TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE INDEX IF NOT EXISTS ix_content_events_article ON content_events(article_id)",
+        # Business Knowledge Engine R2 — story mode toggle
+        "ALTER TABLE business_profiles ADD COLUMN story_mode TEXT DEFAULT 'on'",
     ]
     for _m in _migrations:
         try:
@@ -769,24 +893,22 @@ def create_project(body: ProjectBody,user=Depends(current_user)):
 @app.get("/api/projects",tags=["Projects"])
 def list_projects(user=Depends(current_user)):
     db = get_db()
-    pids = [r["project_id"] for r in db.execute("SELECT project_id FROM user_projects WHERE user_id=?", (user["user_id"],)).fetchall()]
+    # Workspace-wide visibility: every authenticated user can view all projects.
+    projects = [dict(r) for r in db.execute("SELECT * FROM projects WHERE status!='deleted'").fetchall()]
 
-    # Safety fallback: if no mapping exists yet, use ownership and join it to user_projects.
-    if not pids:
-        projects_owned = db.execute("SELECT project_id FROM projects WHERE owner_id=? AND status!='deleted'", (user["user_id"],)).fetchall()
-        pids = [r["project_id"] for r in projects_owned]
-        for pid in pids:
-            try:
-                db.execute("INSERT OR IGNORE INTO user_projects(user_id,project_id,role)VALUES(?,?,?)", (user["user_id"], pid, "owner"))
-            except Exception:
-                pass
-        db.commit()
-
-    if not pids:
-        return {"projects": []}
-
-    placeholders = ",".join("?" for _ in pids)
-    projects = [dict(r) for r in db.execute(f"SELECT * FROM projects WHERE project_id IN ({placeholders}) AND status!='deleted'", pids).fetchall()]
+    # Keep user_projects mapping in sync so downstream permission checks that
+    # rely on this table continue to work without denying newly visible projects.
+    uid = user.get("user_id")
+    for p in projects:
+        try:
+            role = "owner" if p.get("owner_id") == uid else "viewer"
+            db.execute(
+                "INSERT OR IGNORE INTO user_projects(user_id,project_id,role)VALUES(?,?,?)",
+                (uid, p.get("project_id"), role),
+            )
+        except Exception:
+            pass
+    db.commit()
     return {"projects": projects}
 
 @app.get("/api/projects/{project_id}",tags=["Projects"])
@@ -1521,7 +1643,7 @@ def keyword_stats(project_id: str):
             "SELECT goals, pricing_model FROM kw2_biz_intel WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
             (session_id,)
         ).fetchone()
-        goals = json.loads(bi_row["goals"] or "[]") if bi_row and bi_row["goals"] else []
+        goals = _safe_json_list(bi_row["goals"]) if bi_row else []
         pricing_model = bi_row["pricing_model"] if bi_row else ""
         # Profile confidence
         profile_row = db.execute(
@@ -1530,8 +1652,8 @@ def keyword_stats(project_id: str):
         ).fetchone()
         confidence = round((profile_row["confidence_score"] or 0) * 100, 0) if profile_row else 0
         biz_type = profile_row["business_type"] if profile_row else ""
-        pillar_names = json.loads(profile_row["pillars"] or "[]") if profile_row else []
-        locations = json.loads(profile_row["geo_scope"] or "[]") if profile_row else []
+        pillar_names = _safe_json_list(profile_row["pillars"]) if profile_row else []
+        locations = _safe_json_list(profile_row["geo_scope"]) if profile_row else []
 
         total = pillar_count + cluster_count + supporting_count or 1
         return {
@@ -1693,12 +1815,20 @@ class GenBody(BaseModel):
     page_inputs: Dict = {}              # type-specific inputs (product_name, features, etc.)
     step_mode: str = "auto"             # auto | pause
     pipeline_mode: str = "standard"     # standard | lean
+    ai_routing_preset: Optional[str] = None  # A | B | C | D | E
 
 def _build_routing(body):
     """Convert ai_routing dict from request body into AIRoutingConfig.
     Falls back to saved routing in DB if ai_routing not in request.
     Falls back to pipeline defaults if neither provided."""
-    from engines.content_generation_engine import AIRoutingConfig, StepAIConfig
+    from engines.content_generation_engine import AIRoutingConfig, StepAIConfig, ROUTING_PRESETS
+
+    # Preset takes highest priority — a single letter A-E selects a pre-built config
+    preset_name = getattr(body, "ai_routing_preset", None)
+    if preset_name and preset_name in ROUTING_PRESETS:
+        log.info(f"_build_routing: using preset '{preset_name}'")
+        return ROUTING_PRESETS[preset_name]
+
     raw = getattr(body, "ai_routing", None)
     
     # If no routing in request body, try to fetch saved routing from DB
@@ -2043,6 +2173,12 @@ def get_article(article_id: str):
     row=get_db().execute("SELECT * FROM content_articles WHERE article_id=?",(article_id,)).fetchone()
     if not row: raise HTTPException(404,"Not found")
     data = dict(row)
+    try:
+        if data.get("body"):
+            from engines.humanize.auditor import analyze_ai_signals
+            data["detector_analysis"] = analyze_ai_signals(data.get("body") or "")
+    except Exception:
+        pass
     # Expose pipeline steps if article is generating
     if data.get("status") == "generating" and data.get("schema_json"):
         try:
@@ -2051,6 +2187,497 @@ def get_article(article_id: str):
         except Exception:
             pass
     return data
+
+@app.get("/api/content/{article_id}/story-score", tags=["Content"])
+def get_article_story_score(article_id: str):
+    """Score how well an article integrates the active R2 plot and brand snippets (0-10).
+
+    Returns dimensions: plot_thesis, distribution, brand_facts, voice_consistency, conclusion_echo.
+    Also returns highlight sentences (for UI light-green plot-line highlighting).
+    """
+    row = get_db().execute(
+        "SELECT body, project_id, keyword FROM content_articles WHERE article_id=?",
+        (article_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+    pid = row["project_id"]
+    body = row["body"] or ""
+
+    # Load brand profile
+    bp_row = get_db().execute(
+        "SELECT brand_name, founder_name, region FROM business_profiles WHERE project_id=?",
+        (pid,)
+    ).fetchone()
+    bp = dict(bp_row) if bp_row else {}
+
+    # Load relevant snippets (rank by keyword relevance)
+    snip_rows = get_db().execute(
+        "SELECT kind, text, confidence FROM bs_snippets WHERE project_id=?",
+        (pid,)
+    ).fetchall()
+    snippets = [dict(s) for s in snip_rows]
+    try:
+        from engines.story_engine.relevance import rank_snippets_for_keyword
+        snippets = rank_snippets_for_keyword(row["keyword"] or "", snippets, top_n=8)
+    except Exception:
+        pass
+
+    # Pick highest-priority active plot
+    plot_row = get_db().execute(
+        "SELECT title, thesis, plot_type, continuity_notes FROM bs_plots "
+        "WHERE project_id=? AND status='active' ORDER BY priority LIMIT 1",
+        (pid,)
+    ).fetchone()
+    plot = dict(plot_row) if plot_row else None
+
+    from engines.story_engine.plot_scorer import score_story_plot
+    return score_story_plot(
+        body_html=body, plot=plot, snippets=snippets,
+        brand_name=bp.get("brand_name", ""),
+        founder_name=bp.get("founder_name", ""),
+        region=bp.get("region", ""),
+    )
+
+
+@app.get("/api/content/{article_id}/assessment", tags=["Content"])
+def get_article_assessment(article_id: str):
+    """Unified multi-score assessment: review categories, normalised SEO/AEO/EEAT,
+    live GEO score, and story score — all in one response with a merged issue ledger."""
+    db = get_db()
+    row = db.execute(
+        "SELECT body, project_id, keyword, title, review_score, review_notes, review_breakdown, seo_score, eeat_score "
+        "FROM content_articles WHERE article_id=?",
+        (article_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+
+    pid     = row["project_id"]
+    body    = row["body"] or ""
+    keyword = row["keyword"] or ""
+
+    # ── 1. Review data from DB ───────────────────────────────────────────────
+    review_score = row["review_score"] or 0
+    breakdown = {}
+    if row["review_breakdown"]:
+        try:
+            breakdown = json.loads(row["review_breakdown"])
+        except Exception:
+            pass
+    notes = {}
+    if row["review_notes"]:
+        try:
+            notes = json.loads(row["review_notes"])
+        except Exception:
+            pass
+
+    categories = breakdown.get("categories", {})
+    seo_cat   = categories.get("seo",  {"score": 0, "max": 20})
+    aeo_cat   = categories.get("aeo",  {"score": 0, "max": 10})
+    eeat_cat  = categories.get("eeat", {"score": 0, "max": 15})
+
+    seo_pct  = round(seo_cat.get("score", 0)  / max(seo_cat.get("max", 20), 1)  * 100)
+    aeo_pct  = round(aeo_cat.get("score", 0)  / max(aeo_cat.get("max", 10), 1)  * 100)
+    eeat_pct = round(eeat_cat.get("score", 0) / max(eeat_cat.get("max", 15), 1) * 100)
+
+    review_issues = [
+        {"source": "review", "severity": i.get("severity", "low"), "message": i.get("message", str(i))}
+        for i in breakdown.get("rules", [])
+        if isinstance(i, dict) and not i.get("passed", True)
+    ]
+
+    # ── 2. Live GEO score ────────────────────────────────────────────────────
+    geo_score_val = 0
+    geo_issues = []
+    try:
+        from engines.ruflo_content_engine import GEOScorer, ContentScore
+        cs = ContentScore()
+        cs = GEOScorer().score(body, keyword, cs)
+        geo_score_val = cs.geo_score
+        geo_issues = [{"source": "geo", "severity": "medium", "message": m} for m in cs.geo_issues]
+    except Exception as e:
+        log.warning(f"GEOScorer failed for {article_id}: {e}")
+
+    # ── 3. Story score ───────────────────────────────────────────────────────
+    story_score_val = 0
+    story_breakdown = {}
+    story_highlights = []
+    story_issues = []
+    try:
+        bp_row = db.execute(
+            "SELECT brand_name, founder_name, region FROM business_profiles WHERE project_id=?",
+            (pid,)
+        ).fetchone()
+        bp = dict(bp_row) if bp_row else {}
+
+        snip_rows = db.execute(
+            "SELECT kind, text, confidence FROM bs_snippets WHERE project_id=?",
+            (pid,)
+        ).fetchall()
+        snippets = [dict(s) for s in snip_rows]
+        try:
+            from engines.story_engine.relevance import rank_snippets_for_keyword
+            snippets = rank_snippets_for_keyword(keyword, snippets, top_n=8)
+        except Exception:
+            pass
+
+        plot_row = db.execute(
+            "SELECT title, thesis, plot_type, continuity_notes FROM bs_plots "
+            "WHERE project_id=? AND status='active' ORDER BY priority LIMIT 1",
+            (pid,)
+        ).fetchone()
+        plot = dict(plot_row) if plot_row else None
+
+        from engines.story_engine.plot_scorer import score_story_plot
+        story_result = score_story_plot(
+            body_html=body, plot=plot, snippets=snippets,
+            brand_name=bp.get("brand_name", ""),
+            founder_name=bp.get("founder_name", ""),
+            region=bp.get("region", ""),
+        )
+        story_score_val   = story_result.get("score", 0)
+        story_breakdown   = story_result.get("breakdown", {})
+        story_highlights  = story_result.get("highlights", [])
+        story_issues      = [
+            {"source": "story", "severity": "medium", "message": m}
+            for m in story_result.get("issues", [])
+        ]
+    except Exception as e:
+        log.warning(f"Story scorer failed for {article_id}: {e}")
+
+    # ── 4. Merged issue ledger ───────────────────────────────────────────────
+    all_issues = review_issues + geo_issues + story_issues
+
+    return {
+        "article_id": article_id,
+        "scores": {
+            "overall":   review_score,          # 0-100 percentage
+            "seo":       seo_pct,               # SEO sub-score normalised 0-100
+            "aeo":       aeo_pct,               # AEO sub-score normalised 0-100
+            "eeat":      eeat_pct,              # EEAT sub-score normalised 0-100
+            "geo":       geo_score_val,         # GEO score 0-100
+            "story":     round(story_score_val * 10),  # story score normalised 0-100 (original 0-10 * 10)
+            "story_raw": story_score_val,       # original 0-10 story score
+        },
+        "story_breakdown":  story_breakdown,
+        "story_highlights": story_highlights,
+        "review_categories": categories,
+        "review_notes": notes,
+        "issues": all_issues,
+        "issue_count": len(all_issues),
+    }
+
+
+# ── Severity sort order ──────────────────────────────────────────────────────
+_SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _spec_issues(body_html: str, keyword: str, word_count: int) -> list:
+    """Check article body against content specification requirements.
+    Returns list of issue dicts with source='spec'."""
+    text = re.sub(r"<[^>]+>", " ", body_html).lower()
+    issues = []
+
+    def add(severity, message, recommendation=""):
+        issues.append({
+            "source": "spec", "severity": severity,
+            "message": message, "recommendation": recommendation,
+        })
+
+    # Word count floor
+    if word_count < 2500:
+        add("high", f"Article is {word_count} words — below the 2,500-word floor",
+            "Expand thin sections: brewing steps, buyer options, FAQ, storage tips to reach 2,500+ words")
+
+    # Quick answer / direct definition in opening
+    first_400 = text[:400]
+    kw_first = keyword.split()[0].lower() if keyword else ""
+    has_def = any(p in first_400 for p in ["is a ", "refers to", "is made from", "is ", "defined as"])
+    if not (has_def and kw_first and kw_first in first_400):
+        add("high", "Opening paragraph lacks a direct extractable definition of the keyword",
+            "Start with: '[Keyword] is [definition].' — 2 sentences max, no preamble")
+
+    # Key takeaways block
+    if not re.search(r"key takeaway|key takeaways|at a glance|quick summary", text):
+        add("high", "No 'Key Takeaways' or 'At a Glance' block found",
+            "Add a ≤6-bullet Key Takeaways section near the top — critical for AI snippet extraction")
+
+    # Comparison table
+    if "<table" not in body_html.lower() and "|" not in body_html:
+        add("high", "No comparison table found",
+            "Add a table comparing real naadan coffee vs commercial blends (chicory %, roast date, origin)")
+
+    # FAQ section
+    if not re.search(r"<h[23][^>]*>.*?faq|frequently asked|common question", body_html, re.I | re.DOTALL):
+        add("high", "No FAQ section",
+            "Add an FAQ with 5–7 questions covering: chicory %, roast date, filter size, storage, price, where to buy")
+
+    # Brewing steps
+    if not re.search(r"brew|step\s*\d|how to make|filter.*coffee.*step|pour.*water", text):
+        add("medium", "No filter coffee brewing steps",
+            "Add a numbered 5-step brewing guide: filter, ratio, water temp, decoction, mixing")
+
+    # Storage tips
+    if not re.search(r"stor(e|age|ing)|keep.*fresh|airtight|shelf life|best.*within", text):
+        add("medium", "No storage tips found",
+            "Add storage section: airtight container, away from light, use within 3–4 weeks of roast date")
+
+    # Buyer options / where to buy
+    if not re.search(r"where to buy|order online|available|buy.*online|purchase|shop", text):
+        add("medium", "No 'where to buy' or buyer options section",
+            "Add buyer options section: own website, Amazon, local stores, and what to check on each")
+
+    # Expert tip / callout
+    if not re.search(r"pro tip|expert tip|did you know|insider|tip:", text):
+        add("low", "No expert tip or callout box",
+            "Add a highlighted 'Pro Tip' or 'Expert Note' — boosts E-E-A-T and scannability")
+
+    # CTA in conclusion
+    body_tail = text[-600:]
+    if not any(w in body_tail for w in ["buy", "shop", "order", "try", "discover", "get yours", "learn more"]):
+        add("medium", "No call-to-action in the article conclusion",
+            "End with a clear CTA: 'Try Kerala Naadan Coffee Powder' with link to product page")
+
+    # B2B leakage check
+    b2b_markers = [
+        ("customs", "export"),("phytosanitary", None),("fssai export", None),
+        ("spices board-registered supplier", None),("container.*weeks", None),
+        ("buyer sourcing.*kilogram.*price", None),
+    ]
+    for marker, _ in b2b_markers:
+        if re.search(marker, text, re.I):
+            add("critical", f"B2B export copy detected: '{marker}' found in B2C article",
+                "Remove logistics/export compliance language — this is a consumer-facing article")
+            break
+
+    # Roast date mention (brand differentiation)
+    if "roast date" not in text:
+        add("medium", "Brand differentiator 'roast date' not mentioned",
+            "Mention that the brand prints the roast date — distinguishes from best-before-only brands")
+
+    # Chicory percentage mention
+    if not re.search(r"chicory.{0,60}percent|chicory.{0,60}%|\d+.{0,10}chicory", text):
+        add("medium", "Chicory percentage not quantified",
+            "State that most commercial blends contain 40–80% chicory, while this product has 0%")
+
+    return issues
+
+
+@app.post("/api/content/research-complaints", tags=["Content"])
+async def research_product_complaints(payload: dict = Body(...)):
+    """
+    Research common customer complaints and negative reviews for a product/service keyword.
+    Returns structured complaint signals with solutions for content generation.
+
+    Body: { "keyword": str, "business_context": str (optional) }
+    """
+    keyword = (payload.get("keyword") or "").strip()
+    if not keyword:
+        raise HTTPException(422, "keyword is required")
+
+    business_context = (payload.get("business_context") or "").strip()
+
+    try:
+        from engines.negative_review_engine import NegativeReviewEngine
+        engine = NegativeReviewEngine(
+            keyword=keyword,
+            business_context=business_context,
+            max_complaints=8,
+        )
+        result = await engine.research()
+        return {
+            "keyword": keyword,
+            "total_complaints": len(result.signals),
+            "signals": [
+                {
+                    "complaint": s.complaint,
+                    "frequency": s.frequency,
+                    "solution": s.solution,
+                    "cta_line": s.cta_line,
+                }
+                for s in result.signals
+            ],
+            "raw_complaints": result.raw_complaints,
+            "content_hooks": result.content_hooks,
+            "credibility_html": result.credibility_section,
+        }
+    except Exception as e:
+        log.exception(f"Complaint research failed for '{keyword}': {e}")
+        raise HTTPException(500, f"Research failed: {str(e)}")
+
+
+@app.get("/api/content/{article_id}/ledger", tags=["Content"])
+def get_article_ledger(article_id: str):
+    """Top 100 issue ledger: ranked, deduplicated issues from spec, review,
+    geo, story, ui, and pipeline sources."""
+    db = get_db()
+    row = db.execute(
+        "SELECT body, project_id, keyword, title, word_count, review_score, "
+        "review_notes, review_breakdown, schema_json, status "
+        "FROM content_articles WHERE article_id=?",
+        (article_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Article not found")
+
+    pid        = row["project_id"]
+    body       = row["body"] or ""
+    keyword    = row["keyword"] or ""
+    word_count = row["word_count"] or 0
+
+    all_issues: list = []
+
+    # ── SOURCE: spec ─────────────────────────────────────────────────────────
+    all_issues += _spec_issues(body, keyword, word_count)
+
+    # ── SOURCE: review (failed rules from last stored review) ────────────────
+    breakdown = {}
+    if row["review_breakdown"]:
+        try:
+            breakdown = json.loads(row["review_breakdown"])
+        except Exception:
+            pass
+    rules_list = breakdown.get("rules", [])
+    for r in rules_list:
+        if isinstance(r, dict) and not r.get("passed", True):
+            sev = r.get("severity", "low")
+            msg = r.get("message") or r.get("name", "Rule failed")
+            fix = r.get("recommendation", r.get("fix", ""))
+            all_issues.append({"source": "review", "severity": sev, "message": msg, "recommendation": fix})
+
+    # ── SOURCE: geo ──────────────────────────────────────────────────────────
+    try:
+        from engines.ruflo_content_engine import GEOScorer, ContentScore
+        cs = GEOScorer().score(body, keyword, ContentScore())
+        for m in cs.geo_issues:
+            all_issues.append({"source": "geo", "severity": "medium", "message": m, "recommendation": ""})
+    except Exception as e:
+        log.debug(f"Ledger GEO scorer: {e}")
+
+    # ── SOURCE: story ─────────────────────────────────────────────────────────
+    try:
+        bp_row = db.execute(
+            "SELECT brand_name, founder_name, region FROM business_profiles WHERE project_id=?", (pid,)
+        ).fetchone()
+        bp = dict(bp_row) if bp_row else {}
+        snip_rows = db.execute(
+            "SELECT kind, text, confidence FROM bs_snippets WHERE project_id=?", (pid,)
+        ).fetchall()
+        snippets = [dict(s) for s in snip_rows]
+        try:
+            from engines.story_engine.relevance import rank_snippets_for_keyword
+            snippets = rank_snippets_for_keyword(keyword, snippets, top_n=8)
+        except Exception:
+            pass
+        plot_row = db.execute(
+            "SELECT title, thesis, plot_type FROM bs_plots "
+            "WHERE project_id=? AND status='active' ORDER BY priority LIMIT 1", (pid,)
+        ).fetchone()
+        plot = dict(plot_row) if plot_row else None
+        from engines.story_engine.plot_scorer import score_story_plot
+        story_result = score_story_plot(body_html=body, plot=plot, snippets=snippets,
+            brand_name=bp.get("brand_name", ""), founder_name=bp.get("founder_name", ""),
+            region=bp.get("region", ""))
+        for m in story_result.get("issues", []):
+            all_issues.append({"source": "story", "severity": "medium", "message": m, "recommendation": ""})
+        # Flag story dimensions below 1.5/2
+        for dim, val in (story_result.get("breakdown") or {}).items():
+            score_val = val.get("score", 0) if isinstance(val, dict) else 0
+            max_val   = val.get("max", 2)   if isinstance(val, dict) else 2
+            if score_val < 1.5 * max_val / 2:
+                all_issues.append({
+                    "source": "story", "severity": "high",
+                    "message": f"Story dimension '{dim}' scores {score_val}/{max_val} — below threshold",
+                    "recommendation": (val.get("notes", "") if isinstance(val, dict) else ""),
+                })
+    except Exception as e:
+        log.debug(f"Ledger story scorer: {e}")
+
+    # ── SOURCE: pipeline ──────────────────────────────────────────────────────
+    snap = {}
+    if row["schema_json"]:
+        try:
+            snap = json.loads(row["schema_json"])
+        except Exception:
+            pass
+    for entry in snap.get("issues_log", snap.get("rule_results", [])):
+        if isinstance(entry, dict):
+            all_issues.append({
+                "source": "pipeline",
+                "severity": entry.get("severity", "low"),
+                "message": entry.get("message", str(entry)),
+                "recommendation": entry.get("fix", ""),
+            })
+    if row["status"] == "error":
+        all_issues.append({
+            "source": "pipeline", "severity": "critical",
+            "message": "Article is in error state — last generation failed",
+            "recommendation": "Use Retry button or regenerate with a new keyword",
+        })
+
+    # ── SOURCE: ui ────────────────────────────────────────────────────────────
+    if word_count < 1200:
+        all_issues.append({
+            "source": "ui", "severity": "high",
+            "message": f"Article too short to show in Articles list with confidence ({word_count} words)",
+            "recommendation": "Regenerate with 2500-word floor and structured sections",
+        })
+    notes = {}
+    if row["review_notes"]:
+        try:
+            notes = json.loads(row["review_notes"])
+        except Exception:
+            pass
+    if notes.get("ai_risk") in ("high", "very_high"):
+        all_issues.append({
+            "source": "ui", "severity": "high",
+            "message": f"AI-detection risk is '{notes['ai_risk']}' — article will display risk badge",
+            "recommendation": "Run Humanize pass to reduce AI detection signals",
+        })
+
+    # ── Deduplicate by normalised message ────────────────────────────────────
+    seen: set = set()
+    deduped: list = []
+    for issue in all_issues:
+        key = re.sub(r"\s+", " ", issue["message"].lower().strip())[:120]
+        if key not in seen:
+            seen.add(key)
+            deduped.append(issue)
+
+    # ── Sort: severity then source priority ──────────────────────────────────
+    src_order = {"spec": 0, "review": 1, "geo": 2, "story": 3, "pipeline": 4, "ui": 5}
+    deduped.sort(key=lambda x: (
+        _SEV_RANK.get(x["severity"], 9),
+        src_order.get(x["source"], 9),
+    ))
+
+    # ── Rank and cap at 100 ──────────────────────────────────────────────────
+    ledger = []
+    for i, issue in enumerate(deduped[:100], start=1):
+        ledger.append({**issue, "rank": i})
+
+    # Score coverage: % of score families hitting 90+
+    rev_score = row["review_score"] or 0
+    seo_cats  = breakdown.get("categories", {})
+    seo_pct   = round(seo_cats.get("seo",  {"score":0,"max":20}).get("score",0) / 20 * 100) if seo_cats else 0
+    aeo_pct   = round(seo_cats.get("aeo",  {"score":0,"max":10}).get("score",0) / 10 * 100) if seo_cats else 0
+    eeat_pct  = round(seo_cats.get("eeat", {"score":0,"max":15}).get("score",0) / 15 * 100) if seo_cats else 0
+    families_at_90 = sum(1 for v in [rev_score, seo_pct, aeo_pct, eeat_pct] if v >= 90)
+
+    return {
+        "article_id": article_id,
+        "ledger":      ledger,
+        "total_issues": len(deduped),
+        "shown":       min(len(deduped), 100),
+        "by_source":   {s: sum(1 for x in deduped if x["source"] == s)
+                        for s in ["spec", "review", "geo", "story", "pipeline", "ui"]},
+        "by_severity": {s: sum(1 for x in deduped if x["severity"] == s)
+                        for s in ["critical", "high", "medium", "low", "info"]},
+        "score_families_at_90": families_at_90,
+        "nine_plus_ready": families_at_90 >= 4,
+    }
+
 
 @app.get("/api/content/{article_id}/pipeline", tags=["Content"])
 def get_article_pipeline(article_id: str):
@@ -2076,6 +2703,8 @@ def get_article_pipeline(article_id: str):
         "step_mode": snap.get("step_mode", "auto"),
         "is_paused": snap.get("is_paused", False),
         "ai_recovery_needed": snap.get("ai_recovery_needed", False),
+        "ai_recovery_step": snap.get("ai_recovery_step"),
+        "ai_recovery_step_name": snap.get("ai_recovery_step_name"),
     }
 
 
@@ -2318,18 +2947,18 @@ async def pipeline_continue(article_id: str, request: dict = None, user=Depends(
 
 @app.post("/api/content/{article_id}/pipeline/ai-recovery", tags=["Content"])
 async def pipeline_ai_recovery(article_id: str, request: dict, user=Depends(current_user)):
-    """Unblock an AI recovery pause by providing a provider to retry with."""
+    """Unblock an error-pause by providing an action: retry (optionally with provider), skip, or cancel."""
     pipeline = _active_pipelines.get(article_id)
     if not pipeline:
         raise HTTPException(404, "No active pipeline for this article")
+    action = request.get("action", "retry")  # retry | skip | cancel
     provider = request.get("provider", "").strip()
-    if not provider:
-        raise HTTPException(400, "provider is required")
+    pipeline._ai_recovery_action = action
     pipeline._ai_recovery_provider = provider
     pipeline._ai_recovery_needed = False
     if hasattr(pipeline, '_ai_recovery_event'):
         pipeline._ai_recovery_event.set()
-    return {"status": "recovery_triggered", "provider": provider}
+    return {"status": "recovery_triggered", "action": action, "provider": provider}
 
 
 @app.post("/api/content/{article_id}/pipeline/cancel", tags=["Content"])
@@ -2517,7 +3146,7 @@ async def retry_article(article_id: str, bg: BackgroundTasks, user=Depends(curre
     row = db.execute("SELECT * FROM content_articles WHERE article_id=?", (article_id,)).fetchone()
     if not row: raise HTTPException(404, "Not found")
     r = dict(row)
-    db.execute("UPDATE content_articles SET status='generating',updated_at=? WHERE article_id=?",
+    db.execute("UPDATE content_articles SET status='generating', error_message='', updated_at=? WHERE article_id=?",
                (datetime.now(timezone.utc).isoformat(), article_id)); db.commit()
     from types import SimpleNamespace
     body_ns = SimpleNamespace(
@@ -2550,7 +3179,7 @@ async def regenerate_article(article_id: str, bg: BackgroundTasks, request: dict
     db.execute("""UPDATE content_articles 
                   SET status='generating', body='', title='', meta_title='', meta_desc='',
                       seo_score=0, readability=0, word_count=0, schema_json='',
-                      review_score=0, review_breakdown='', review_notes='',
+                      review_score=0, review_breakdown='', review_notes='', error_message='',
                       updated_at=? 
                   WHERE article_id=?""",
                (datetime.now(timezone.utc).isoformat(), article_id))
@@ -2558,6 +3187,7 @@ async def regenerate_article(article_id: str, bg: BackgroundTasks, request: dict
     from types import SimpleNamespace
     step_mode = request.get("step_mode", "auto")
     ai_routing = request.get("ai_routing")
+    ai_routing_preset = request.get("ai_routing_preset")
     body_ns = SimpleNamespace(
         project_id=r["project_id"], keyword=r["keyword"],
         title=r.get("title") or None, intent=r.get("intent") or "informational",
@@ -2569,6 +3199,7 @@ async def regenerate_article(article_id: str, bg: BackgroundTasks, request: dict
         page_type=r.get("page_type") or "article",
         page_inputs=json.loads(r.get("page_inputs") or "{}"),
         ai_routing=ai_routing,
+        ai_routing_preset=ai_routing_preset,
     )
     bg.add_task(_gen_article, article_id, body_ns, step_mode=step_mode)
     return {"article_id": article_id, "status": "generating", "step_mode": step_mode}
@@ -7149,8 +7780,15 @@ Return ONLY valid JSON (no markdown, no code fences):
         "ai_detection_risk": ai_risk,
         "ai_detection_signals": ai_signals,
     }
+    # Compute sub-scores from review categories for dedicated columns
+    cats = rules.get("categories", {})
+    seo_cat = cats.get("seo", {})
+    eeat_cat = cats.get("eeat", {})
+    seo_subscore = round(seo_cat.get("score", 0) / max(seo_cat.get("max", 20), 1) * 100)
+    eeat_subscore = round(eeat_cat.get("score", 0) / max(eeat_cat.get("max", 15), 1) * 100)
+
     db.execute(
-        "UPDATE content_articles SET review_score=?, review_notes=?, review_breakdown=?, last_reviewed_at=? WHERE article_id=?",
+        "UPDATE content_articles SET review_score=?, review_notes=?, review_breakdown=?, last_reviewed_at=?, seo_score=?, eeat_score=? WHERE article_id=?",
         (
             rules.get("percentage", total_score),
             json.dumps({
@@ -7169,10 +7807,11 @@ Return ONLY valid JSON (no markdown, no code fences):
                 "pillars": review_data["pillars"],
             }),
             now,
+            seo_subscore,
+            eeat_subscore,
             article_id,
         )
     )
-    db.execute("UPDATE content_articles SET seo_score=? WHERE article_id=?", (total_score, article_id))
     db.commit()
 
     return {**review_data, "reviewed_at": now}
@@ -7452,6 +8091,121 @@ def humanize_control(article_id: str, session_id: int, body: HumanizeControlBody
     else:
         raise HTTPException(400, f"Unknown action: {body.action}")
     return {"ok": True, "action": body.action}
+
+
+# ── Content tracking endpoints ────────────────────────────────────────────────
+
+class TrackEventBody(BaseModel):
+    event_type: str
+    value: float = 0.0
+    session_id: str = ""
+
+
+@app.post("/api/content/{article_id}/track", tags=["Content"])
+def track_content_event(article_id: str, body: TrackEventBody, request: Request):
+    """Record a user engagement event for an article.
+
+    No authentication required — intended to be called from published pages.
+    article_id and event_type are strictly validated server-side.
+    """
+    from engines.humanize.reward_engine import record_event, validate_article_id, ALLOWED_EVENTS
+    if not validate_article_id(article_id):
+        raise HTTPException(422, "Invalid article_id format")
+    if body.event_type not in ALLOWED_EVENTS:
+        raise HTTPException(422, f"Unknown event_type. Allowed: {sorted(ALLOWED_EVENTS)}")
+    client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "")
+    db = get_db()
+    try:
+        ok = record_event(article_id, body.event_type, body.value, client_ip, db)
+        if not ok:
+            raise HTTPException(422, "Event rejected by server")
+    finally:
+        db.close()
+    return {"ok": True}
+
+
+@app.get("/api/content/{article_id}/metrics", tags=["Content"])
+def get_content_metrics(article_id: str, user=Depends(current_user)):
+    """Return aggregated engagement metrics for an article."""
+    from engines.humanize.reward_engine import compute_metrics, validate_article_id
+    if not validate_article_id(article_id):
+        raise HTTPException(422, "Invalid article_id format")
+    db = get_db()
+    try:
+        metrics = compute_metrics(article_id, db)
+        # Also pull most recent humanize scores for context
+        row = db.execute(
+            "SELECT original_score, final_score, created_at FROM humanize_sessions WHERE article_id=? ORDER BY created_at DESC LIMIT 1",
+            (article_id,),
+        ).fetchone()
+        if row:
+            metrics["last_original_score"] = row[0]
+            metrics["last_final_score"] = row[1]
+            metrics["last_humanized_at"] = row[2]
+    finally:
+        db.close()
+    return metrics
+
+
+@app.get("/api/humanize/bandit/stats", tags=["Content"])
+def get_bandit_stats(user=Depends(current_user)):
+    """Return current humanization bandit arm statistics."""
+    try:
+        from engines.humanize.humanization_bandit import _bandit
+        return _bandit.stats()
+    except Exception as e:
+        raise HTTPException(500, f"Bandit not available: {e}")
+
+
+@app.get("/api/content/{article_id}/tracking-snippet", tags=["Content"])
+def get_tracking_snippet(article_id: str, request: Request, user=Depends(current_user)):
+    """Return a copy-paste JavaScript tracking snippet for an article page."""
+    from engines.humanize.reward_engine import validate_article_id
+    if not validate_article_id(article_id):
+        raise HTTPException(422, "Invalid article_id format")
+    base_url = str(request.base_url).rstrip("/")
+    track_url = f"{base_url}/api/content/{article_id}/track"
+    snippet = f"""<!-- ANNASEOv1 content tracking — paste before </body> -->
+<script>
+(function() {{
+  var TRACK_URL = "{track_url}";
+  var sid = Math.random().toString(36).slice(2);
+
+  function send(type, value) {{
+    var body = JSON.stringify({{ event_type: type, value: value || 0, session_id: sid }});
+    if (navigator.sendBeacon) {{
+      navigator.sendBeacon(TRACK_URL, new Blob([body], {{type: "application/json"}}));
+    }} else {{
+      fetch(TRACK_URL, {{ method: "POST", body: body, headers: {{ "Content-Type": "application/json" }}, keepalive: true }});
+    }}
+  }}
+
+  // Page view
+  send("page_view");
+
+  // Scroll depth (fire once each)
+  var s50 = false, s75 = false;
+  window.addEventListener("scroll", function() {{
+    var pct = (window.scrollY + window.innerHeight) / document.body.scrollHeight;
+    if (!s50 && pct >= 0.50) {{ s50 = true; send("scroll_50"); }}
+    if (!s75 && pct >= 0.75) {{ s75 = true; send("scroll_75"); }}
+  }}, {{ passive: true }});
+
+  // Time on page
+  var t0 = Date.now();
+  window.addEventListener("pagehide", function() {{
+    send("time_spent", Math.round((Date.now() - t0) / 1000));
+  }});
+
+  // CTA clicks (add data-track-cta to any button/link)
+  document.addEventListener("click", function(e) {{
+    var el = e.target.closest("[data-track-cta]");
+    if (el) send("cta_click");
+  }});
+}})();
+</script>"""
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(snippet, media_type="text/plain")
 
 
 def _ollama_rewrite(prompt: str, num_predict: int = 2000, num_ctx: int = 4096) -> str:
@@ -8830,13 +9584,12 @@ try:
                     (uid, project_id),
                 ).fetchone()
                 is_owner = (row["owner_id"] == uid)
-                if not has_link and not is_owner:
-                    raise HTTPException(404, f"Project not found: {project_id}")
-                if is_owner and not has_link:
+                if not has_link:
                     try:
+                        role = "owner" if is_owner else "viewer"
                         db.execute(
                             "INSERT OR IGNORE INTO user_projects(user_id,project_id,role)VALUES(?,?,?)",
-                            (uid, project_id, "owner"),
+                            (uid, project_id, role),
                         )
                         db.commit()
                     except Exception:
@@ -19671,6 +20424,164 @@ def queue_metrics(user=Depends(current_user)):
         "FROM strategy_jobs"
     ).fetchone()
     return dict(row)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GROWTH OS MODULES (1/2/3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SemanticClusterBody(BaseModel):
+    project_id: str = ""
+    keywords: List[str]
+    n_clusters: Optional[int] = None
+    persist: bool = True
+
+
+class ProspectBody(BaseModel):
+    query: str
+    limit: int = 20
+
+
+class OutreachGenerateBody(BaseModel):
+    project_id: str = ""
+    site: str
+    our_content: str
+    context: str = ""
+    email: str = ""
+
+
+class OutreachSendBody(BaseModel):
+    outreach_id: Optional[int] = None
+    to_email: str
+    subject: str
+    body: str
+
+
+class MultilingualBody(BaseModel):
+    article_id: str = ""
+    project_id: str = ""
+    content: str
+    slug_seed: str
+    languages: List[str] = ["en", "ml", "hi", "ta"]
+    persist: bool = True
+
+
+@app.post("/api/growth/semantic-clusters", tags=["Growth OS"])
+def growth_semantic_clusters(body: SemanticClusterBody, user=Depends(current_user)):
+    keywords = [k.strip() for k in (body.keywords or []) if isinstance(k, str) and k.strip()]
+    if len(keywords) < 2:
+        raise HTTPException(400, "Provide at least 2 keywords")
+
+    clusters = semantic_cluster_keywords(keywords, n_clusters=body.n_clusters)
+    out = [
+        {
+            "cluster_id": c.cluster_id,
+            "cluster": c.cluster_name,
+            "pillar": c.pillar,
+            "supporting": c.supporting,
+            "keywords": c.keywords,
+        }
+        for c in clusters
+    ]
+
+    if body.persist and body.project_id:
+        # Persist per-keyword embeddings + cluster labels
+        label_map: Dict[str, int] = {}
+        for c in clusters:
+            for kw in c.keywords:
+                label_map[kw] = c.cluster_id
+        labels = [label_map.get(kw, 0) for kw in keywords]
+        db = get_db()
+        persist_keyword_embeddings(db, body.project_id, keywords, labels)
+        db.commit()
+
+    return {"project_id": body.project_id, "clusters": out, "count": len(out)}
+
+
+@app.post("/api/growth/outreach/prospects", tags=["Growth OS"])
+def growth_outreach_prospects(body: ProspectBody, user=Depends(current_user)):
+    prospects = find_prospects(body.query, limit=max(1, min(50, body.limit)))
+    return {"query": body.query, "prospects": prospects, "count": len(prospects)}
+
+
+@app.post("/api/growth/outreach/generate", tags=["Growth OS"])
+def growth_outreach_generate(body: OutreachGenerateBody, user=Depends(current_user)):
+    draft = generate_outreach_email(body.site, body.our_content, body.context)
+    db = get_db()
+    email = body.email.strip() if body.email else ""
+    if not email and body.context:
+        email = extract_email(body.context) or ""
+    cur = db.execute(
+        "INSERT INTO outreach(project_id, site, email, status, response) VALUES(?,?,?,?,?)",
+        (body.project_id, body.site, email, "drafted", json.dumps(draft)),
+    )
+    db.commit()
+    oid = cur.lastrowid
+    return {"outreach_id": oid, "draft": draft, "email": email}
+
+
+@app.post("/api/growth/outreach/send", tags=["Growth OS"])
+def growth_outreach_send(body: OutreachSendBody, user=Depends(current_user)):
+    res = send_email_smtp(body.to_email, body.subject, body.body)
+    db = get_db()
+    if body.outreach_id:
+        db.execute(
+            "UPDATE outreach SET status=?, response=? WHERE id=?",
+            ("sent" if res.get("sent") else "send_failed", json.dumps(res), body.outreach_id),
+        )
+        db.commit()
+    return res
+
+
+@app.get("/api/growth/outreach", tags=["Growth OS"])
+def growth_outreach_list(project_id: str = "", limit: int = 100, user=Depends(current_user)):
+    db = get_db()
+    lim = max(1, min(500, limit))
+    if project_id:
+        rows = db.execute(
+            "SELECT * FROM outreach WHERE project_id=? ORDER BY created_at DESC LIMIT ?",
+            (project_id, lim),
+        ).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM outreach ORDER BY created_at DESC LIMIT ?", (lim,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/growth/multilingual/generate", tags=["Growth OS"])
+def growth_multilingual_generate(body: MultilingualBody, user=Depends(current_user)):
+    if not body.content.strip():
+        raise HTTPException(400, "content is required")
+    if not body.languages:
+        raise HTTPException(400, "languages is required")
+
+    localized = generate_multilingual_map(body.content, body.languages, body.slug_seed)
+
+    if body.persist and (body.article_id or body.project_id):
+        db = get_db()
+        for code, payload in localized.items():
+            db.execute(
+                """
+                INSERT INTO multilingual_content(article_id, project_id, language_code, language_name, localized_body, localized_url, hreflang_json, updated_at)
+                VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                """,
+                (
+                    body.article_id,
+                    body.project_id,
+                    code,
+                    payload.get("language", code),
+                    payload.get("content", ""),
+                    payload.get("url", ""),
+                    payload.get("hreflang", "[]"),
+                ),
+            )
+        db.commit()
+
+    return {
+        "article_id": body.article_id,
+        "project_id": body.project_id,
+        "languages": localized,
+        "url_strategy": [v.get("url") for v in localized.values()],
+    }
     if row2:
         return {
             "job_id": job_id,
@@ -22258,7 +23169,7 @@ async def kw2_create_session(project_id: str, body: _KW2SessionCreate, user=Depe
                     "competitor_urls": _p(proj_row["competitor_urls"]),
                     "customer_reviews": proj_row["customer_reviews"] or "",
                     "audience_segments": _p(proj_row["audience_personas"]),
-                    "languages": [proj_row["language"]] if proj_row.get("language") else [],
+                    "languages": [proj_row["language"]] if proj_row["language"] else [],
                 },
             }
             # Only save if there's meaningful data
@@ -24455,8 +25366,38 @@ async def kw2_get_top100(
 async def kw2_get_tree(project_id: str, session_id: str, user=Depends(current_user)):
     """Get cached content tree."""
     _validate_project_exists(project_id, user)
+
+    def _keyword_count(tree_obj: dict) -> int:
+        if not isinstance(tree_obj, dict):
+            return 0
+        root = tree_obj.get("universe", tree_obj)
+        if not isinstance(root, dict):
+            return 0
+        pillars = root.get("pillars") or root.get("children") or []
+        total = 0
+        for pillar in pillars:
+            if not isinstance(pillar, dict):
+                continue
+            clusters = pillar.get("clusters") or pillar.get("children") or []
+            for cluster in clusters:
+                if not isinstance(cluster, dict):
+                    continue
+                keywords = cluster.get("keywords") or cluster.get("children") or []
+                total += len(keywords)
+        return total
+
     builder = TreeBuilder()
     tree = builder.get_tree(session_id)
+
+    # Self-heal old/broken caches: if Phase 5 is marked done but the tree has no keyword depth,
+    # rebuild once from validated keywords so KW3 tree view is never stuck empty.
+    session = kw2_db.get_session(session_id)
+    if session and session.get("phase5_done"):
+        validated_count = len(kw2_db.load_validated_keywords(session_id) or [])
+        if validated_count > 0 and _keyword_count(tree) == 0:
+            provider = session.get("preferred_provider", "auto")
+            tree = await asyncio.to_thread(builder.build_tree, project_id, session_id, provider)
+
     return {"tree": tree}
 
 
@@ -24710,6 +25651,9 @@ class _Phase9Body(BaseModel):
 
 def _kw2_strategy_prereq_status(session_id: str) -> dict:
     """Compute readiness snapshot for Phase 9 strategy generation."""
+    _sess = kw2_db.get_session(session_id) or {}
+    _session_mode = (_sess.get("mode") or "").strip().lower()
+
     validated_keywords = kw2_db.load_validated_keywords(session_id) or []
     biz_intel = kw2_db.get_biz_intel(session_id) or {}
 
@@ -24720,6 +25664,29 @@ def _kw2_strategy_prereq_status(session_id: str) -> dict:
         or (biz_intel.get("website_summary") or "").strip()
         or (biz_intel.get("knowledge_summary") or "").strip()
     )
+
+    # Fallback: kw3 workflow writes to kw2_business_profile (not kw2_biz_intel).
+    # Accept the Phase-1 business profile as satisfying the intel requirement so that
+    # kw3 sessions are not permanently blocked from Phase 9.
+    has_business_profile = False
+
+    # kw3/brand sessions do not run deep-intel BI stages; they should still be
+    # eligible for Phase 9 once phase1 profile + validated keywords are present.
+    if _session_mode in {"brand", "kw3", "v3"}:
+        has_biz_intel = True
+        has_business_profile = True
+    elif not has_biz_intel:
+        _proj_id = (_sess or {}).get("project_id", "")
+        if _proj_id:
+            _profile = kw2_db.load_business_profile(_proj_id)
+            if _profile and (
+                (_profile.get("universe") or "").strip()
+                or (_profile.get("business_type") or "").strip()
+                or len(_profile.get("pillars") or []) > 0
+                or len(_profile.get("product_catalog") or []) > 0
+            ):
+                has_biz_intel = True
+                has_business_profile = True
 
     conn = kw2_db.get_conn()
     try:
@@ -24741,6 +25708,7 @@ def _kw2_strategy_prereq_status(session_id: str) -> dict:
 
     return {
         "has_biz_intel": has_biz_intel,
+        "has_business_profile": has_business_profile,
         "validated_keywords": len(validated_keywords),
         "questions": int((q_total_row[0] if q_total_row else 0) or 0),
         "scored": int((q_scored_row[0] if q_scored_row else 0) or 0),
@@ -24755,10 +25723,14 @@ def _kw2_missing_strategy_prereqs(snapshot: dict) -> list[str]:
         missing.append("Business Intelligence")
     if int(snapshot.get("validated_keywords", 0) or 0) <= 0:
         missing.append("Validated Keywords")
-    if int(snapshot.get("questions", 0) or 0) <= 0:
-        missing.append("Intelligence Questions")
-    if int(snapshot.get("scored", 0) or 0) <= 0 or int(snapshot.get("clusters", 0) or 0) <= 0:
-        missing.append("Scored & Clustered")
+    # Intelligence questions and scoring are part of the kw2-only deep intel workflow.
+    # When a kw3 business profile is present (has_business_profile), these deep-intel
+    # tables will be empty — skip them so kw3 sessions can run Phase 9.
+    if not snapshot.get("has_business_profile"):
+        if int(snapshot.get("questions", 0) or 0) <= 0:
+            missing.append("Intelligence Questions")
+        if int(snapshot.get("scored", 0) or 0) <= 0 or int(snapshot.get("clusters", 0) or 0) <= 0:
+            missing.append("Scored & Clustered")
     return missing
 
 @app.post("/api/kw2/{project_id}/sessions/{session_id}/phase9", tags=["KW2"])
@@ -24797,7 +25769,8 @@ async def kw2_phase9_strategy(
     strat = StrategyEngine()
     result = await asyncio.to_thread(strat.generate, project_id, session_id, provider, content_params)
     _elapsed = round(_time_mod.time() - _t0, 1)
-    kw2_db.update_session(session_id, current_phase="9")
+    # Mark Phase 9 complete so downstream status checks and UI badges stay consistent.
+    kw2_db.update_session(session_id, current_phase="9", phase9_done=1)
 
     # Auto-rebuild content calendar from strategy's weekly_plan
     _cal_result = {}
@@ -27287,3 +28260,1082 @@ async def gsc_export(project_id: str, body: dict = {}, user=Depends(current_user
     except Exception as e:
         log.error(f"GSC export error: {e}", exc_info=True)
         raise HTTPException(500, str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Business Story Engine (R1: Foundation)
+# Captures structured business truth (founder, processes, region, voice)
+# that gets injected into content generation prompts.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _slugify_key(value: str) -> str:
+    """Convert 'Sun Dry Process' → 'sun_dry_process'."""
+    s = (value or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_") or "process"
+
+
+def _load_business_story(db, project_id: str) -> dict:
+    """Return full business story payload: profile + processes (with benefits)."""
+    profile_row = db.execute(
+        "SELECT * FROM business_profiles WHERE project_id=?", (project_id,)
+    ).fetchone()
+    profile = dict(profile_row) if profile_row else {
+        "project_id": project_id,
+        "brand_name": "", "founder_name": "", "founder_story": "",
+        "origin_story": "", "mission": "", "values_text": "",
+        "region": "", "state": "", "country": "",
+        "brand_voice": "friendly", "what_we_dont_do": "", "free_text_extras": "",
+    }
+    proc_rows = db.execute(
+        "SELECT * FROM business_processes WHERE project_id=? ORDER BY sort_order, id",
+        (project_id,),
+    ).fetchall()
+    processes = []
+    for pr in proc_rows:
+        pd = dict(pr)
+        ben_rows = db.execute(
+            "SELECT id, benefit_key, description FROM process_benefits WHERE process_id=? ORDER BY id",
+            (pd["id"],),
+        ).fetchall()
+        pd["benefits"] = [dict(b) for b in ben_rows]
+        processes.append(pd)
+    return {"profile": profile, "processes": processes}
+
+
+@app.get("/api/business-story/{project_id}", tags=["BusinessStory"])
+def get_business_story(project_id: str, user=Depends(current_user)):
+    """Return full business story (profile + processes + benefits) for a project."""
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        return _load_business_story(db, project_id)
+    finally:
+        db.close()
+
+
+@app.put("/api/business-story/{project_id}", tags=["BusinessStory"])
+def upsert_business_story(project_id: str, body: dict, user=Depends(current_user)):
+    """Upsert the business profile (top-level fields only). Processes use sub-routes."""
+    _validate_project_exists(project_id, user)
+    fields = [
+        "brand_name", "founder_name", "founder_story", "origin_story",
+        "mission", "values_text", "region", "state", "country",
+        "brand_voice", "what_we_dont_do", "free_text_extras",
+    ]
+    vals = {f: (body.get(f) or "").strip() if isinstance(body.get(f), str) else (body.get(f) or "") for f in fields}
+    # Cap free-form fields to avoid runaway text
+    caps = {"founder_story": 4000, "origin_story": 3000, "mission": 1500,
+            "values_text": 1500, "what_we_dont_do": 1500, "free_text_extras": 6000}
+    for k, lim in caps.items():
+        if isinstance(vals[k], str) and len(vals[k]) > lim:
+            vals[k] = vals[k][:lim]
+    if vals["brand_voice"] not in ("traditional", "modern", "expert", "friendly"):
+        vals["brand_voice"] = "friendly"
+
+    db = get_db()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        existing = db.execute(
+            "SELECT project_id FROM business_profiles WHERE project_id=?", (project_id,)
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE business_profiles SET "
+                "brand_name=?, founder_name=?, founder_story=?, origin_story=?, "
+                "mission=?, values_text=?, region=?, state=?, country=?, "
+                "brand_voice=?, what_we_dont_do=?, free_text_extras=?, updated_at=? "
+                "WHERE project_id=?",
+                (vals["brand_name"], vals["founder_name"], vals["founder_story"],
+                 vals["origin_story"], vals["mission"], vals["values_text"],
+                 vals["region"], vals["state"], vals["country"],
+                 vals["brand_voice"], vals["what_we_dont_do"], vals["free_text_extras"],
+                 now, project_id),
+            )
+        else:
+            db.execute(
+                "INSERT INTO business_profiles(project_id, brand_name, founder_name, "
+                "founder_story, origin_story, mission, values_text, region, state, country, "
+                "brand_voice, what_we_dont_do, free_text_extras, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (project_id, vals["brand_name"], vals["founder_name"],
+                 vals["founder_story"], vals["origin_story"], vals["mission"],
+                 vals["values_text"], vals["region"], vals["state"], vals["country"],
+                 vals["brand_voice"], vals["what_we_dont_do"], vals["free_text_extras"],
+                 now, now),
+            )
+        db.commit()
+        return _load_business_story(db, project_id)
+    finally:
+        db.close()
+
+
+@app.post("/api/business-story/{project_id}/processes", tags=["BusinessStory"])
+def create_business_process(project_id: str, body: dict, user=Depends(current_user)):
+    """Add a process. body: {name, description, is_manual, is_traditional, sort_order, benefits:[{benefit_key, description}]}"""
+    _validate_project_exists(project_id, user)
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    process_key = _slugify_key(body.get("process_key") or name)
+    description = (body.get("description") or "").strip()[:1500]
+    is_manual = 1 if body.get("is_manual", True) else 0
+    is_traditional = 1 if body.get("is_traditional", True) else 0
+    sort_order = int(body.get("sort_order") or 0)
+    benefits = body.get("benefits") or []
+    if not isinstance(benefits, list):
+        benefits = []
+
+    db = get_db()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        cur = db.execute(
+            "INSERT INTO business_processes(project_id, process_key, name, description, "
+            "is_manual, is_traditional, sort_order, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (project_id, process_key, name, description, is_manual,
+             is_traditional, sort_order, now, now),
+        )
+        pid = cur.lastrowid
+        for b in benefits[:20]:
+            bkey = _slugify_key(b.get("benefit_key") or b.get("name") or "")
+            if not bkey:
+                continue
+            bdesc = (b.get("description") or "").strip()[:500]
+            db.execute(
+                "INSERT INTO process_benefits(process_id, benefit_key, description) VALUES(?,?,?)",
+                (pid, bkey, bdesc),
+            )
+        db.commit()
+        return _load_business_story(db, project_id)
+    finally:
+        db.close()
+
+
+@app.put("/api/business-story/{project_id}/processes/{process_id}", tags=["BusinessStory"])
+def update_business_process(project_id: str, process_id: int, body: dict, user=Depends(current_user)):
+    """Update a process and replace its benefits list."""
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM business_processes WHERE id=? AND project_id=?",
+            (process_id, project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "process not found")
+        now = datetime.now(timezone.utc).isoformat()
+        if "name" in body or "process_key" in body or "description" in body or \
+           "is_manual" in body or "is_traditional" in body or "sort_order" in body:
+            name = (body.get("name") or "").strip()
+            process_key = _slugify_key(body.get("process_key") or name) if (body.get("process_key") or name) else None
+            description = (body.get("description") or "").strip()[:1500]
+            is_manual = 1 if body.get("is_manual", True) else 0
+            is_traditional = 1 if body.get("is_traditional", True) else 0
+            sort_order = int(body.get("sort_order") or 0)
+            db.execute(
+                "UPDATE business_processes SET name=COALESCE(NULLIF(?,''), name), "
+                "process_key=COALESCE(?, process_key), description=?, is_manual=?, "
+                "is_traditional=?, sort_order=?, updated_at=? WHERE id=?",
+                (name, process_key, description, is_manual, is_traditional,
+                 sort_order, now, process_id),
+            )
+        if "benefits" in body and isinstance(body["benefits"], list):
+            db.execute("DELETE FROM process_benefits WHERE process_id=?", (process_id,))
+            for b in body["benefits"][:20]:
+                bkey = _slugify_key(b.get("benefit_key") or b.get("name") or "")
+                if not bkey:
+                    continue
+                bdesc = (b.get("description") or "").strip()[:500]
+                db.execute(
+                    "INSERT INTO process_benefits(process_id, benefit_key, description) VALUES(?,?,?)",
+                    (process_id, bkey, bdesc),
+                )
+        db.commit()
+        return _load_business_story(db, project_id)
+    finally:
+        db.close()
+
+
+@app.delete("/api/business-story/{project_id}/processes/{process_id}", tags=["BusinessStory"])
+def delete_business_process(project_id: str, process_id: int, user=Depends(current_user)):
+    """Delete a process and its benefits."""
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM business_processes WHERE id=? AND project_id=?",
+            (process_id, project_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "process not found")
+        db.execute("DELETE FROM process_benefits WHERE process_id=?", (process_id,))
+        db.execute("DELETE FROM business_processes WHERE id=?", (process_id,))
+        db.commit()
+        return _load_business_story(db, project_id)
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Business Knowledge Engine — R2
+# ══════════════════════════════════════════════════════════════════════════════
+
+import uuid as _uuid_mod
+
+_BS_KIND_VALUES = {
+    # Core
+    "flagship_product", "secondary_product", "hero_ingredient", "key_process",
+    # Identity
+    "founder_fact", "brand_value", "origin_story", "region_claim", "certification",
+    # Customer
+    "customer_result", "testimonial", "common_objection", "faq",
+    # Sales
+    "differentiator", "competitor_contrast", "use_case", "price_anchor",
+    # System / Content
+    "content_anchor", "seo_hook", "other",
+}
+
+def _load_r2_story(db, project_id: str) -> dict:
+    """Return products with their snippets, all active plots, and story_mode."""
+    prof = db.execute(
+        "SELECT story_mode FROM business_profiles WHERE project_id=?", (project_id,)
+    ).fetchone()
+    story_mode = (prof["story_mode"] if prof else "on") or "on"
+
+    products = [
+        dict(r)
+        for r in db.execute(
+            "SELECT * FROM bs_products WHERE project_id=? ORDER BY sort_order, name",
+            (project_id,),
+        ).fetchall()
+    ]
+    for p in products:
+        p["snippets"] = [
+            dict(s)
+            for s in db.execute(
+                "SELECT * FROM bs_snippets WHERE product_id=? AND is_active=1 ORDER BY kind, created_at",
+                (p["id"],),
+            ).fetchall()
+        ]
+
+    # project-level snippets (product_id is empty)
+    project_snippets = [
+        dict(s)
+        for s in db.execute(
+            "SELECT * FROM bs_snippets WHERE project_id=? AND (product_id='' OR product_id IS NULL) AND is_active=1 ORDER BY kind, created_at",
+            (project_id,),
+        ).fetchall()
+    ]
+
+    plots = [
+        dict(r)
+        for r in db.execute(
+            "SELECT * FROM bs_plots WHERE project_id=? AND status != 'deleted' ORDER BY priority, created_at",
+            (project_id,),
+        ).fetchall()
+    ]
+
+    return {
+        "story_mode": story_mode,
+        "products": products,
+        "project_snippets": project_snippets,
+        "plots": plots,
+    }
+
+
+# ── Story-mode toggle ─────────────────────────────────────────────────────────
+
+@app.put("/api/bs/{project_id}/story-mode", tags=["BusinessStoryV2"])
+def toggle_story_mode(project_id: str, body: dict, user=Depends(current_user)):
+    """Set story_mode to 'on' or 'off'."""
+    _validate_project_exists(project_id, user)
+    mode = body.get("story_mode", "on")
+    if mode not in ("on", "off"):
+        raise HTTPException(400, "story_mode must be 'on' or 'off'")
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO business_profiles(project_id, story_mode) VALUES(?,?) "
+            "ON CONFLICT(project_id) DO UPDATE SET story_mode=excluded.story_mode, updated_at=?",
+            (project_id, mode, datetime.now(timezone.utc).isoformat()),
+        )
+        db.commit()
+        return {"story_mode": mode}
+    finally:
+        db.close()
+
+
+# ── Products ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/bs/{project_id}/products", tags=["BusinessStoryV2"])
+def list_bs_products(project_id: str, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT * FROM bs_products WHERE project_id=? ORDER BY sort_order, name",
+            (project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+@app.post("/api/bs/{project_id}/products", tags=["BusinessStoryV2"])
+def create_bs_product(project_id: str, body: dict, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    name = (body.get("name") or "").strip()[:200]
+    if not name:
+        raise HTTPException(400, "name is required")
+    db = get_db()
+    try:
+        pid = str(_uuid_mod.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            "INSERT INTO bs_products(id, project_id, name, type, category, tagline, sort_order, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                pid, project_id, name,
+                (body.get("type") or "product").strip()[:50],
+                (body.get("category") or "").strip()[:100],
+                (body.get("tagline") or "").strip()[:300],
+                int(body.get("sort_order") or 0),
+                now, now,
+            ),
+        )
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_products WHERE id=?", (pid,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.put("/api/bs/{project_id}/products/{product_id}", tags=["BusinessStoryV2"])
+def update_bs_product(project_id: str, product_id: str, body: dict, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_products WHERE id=? AND project_id=?", (product_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "product not found")
+        allowed = ("name", "type", "category", "tagline", "sort_order", "is_active")
+        sets = []
+        vals = []
+        for field in allowed:
+            if field in body:
+                sets.append(f"{field}=?")
+                vals.append(body[field])
+        if not sets:
+            return dict(db.execute("SELECT * FROM bs_products WHERE id=?", (product_id,)).fetchone())
+        sets.append("updated_at=?")
+        vals.append(datetime.now(timezone.utc).isoformat())
+        vals.append(product_id)
+        db.execute(f"UPDATE bs_products SET {', '.join(sets)} WHERE id=?", vals)
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_products WHERE id=?", (product_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.delete("/api/bs/{project_id}/products/{product_id}", tags=["BusinessStoryV2"])
+def delete_bs_product(project_id: str, product_id: str, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_products WHERE id=? AND project_id=?", (product_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "product not found")
+        db.execute("UPDATE bs_products SET is_active=0, updated_at=? WHERE id=?",
+                   (datetime.now(timezone.utc).isoformat(), product_id))
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+# ── Snippets ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/bs/{project_id}/snippets", tags=["BusinessStoryV2"])
+def list_bs_snippets(project_id: str, product_id: str = None, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        if product_id:
+            rows = db.execute(
+                "SELECT * FROM bs_snippets WHERE project_id=? AND product_id=? AND is_active=1 ORDER BY kind, created_at",
+                (project_id, product_id),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM bs_snippets WHERE project_id=? AND is_active=1 ORDER BY kind, created_at",
+                (project_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+@app.post("/api/bs/{project_id}/snippets", tags=["BusinessStoryV2"])
+def create_bs_snippet(project_id: str, body: dict, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    kind = (body.get("kind") or "other").strip()
+    if kind not in _BS_KIND_VALUES:
+        kind = "other"
+    db = get_db()
+    try:
+        sid = str(_uuid_mod.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        import json as _json
+        tags_raw = body.get("tags")
+        tags_str = _json.dumps(tags_raw) if isinstance(tags_raw, list) else "[]"
+        db.execute(
+            "INSERT INTO bs_snippets(id, product_id, project_id, kind, text, tags, confidence, source, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                sid,
+                (body.get("product_id") or "").strip()[:100],
+                project_id, kind,
+                text[:2000], tags_str,
+                (body.get("confidence") or "verified").strip()[:50],
+                (body.get("source") or "founder_input").strip()[:50],
+                now, now,
+            ),
+        )
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_snippets WHERE id=?", (sid,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.put("/api/bs/{project_id}/snippets/{snippet_id}", tags=["BusinessStoryV2"])
+def update_bs_snippet(project_id: str, snippet_id: str, body: dict, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_snippets WHERE id=? AND project_id=?", (snippet_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "snippet not found")
+        allowed = ("text", "kind", "tags", "confidence", "source", "product_id", "is_active")
+        import json as _json
+        sets = []
+        vals = []
+        for field in allowed:
+            if field in body:
+                val = body[field]
+                if field == "text":
+                    val = str(val).strip()[:2000]
+                elif field == "kind":
+                    val = str(val).strip()
+                    if val not in _BS_KIND_VALUES:
+                        val = "other"
+                elif field == "tags" and isinstance(val, list):
+                    val = _json.dumps(val)
+                sets.append(f"{field}=?")
+                vals.append(val)
+        if not sets:
+            return dict(db.execute("SELECT * FROM bs_snippets WHERE id=?", (snippet_id,)).fetchone())
+        sets.append("updated_at=?")
+        vals.append(datetime.now(timezone.utc).isoformat())
+        vals.append(snippet_id)
+        db.execute(f"UPDATE bs_snippets SET {', '.join(sets)} WHERE id=?", vals)
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_snippets WHERE id=?", (snippet_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.delete("/api/bs/{project_id}/snippets/{snippet_id}", tags=["BusinessStoryV2"])
+def delete_bs_snippet(project_id: str, snippet_id: str, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_snippets WHERE id=? AND project_id=?", (snippet_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "snippet not found")
+        db.execute("UPDATE bs_snippets SET is_active=0, updated_at=? WHERE id=?",
+                   (datetime.now(timezone.utc).isoformat(), snippet_id))
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+# ── Snippet AI typeahead ──────────────────────────────────────────────────────
+
+@app.post("/api/bs/{project_id}/snippets/typeahead", tags=["BusinessStoryV2"])
+def bs_snippet_typeahead(project_id: str, body: dict, user=Depends(current_user)):
+    """Given a kind + partial text, ask AI to suggest 3–5 complete snippet ideas."""
+    _validate_project_exists(project_id, user)
+    kind = (body.get("kind") or "other").strip()
+    partial = (body.get("partial") or "").strip()[:500]
+    product_name = (body.get("product_name") or "").strip()[:200]
+
+    import json as _json
+
+    db = get_db()
+    try:
+        prof = db.execute(
+            "SELECT brand_name, brand_voice FROM business_profiles WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        brand = (prof["brand_name"] if prof else "") or "this brand"
+        voice = (prof["brand_voice"] if prof else "") or "friendly"
+
+        keys = _get_provider_keys_for_rotation(db, "gemini")
+        if not keys:
+            return {"suggestions": []}
+
+        prompt = (
+            f"You are a brand knowledge assistant for {brand} (voice: {voice}).\n"
+            f"Generate 4 short, specific knowledge snippets of kind '{kind}'"
+            + (f" for product '{product_name}'" if product_name else "")
+            + (f". The founder typed: \"{partial}\"" if partial else ".")
+            + "\n\nEach snippet must be 1–2 sentences, factual, and directly useful for SEO content.\n"
+            "Respond with a JSON array of strings only. No keys, no explanations.\n"
+            "Example: [\"We hand-sort every batch.\", \"Sourced from...\"]\n"
+        )
+
+        key_info = keys[0]
+        api_key = _decrypt(key_info["key"])
+        model_name = key_info.get("model") or "gemini-2.0-flash"
+
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.7, "max_output_tokens": 512},
+        )
+        raw = (resp.text or "").strip()
+        # strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        suggestions = _json.loads(raw)
+        if not isinstance(suggestions, list):
+            suggestions = []
+        return {"suggestions": suggestions[:6]}
+    except Exception:
+        return {"suggestions": []}
+    finally:
+        db.close()
+
+
+# ── Plots ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/bs/{project_id}/plots", tags=["BusinessStoryV2"])
+def list_bs_plots(project_id: str, status: str = None, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        if status:
+            rows = db.execute(
+                "SELECT * FROM bs_plots WHERE project_id=? AND status=? ORDER BY priority, created_at",
+                (project_id, status),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM bs_plots WHERE project_id=? AND status != 'deleted' ORDER BY priority, created_at",
+                (project_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        db.close()
+
+
+@app.post("/api/bs/{project_id}/plots", tags=["BusinessStoryV2"])
+def create_bs_plot(project_id: str, body: dict, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    title = (body.get("title") or "").strip()[:300]
+    if not title:
+        raise HTTPException(400, "title is required")
+    db = get_db()
+    try:
+        import json as _json
+        pid = str(_uuid_mod.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        snippet_ids = body.get("snippet_ids")
+        conflicts = body.get("conflicts_with")
+        db.execute(
+            "INSERT INTO bs_plots(id, product_id, project_id, title, thesis, snippet_ids, "
+            "plot_type, conflicts_with, priority, status, continuity_notes, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                pid,
+                (body.get("product_id") or "").strip()[:100],
+                project_id, title,
+                (body.get("thesis") or "").strip()[:1000],
+                _json.dumps(snippet_ids) if isinstance(snippet_ids, list) else "[]",
+                (body.get("plot_type") or "supporting").strip()[:50],
+                _json.dumps(conflicts) if isinstance(conflicts, list) else "[]",
+                int(body.get("priority") or 3),
+                "active",
+                (body.get("continuity_notes") or "").strip()[:1000],
+                now, now,
+            ),
+        )
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_plots WHERE id=?", (pid,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.put("/api/bs/{project_id}/plots/{plot_id}", tags=["BusinessStoryV2"])
+def update_bs_plot(project_id: str, plot_id: str, body: dict, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_plots WHERE id=? AND project_id=?", (plot_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "plot not found")
+        import json as _json
+        allowed = ("title", "thesis", "snippet_ids", "plot_type", "conflicts_with",
+                   "priority", "continuity_notes", "product_id")
+        sets = []
+        vals = []
+        for field in allowed:
+            if field in body:
+                val = body[field]
+                if field in ("snippet_ids", "conflicts_with") and isinstance(val, list):
+                    val = _json.dumps(val)
+                sets.append(f"{field}=?")
+                vals.append(val)
+        if not sets:
+            return dict(db.execute("SELECT * FROM bs_plots WHERE id=?", (plot_id,)).fetchone())
+        sets.append("updated_at=?")
+        vals.append(datetime.now(timezone.utc).isoformat())
+        vals.append(plot_id)
+        db.execute(f"UPDATE bs_plots SET {', '.join(sets)} WHERE id=?", vals)
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_plots WHERE id=?", (plot_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.delete("/api/bs/{project_id}/plots/{plot_id}", tags=["BusinessStoryV2"])
+def delete_bs_plot(project_id: str, plot_id: str, user=Depends(current_user)):
+    """Soft-delete a plot (status='deleted'). Preserves usage history."""
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_plots WHERE id=? AND project_id=?", (plot_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "plot not found")
+        db.execute("UPDATE bs_plots SET status='deleted', updated_at=? WHERE id=?",
+                   (datetime.now(timezone.utc).isoformat(), plot_id))
+        db.commit()
+        return {"ok": True}
+    finally:
+        db.close()
+
+
+@app.post("/api/bs/{project_id}/plots/{plot_id}/activate", tags=["BusinessStoryV2"])
+def activate_bs_plot(project_id: str, plot_id: str, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_plots WHERE id=? AND project_id=?", (plot_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "plot not found")
+        db.execute("UPDATE bs_plots SET status='active', updated_at=? WHERE id=?",
+                   (datetime.now(timezone.utc).isoformat(), plot_id))
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_plots WHERE id=?", (plot_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.post("/api/bs/{project_id}/plots/{plot_id}/deactivate", tags=["BusinessStoryV2"])
+def deactivate_bs_plot(project_id: str, plot_id: str, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        row = db.execute(
+            "SELECT id FROM bs_plots WHERE id=? AND project_id=?", (plot_id, project_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "plot not found")
+        db.execute("UPDATE bs_plots SET status='inactive', updated_at=? WHERE id=?",
+                   (datetime.now(timezone.utc).isoformat(), plot_id))
+        db.commit()
+        return dict(db.execute("SELECT * FROM bs_plots WHERE id=?", (plot_id,)).fetchone())
+    finally:
+        db.close()
+
+
+@app.post("/api/bs/{project_id}/plots/brainstorm", tags=["BusinessStoryV2"])
+def brainstorm_bs_plots(project_id: str, body: dict, user=Depends(current_user)):
+    """AI brainstorms 3–5 plot ideas based on existing snippets."""
+    _validate_project_exists(project_id, user)
+    import json as _json
+
+    db = get_db()
+    try:
+        prof = db.execute(
+            "SELECT brand_name, brand_voice FROM business_profiles WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        brand = (prof["brand_name"] if prof else "") or "this brand"
+        voice = (prof["brand_voice"] if prof else "") or "friendly"
+
+        snippets = db.execute(
+            "SELECT kind, text FROM bs_snippets WHERE project_id=? AND is_active=1 LIMIT 30",
+            (project_id,),
+        ).fetchall()
+        snippet_lines = "\n".join(f"- [{r['kind']}] {r['text']}" for r in snippets)
+        if not snippet_lines:
+            snippet_lines = "(no snippets yet)"
+
+        product_id = (body.get("product_id") or "").strip()
+        product_name = ""
+        if product_id:
+            pr = db.execute("SELECT name FROM bs_products WHERE id=?", (product_id,)).fetchone()
+            product_name = pr["name"] if pr else ""
+
+        keys = _get_provider_keys_for_rotation(db, "gemini")
+        if not keys:
+            return {"plots": []}
+
+        prompt = (
+            f"You are a brand storytelling strategist for {brand} (voice: {voice}).\n"
+            + (f"Focus on product: {product_name}\n" if product_name else "")
+            + f"Existing knowledge snippets:\n{snippet_lines}\n\n"
+            "Generate 4 distinct narrative plot ideas that could weave these facts into "
+            "compelling SEO blog content. Each plot should have a title and a thesis (1–2 sentences).\n"
+            "Respond with a JSON array of objects: [{\"title\": \"...\", \"thesis\": \"...\", \"plot_type\": \"supporting|hero|contrast\"}]\n"
+            "No extra keys. No explanations. Only the JSON array.\n"
+        )
+
+        key_info = keys[0]
+        api_key = _decrypt(key_info["key"])
+        model_name = key_info.get("model") or "gemini-2.0-flash"
+
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.8, "max_output_tokens": 1024},
+        )
+        raw = (resp.text or "").strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        plots = _json.loads(raw)
+        if not isinstance(plots, list):
+            plots = []
+        return {"plots": plots[:6]}
+    except Exception:
+        return {"plots": []}
+    finally:
+        db.close()
+
+
+# ── R2 full story loader ──────────────────────────────────────────────────────
+
+@app.get("/api/bs/{project_id}/full", tags=["BusinessStoryV2"])
+def get_r2_full_story(project_id: str, user=Depends(current_user)):
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        return _load_r2_story(db, project_id)
+    finally:
+        db.close()
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  STRATEGY V2 — Blueprint Engine                                         ║
+# ║  Intent → Angles → Blueprints → QA Score → Content Assets              ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+import asyncio as _asyncio
+import json as _json_sv2
+import time as _time_sv2
+from typing import List as _List
+
+from pydantic import BaseModel as _BM
+
+from engines.strategy_v2.pipeline import run_pipeline as _sv2_run_pipeline
+
+
+class _StrategyV2GenBody(_BM):
+    keywords: _List[str]
+    session_id: str = ""
+
+
+@app.post("/api/strategy-v2/{project_id}/generate", tags=["StrategyV2"])
+async def strategy_v2_generate(project_id: str, body: _StrategyV2GenBody,
+                                user=Depends(current_user)):
+    """
+    SSE stream: Generate content blueprints for 1-10 keywords.
+    Streams progress events then final blueprint data.
+
+    Stream events (text/event-stream):
+      data: {"step": "classify", "keyword": "...", "intent": "..."}
+      data: {"step": "blueprint_N", "title": "...", "status": "done"}
+      data: {"step": "qa", "count": N}
+      data: {"step": "done", "keyword": "...", "blueprints": [...]}
+      data: {"step": "all_done", "total_blueprints": N}
+    """
+    _validate_project_exists(project_id, user)
+    keywords = [k.strip() for k in body.keywords if k.strip()][:10]
+    if not keywords:
+        raise HTTPException(status_code=400, detail="At least one keyword required")
+
+    session_id = body.session_id or ""
+
+    async def _stream():
+        all_results = []
+        for kw in keywords:
+            # Run blocking pipeline in thread pool
+            loop = _asyncio.get_event_loop()
+            progress_events = []
+
+            def _cb(ev):
+                progress_events.append(ev)
+
+            def _run_sync():
+                db = get_db()
+                try:
+                    return _sv2_run_pipeline(
+                        kw, project_id, db,
+                        session_id=session_id or None,
+                        on_progress=_cb,
+                    )
+                finally:
+                    db.close()
+
+            results = await loop.run_in_executor(None, _run_sync)
+
+            # Flush collected progress events
+            for ev in progress_events:
+                yield f"data: {_json_sv2.dumps(ev)}\n\n"
+
+            all_results.extend(results)
+
+            # Emit final blueprints for this keyword
+            yield f"data: {_json_sv2.dumps({'step': 'keyword_done', 'keyword': kw, 'blueprints': results})}\n\n"
+
+        yield f"data: {_json_sv2.dumps({'step': 'all_done', 'total_blueprints': len(all_results)})}\n\n"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/strategy-v2/{project_id}/blueprints", tags=["StrategyV2"])
+def strategy_v2_list_blueprints(project_id: str, session_id: str = "",
+                                 keyword: str = "", min_score: float = 0,
+                                 limit: int = 50, user=Depends(current_user)):
+    """List content blueprints for a project, ordered by QA score descending."""
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        params = [project_id]
+        where = ["project_id = ?"]
+        if session_id:
+            where.append("session_id = ?")
+            params.append(session_id)
+        if keyword:
+            where.append("keyword LIKE ?")
+            params.append(f"%{keyword}%")
+        if min_score > 0:
+            where.append("qa_overall_score >= ?")
+            params.append(min_score)
+        params.append(min(limit, 200))
+        sql = f"""
+            SELECT id, keyword, intent, angle_type, title, hook,
+                   sections_json, story, cta,
+                   qa_seo_score, qa_aeo_score, qa_conversion_score,
+                   qa_depth_score, qa_overall_score,
+                   qa_gaps_json, qa_fixes_json,
+                   status, content_article_id, session_id, created_at
+            FROM strategy_v2_blueprints
+            WHERE {' AND '.join(where)}
+            ORDER BY qa_overall_score DESC, created_at DESC
+            LIMIT ?
+        """
+        cur = db.execute(sql, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        for r in rows:
+            try:
+                r["sections"] = _json_sv2.loads(r.pop("sections_json", "[]"))
+            except Exception:
+                r["sections"] = []
+            try:
+                r["qa_gaps"] = _json_sv2.loads(r.pop("qa_gaps_json", "[]"))
+            except Exception:
+                r["qa_gaps"] = []
+            try:
+                r["qa_fixes"] = _json_sv2.loads(r.pop("qa_fixes_json", "[]"))
+            except Exception:
+                r["qa_fixes"] = []
+        return rows
+    finally:
+        db.close()
+
+
+@app.get("/api/strategy-v2/{project_id}/blueprints/{blueprint_id}", tags=["StrategyV2"])
+def strategy_v2_get_blueprint(project_id: str, blueprint_id: int,
+                               user=Depends(current_user)):
+    """Get a single content blueprint by ID."""
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        cur = db.execute("""
+            SELECT * FROM strategy_v2_blueprints
+            WHERE id = ? AND project_id = ?
+        """, (blueprint_id, project_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+        result = dict(row)
+        for field in ("sections_json", "qa_gaps_json", "qa_fixes_json"):
+            key = field.replace("_json", "s").replace("sections", "sections")
+            try:
+                val = _json_sv2.loads(result.pop(field, "[]"))
+            except Exception:
+                val = []
+            nice_key = field.replace("_json", "").replace("qa_", "qa_")
+            result[field.replace("_json", "")] = val
+        return result
+    finally:
+        db.close()
+
+
+class _ToContentBody(_BM):
+    word_count: int = 2200
+    page_type: str = "article"
+    ai_routing_preset: str = "A"
+
+
+@app.post("/api/strategy-v2/{project_id}/blueprints/{blueprint_id}/to-content",
+          tags=["StrategyV2"])
+def strategy_v2_to_content(project_id: str, blueprint_id: int,
+                            body: _ToContentBody,
+                            user=Depends(current_user)):
+    """
+    Send a blueprint to the content generation pipeline.
+    Extracts title, keyword, intent, and sections into a content job.
+    Returns {article_id, status: 'generating'}.
+    """
+    _validate_project_exists(project_id, user)
+    db = get_db()
+    try:
+        cur = db.execute("""
+            SELECT keyword, intent, angle_type, title, hook, sections_json
+            FROM strategy_v2_blueprints
+            WHERE id = ? AND project_id = ?
+        """, (blueprint_id, project_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Blueprint not found")
+        bp = dict(row)
+
+        try:
+            sections = _json_sv2.loads(bp.get("sections_json", "[]"))
+        except Exception:
+            sections = []
+
+        # Build article ID and create content_articles record
+        article_id = "art_" + _uuid_hex()
+        keyword = bp.get("keyword", "")
+        title = bp.get("title", keyword)
+
+        db.execute("""
+            INSERT INTO content_articles
+            (article_id, project_id, keyword, title, status, page_type, page_inputs,
+             meta_title, created_at, updated_at)
+            VALUES (?,?,?,?,'generating',?,
+                    ?,?,datetime('now'),datetime('now'))
+        """, (
+            article_id, project_id, keyword, title,
+            body.page_type,
+            _json_sv2.dumps({"blueprint_sections": sections,
+                             "blueprint_angle": bp.get("angle_type", ""),
+                             "blueprint_hook": bp.get("hook", "")}),
+            title[:60],
+        ))
+        db.commit()
+
+        # Mark blueprint as sent
+        db.execute("""
+            UPDATE strategy_v2_blueprints
+            SET status = 'sent_to_content', content_article_id = ?
+            WHERE id = ?
+        """, (article_id, blueprint_id))
+        db.commit()
+
+        # Kick off content generation in background
+        import threading as _threading
+        import asyncio as _asyncio
+        from types import SimpleNamespace as _SN
+
+        _body_ns = _SN(
+            project_id=project_id,
+            keyword=keyword,
+            title=title,
+            intent=bp.get("intent", "informational"),
+            word_count=body.word_count,
+            page_type=body.page_type,
+            page_inputs={
+                "blueprint_angle": bp.get("angle_type", ""),
+                "blueprint_hook": bp.get("hook", ""),
+                "blueprint_sections": sections,
+            },
+            supporting_keywords=[],
+            product_links=[],
+            target_audience="",
+            content_type="blog",
+            research_ai="auto",
+            pipeline_mode="standard",
+            step_mode="auto",
+            ai_routing=None,
+            ai_routing_preset=body.ai_routing_preset,
+        )
+
+        def _gen():
+            try:
+                _asyncio.run(_gen_article(article_id, _body_ns, step_mode="auto"))
+            except Exception as ex:
+                log.error(f"[strategy_v2_to_content] gen error: {ex}")
+                try:
+                    _db_err = get_db()
+                    _db_err.execute(
+                        "UPDATE content_articles SET status='error', error_message=? WHERE article_id=?",
+                        (str(ex), article_id)
+                    )
+                    _db_err.commit()
+                    _db_err.close()
+                except Exception:
+                    pass
+
+        _threading.Thread(target=_gen, daemon=True).start()
+        return {"article_id": article_id, "status": "generating", "project_id": project_id}
+    finally:
+        db.close()
+
+
+def _uuid_hex():
+    import uuid
+    return uuid.uuid4().hex[:8]
+

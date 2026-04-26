@@ -28,12 +28,21 @@ STYLE_PROMPTS = {
     "casual": "Write like a blog post from someone who genuinely cares about the topic. Include personal observations.",
 }
 
+SECTION_FORMATS = {
+    "qa": "\nFORMAT HINT: Structure this section as 2-3 short Q&A pairs. Bold each question.",
+    "bullets": "\nFORMAT HINT: Use a short intro sentence then 3-5 tight bullet points. Keep bullets under 20 words each.",
+    "story": "\nFORMAT HINT: Open with a 1-sentence anecdote or real-world scenario before the main explanation.",
+    "comparison": "\nFORMAT HINT: Present information as a comparison (X vs Y, before vs after, or option A vs B).",
+    "stat_lead": "\nFORMAT HINT: Open with a specific number, stat, or concrete detail. Then explain what it means.",
+}
+_FORMAT_KEYS = list(SECTION_FORMATS.keys())
+
 # ── Master rewrite prompt (production-grade) ──────────────────────────────────
 _MASTER_REWRITE_PROMPT = """You are a senior human editor at a top publication. Rewrite this section so it reads like a real human expert wrote it — NOT like AI content, NOT like SEO filler.
 
 KEYWORD: {keyword}
 TONE: {tone_instruction}
-STYLE: {style_instruction}{persona_text}
+STYLE: {style_instruction}{persona_text}{format_text}
 
 ARTICLE OUTLINE (other sections — do NOT repeat their ideas):
 {outline_text}
@@ -53,7 +62,7 @@ HUMAN VOICE (most important):
 - Write like a real person with opinions, not a content writer following a template
 - Use contractions (don't, it's, won't, that's)
 - Start some sentences with "And", "But", "So", "Look,"
-- Include slight opinion: "honestly", "the real issue is", "what most people miss"
+- Include slight opinion: "honestly", "what most people miss", "here's the trade-off"
 - Use specific details: real prices, real place names, real numbers — not vague claims
 - Short sentences for punch. Long sentences for flow. Never 3 same-length sentences in a row.
 - Every paragraph MUST differ in length (1-4 sentences, varied)
@@ -67,9 +76,12 @@ BANNED (instant fail):
 - Any phrase that sounds like a template filler
 
 KEEP THESE (they score for E-E-A-T):
-- "we tested/we found/in our experience/our team discovered" — KEEP these if they describe a specific observation or result
+- Third-person proof markers that are safe to publish: "in practice", "case study", "real-world example", "from a buyer perspective"
 - Authority phrases with named sources (e.g., "according to the USDA", "NIH research shows")
-- Experience signals paired with specific details
+- Concrete operational details: grades, specs, tolerances, audit steps, lab methods (only if verifiable)
+
+AVOID UNVERIFIABLE FIRST-PERSON:
+- Do NOT introduce claims like "we tested", "in our experience", "we found", "hands-on" unless the publisher can genuinely substantiate them.
 
 STRUCTURE:
 - Keep ALL HTML tags, headings, and links exactly as-is
@@ -115,6 +127,7 @@ def build_humanize_prompt(
     ai_signals: List[str] = None,
     links_to_preserve: List[Dict] = None,
     outline: List[str] = None,
+    section_format: str = "",
 ) -> str:
     """Build the master rewrite prompt for humanizing a single section."""
 
@@ -135,6 +148,8 @@ def build_humanize_prompt(
     if persona:
         persona_text = f"\nWRITE AS: {persona}"
 
+    format_text = SECTION_FORMATS.get(section_format, "")
+
     outline_text = "(No outline available)"
     if outline:
         outline_text = "\n".join(f"- {h}" for h in outline[:20])
@@ -146,6 +161,7 @@ def build_humanize_prompt(
         tone_instruction=tone_instruction,
         style_instruction=style_instruction,
         persona_text=persona_text,
+        format_text=format_text,
         outline_text=outline_text,
         signal_text=signal_text,
         link_text=link_text,
@@ -181,11 +197,13 @@ def humanize_section(
     links: List[Dict] = None,
     outline: List[str] = None,
     ai_router=None,
+    section_format: str = "",
 ) -> Dict:
     """Humanize a single HTML section using the AI router.
 
     Args:
         outline: List of all section headings in the article (for global context)
+        section_format: Optional format hint key (qa/bullets/story/comparison/stat_lead)
 
     Returns: {success, html, provider, tokens, error}
     """
@@ -193,7 +211,8 @@ def humanize_section(
         return {"success": True, "html": section_html, "provider": "none", "tokens": 0}
 
     prompt = build_humanize_prompt(
-        section_html, keyword, tone, style, persona, ai_signals, links, outline
+        section_html, keyword, tone, style, persona, ai_signals, links, outline,
+        section_format=section_format,
     )
 
     try:
@@ -203,6 +222,7 @@ def humanize_section(
 
         text = ""
         tokens = 0
+        import time as _time
         # Retry with backoff when all providers fail (Groq rate-limited, Ollama down, Gemini exhausted)
         for _attempt in range(2):
             text, tokens = ai_router.call_with_tokens(
@@ -213,7 +233,6 @@ def humanize_section(
             if text.strip():
                 break
             # Brief wait before retry — provider may recover
-            import time as _time
             wait = 1 * (_attempt + 1)  # 1s, 2s
             log.info(f"[humanizer] All providers returned empty (attempt {_attempt+1}/2) — waiting {wait}s for retry")
             _time.sleep(wait)

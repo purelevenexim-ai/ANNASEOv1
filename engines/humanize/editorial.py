@@ -155,8 +155,9 @@ def detect_redundancy(sections: List[Dict], keyword: str = "") -> Dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Fake authority patterns — vague claims without named sources
-# NOTE: Experience phrases (we tested, in our experience, we found) are ALLOWED
-# for E-E-A-T scoring (R36). Only flag truly unsourced vague citations.
+# NOTE: First-person experience phrases ("we tested", "in our experience") are NOT
+# required for scoring and can be risky if unverifiable. Only allow them when the
+# publisher can substantiate the claim; otherwise prefer third-person proof.
 _FAKE_AUTHORITY = [
     (r"according\s+to\s+recent\s+(?:research|studies|data)", "Vague citation: name the source or remove"),
     (r"(?<!\w\s)research\s+shows\s+that", "Vague citation: 'research shows' — cite specific research"),
@@ -379,8 +380,8 @@ KEYWORD: {keyword}
 {article_html}"""
 
 
-_CHUNK_CHAR_LIMIT = 10_000  # safe per-chunk prompt payload
-_CHUNK_TRIGGER = 12_000    # switch to chunked mode above this size
+_CHUNK_CHAR_LIMIT = 3_500   # safe per-chunk payload — Groq llama-3.1-8b-instant free tier ~6K TPM
+_CHUNK_TRIGGER = 4_000     # trigger chunked mode early to keep each Groq call safely under budget
 
 
 def _split_html_sections(html: str) -> list:
@@ -412,8 +413,8 @@ def build_editorial_prompt(
             lines.append(f"[{severity}] {issue['detail']}")
         issues_text = "\n".join(lines)
 
-    # Truncate article for LLM context limits
-    article_html = html[:16000]
+    # Truncate chunk to safe LLM payload — smaller chunks = Groq-friendly
+    article_html = html[:3500]
 
     return _EDITORIAL_REWRITE_PROMPT.format(
         keyword=keyword,
@@ -497,6 +498,7 @@ def _editorial_rewrite_single(
             prompt,
             system="You are a senior publication editor. Return only improved HTML.",
             temperature=0.5,
+            skip_providers=["ollama"],  # Ollama is too slow for HTML editing (~10 min/chunk)
         )
         if not text or not text.strip():
             return {"success": False, "html": html, "tokens": 0, "error": "Empty response from editorial rewrite"}

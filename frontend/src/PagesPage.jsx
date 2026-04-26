@@ -30,13 +30,9 @@ const CATALOG = [
     endpoint: "/api/health", projectRequired: false },
 
   // ── Research
-  { id: "kw2",          label: "Keywords v2",        icon: "🔑", cat: "Research",
-    desc: "20-phase keyword universe generation (P1–P20)",
-    endpoint: "/api/kw2/{p}/sessions/list", projectRequired: true },
-
-  { id: "keywords",     label: "Keywords (legacy)",  icon: "🗝️", cat: "Research",
-    desc: "Original keyword input and workflow pages",
-    endpoint: null, projectRequired: false },
+  { id: "kw3",          label: "Keywords V3",       icon: "✨", cat: "Research",
+    desc: "Intelligent keyword research — crawl, cluster, strategy",
+    endpoint: "/api/kw3/{p}/sessions", projectRequired: true },
 
   { id: "strategy-hub", label: "Strategy Hub",       icon: "🧠", cat: "Research",
     desc: "Keyword sessions, strategy briefs, audience intelligence",

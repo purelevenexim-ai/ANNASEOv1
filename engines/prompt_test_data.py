@@ -68,7 +68,7 @@ CONTENT_SAMPLE_DATA = {
         "customer_context": _CUSTOMER_CONTEXT,
         "_meta": {
             "keyword": "best sourdough bread Austin",
-            "failed_rules": "R20 (need more authority phrases), R36 (need experience signals), R26 (missing Wikipedia link)",
+            "failed_rules": "R20 (need more authority phrases), R36 (need real-world proof signals), R26 (missing Wikipedia link)",
         },
     },
 
@@ -83,7 +83,7 @@ CONTENT_SAMPLE_DATA = {
         "_meta": {
             "keyword": "best sourdough bread Austin",
             "current_score": "82%",
-            "failed_rules": "R20 (authority signals: 3/5), R36 (experience: 1/3), R26 (Wikipedia: 0/1)",
+            "failed_rules": "R20 (authority signals: 3/5), R36 (real-world proof: 1/3), R26 (Wikipedia: 0/1)",
         },
     },
 }

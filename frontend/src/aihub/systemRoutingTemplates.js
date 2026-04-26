@@ -116,6 +116,45 @@ export const SYSTEM_TEMPLATES = [
       redevelop:    { first: "ollama_remote",  second: "groq",           third: "ollama" },
     },
   },
+
+  {
+    id: "pro_v1_claude",
+    name: "🥇 Pro v1 (Claude Draft)",
+    description: "Claude Sonnet 4 for draft/recovery (E-E-A-T authority writing) + Gemini Flash for all other steps. Targets 92%+ by closing the E-E-A-T gap.",
+    version: 1,
+    system: true,
+    steps: {
+      research:     { first: "or_gemini_flash", second: "or_deepseek",     third: "or_gemini_lite" },
+      structure:    { first: "or_gemini_flash", second: "or_deepseek",     third: "or_gemini_lite" },
+      verify:       { first: "or_gemini_flash", second: "or_gemini_lite",  third: "skip" },
+      links:        { first: "or_deepseek",     second: "or_gemini_lite",  third: "skip" },
+      references:   { first: "or_deepseek",     second: "or_gemini_lite",  third: "skip" },
+      draft:        { first: "or_claude",       second: "or_gemini_flash", third: "or_deepseek" },
+      recovery:     { first: "or_claude",       second: "or_gemini_flash", third: "or_deepseek" },
+      humanize:     { first: "or_gemini_flash", second: "or_deepseek",     third: "or_gemini_lite" },
+      quality_loop: { first: "or_gemini_flash", second: "or_deepseek",     third: "or_gemini_lite" },
+      redevelop:    { first: "or_gemini_flash", second: "or_deepseek",     third: "or_gemini_lite" },
+    },
+  },
+  {
+    id: "pro_balanced",
+    name: "🏆 Pro (Best-of-All)",
+    description: "Apr 2026 A/B tested — Gemini Flash for research/structure, DeepSeek for links, quality loop targets 90%+.",
+    version: 2,
+    system: true,
+    steps: {
+      research:     { first: "or_gemini_flash", second: "or_gemini_lite", third: "or_deepseek" },
+      structure:    { first: "or_gemini_flash", second: "or_deepseek",    third: "or_gemini_lite" },
+      verify:       { first: "or_gemini_flash", second: "or_gemini_lite", third: "skip" },
+      links:        { first: "or_deepseek",     second: "or_gemini_lite", third: "skip" },
+      references:   { first: "or_deepseek",     second: "or_gemini_lite", third: "skip" },
+      draft:        { first: "or_gemini_flash", second: "or_deepseek",    third: "or_gemini_lite" },
+      recovery:     { first: "or_gemini_flash", second: "or_deepseek",    third: "or_gemini_lite" },
+      humanize:     { first: "or_gemini_flash", second: "or_deepseek",    third: "or_gemini_lite" },
+      quality_loop: { first: "or_gemini_flash", second: "or_deepseek",    third: "or_gemini_lite" },
+      redevelop:    { first: "or_gemini_flash", second: "or_deepseek",    third: "or_gemini_lite" },
+    },
+  },
 ]
 
 export const DEFAULT_TEMPLATE_ID = "budget_balanced"
